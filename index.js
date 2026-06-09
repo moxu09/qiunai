@@ -2307,14 +2307,12 @@ async function addUserItem(
   itemName,
   rarity = null,
   description = null,
-  itemType = 'shop',
-  guildId = process.env.GUILD_ID
+  itemType = 'shop'
 ) {
   const { error } = await supabase
     .from('user_items')
     .insert([
       {
-        guild_id: guildId,
         user_id: userId,
         item_name: itemName,
         rarity,
@@ -2334,11 +2332,10 @@ async function addUserItem(
   }
 }
 // 讀取玩家商品
-async function getUserItems(userId, guildId = process.env.GUILD_ID) {
+async function getUserItems(userId) {
   const { data, error } = await supabase
     .from('user_items')
     .select('*')
-    .eq('guild_id', guildId)
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
 
@@ -3452,6 +3449,57 @@ const commands = [
       option.setName('金額')
         .setDescription('輸入金額')
         .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName('發送優惠券')
+    .setDescription('發送優惠券給指定玩家')
+    .addUserOption(option =>
+      option
+        .setName('玩家')
+        .setDescription('選擇要發送優惠券的玩家')
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName('優惠券')
+        .setDescription('選擇要發送的優惠券')
+        .setRequired(true)
+        .addChoices(
+          {
+            name: '95折券',
+            value: '95折券'
+          },
+          {
+            name: '9折券',
+            value: '9折券'
+          },
+          {
+            name: '8折折價券',
+            value: '8折折價券'
+          },
+          {
+            name: '7折折價券',
+            value: '7折折價券'
+          },
+          {
+            name: '6折折價券',
+            value: '6折折價券'
+          }
+        )
+    )
+    .addIntegerOption(option =>
+      option
+        .setName('數量')
+        .setDescription('要發送幾張')
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(20)
+    )
+    .addStringOption(option =>
+      option
+        .setName('備註')
+        .setDescription('可不填，例如：活動補發、VIP福利、客服補償')
+        .setRequired(false)
     ),
   new SlashCommandBuilder()
     .setName('加時')
@@ -5056,6 +5104,79 @@ async function handleSlashCommand(interaction) {
               `❌ 已扣除 <@${target.id}> ${amount} 星雨幣，目前餘額 ${finalCoins} 星雨幣`,
           });
         }
+        if (interaction.commandName === '發送優惠券') {
+          if (!isAdmin(interaction)) {
+            return interaction.editReply({
+              content: '❌ 只有管理員可以使用這個指令'
+            });
+          }
+          const target =
+            interaction.options.getUser('玩家');
+          const couponName =
+            interaction.options.getString('優惠券');
+          const count =
+            interaction.options.getInteger('數量');
+          const note =
+            interaction.options.getString('備註') || '客服發送優惠券';
+          if (!target) {
+            return interaction.editReply({
+              content: '❌ 找不到玩家'
+            });
+          }
+          if (!couponName) {
+            return interaction.editReply({
+              content: '❌ 請選擇優惠券'
+            });
+          }
+          if (!count || count <= 0) {
+            return interaction.editReply({
+              content: '❌ 數量必須大於 0'
+            });
+          }
+          if (count > 20) {
+            return interaction.editReply({
+              content: '❌ 一次最多發送 20 張優惠券'
+            });
+          }
+          for (let i = 0; i < count; i++) {
+            await addUserItem(
+              target.id,
+              couponName,
+              '客服發送',
+              note,
+              'coupon'
+            );
+          }
+          await interaction.editReply({
+            content:
+              `✅ 已發送優惠券\n\n` +
+              `玩家：<@${target.id}>\n` +
+              `優惠券：${couponName}\n` +
+              `數量：${count} 張\n` +
+              `備註：${note}`
+          });
+          const user =
+            await client.users.fetch(target.id).catch(() => null);
+          if (user) {
+            await user.send({
+              embeds: [
+                new EmbedBuilder()
+                  .setColor('#ffd166')
+                  .setTitle('🎟️ 你收到優惠券')
+                  .setDescription(
+                    `你收到優惠券：**${couponName}**\n` +
+                    `數量：${count} 張\n\n` +
+                    `備註：${note}`
+                  )
+                  .setFooter({
+                    text: '優惠券可於下單時使用'
+                  })
+                  .setTimestamp()
+              ]
+            }).catch(() => {});
+          }
+          return;
+        }
         if (interaction.commandName === '調整累積消費') {
           if (!isAdminOrStaff(interaction)) {
             return replyError(interaction, '你沒有權限');
@@ -5755,10 +5876,7 @@ async function handleSlashCommand(interaction) {
         // 我的商品
         if (interaction.commandName === '我的商品') {
           const rawItems =
-            await getUserItems(
-              interaction.user.id,
-              getGuildId(interaction)
-            );
+            await getUserItems(interaction.user.id)
           const items = rawItems.filter(item => {
             const name =
               String(item.item_name || '');
@@ -8859,10 +8977,7 @@ async function handleStringSelectInteraction(interaction) {
                     ''
                 );
             const items =
-              await getUserItems(
-                interaction.user.id,
-                getGuildId(interaction)
-              );
+              await getUserItems(interaction.user.id)
             const coupon =
                 items.find(
                     item =>
