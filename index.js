@@ -4064,7 +4064,7 @@ async function sendBankTransferInfo(channel) {
       `也可以掃描下方 QR Code 付款。\n\n` +
       `匯款完成後，請在此頻道上傳匯款截圖，等待客服確認。\n\n` +
       `若有其他銀行之需求，請在下方告訴客服。`
-    )
+    ) 
     .setImage('https://cdn.discordapp.com/attachments/1501098193276895360/1513855523810840727/QRCode1780884218322.png?ex=6a293f52&is=6a27edd2&hm=3f9d2aa241395c189c0cb9411638fbd6dc7e0679f771a4073c776b94710023b6&')
     .setFooter({
       text: '請確認金額正確後再匯款'
