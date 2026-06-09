@@ -1505,60 +1505,70 @@ function parseVipCouponReward(rewardCoupon = '') {
   ];
 }
 
-async function giveVipRole(userId, roleId) {
+async function giveVipRole(userId, roleId, guildId = process.env.GUILD_ID) {
   if (!roleId) return;
 
   const guild =
+    client.guilds.cache.get(guildId) ||
     client.guilds.cache.first();
 
   if (!guild) return;
 
   const member =
-    await guild.members
-      .fetch(userId)
-      .catch(() => null);
+    await guild.members.fetch(userId).catch(() => null);
 
   if (!member) return;
 
-  const vipRoleIds =
-    String(process.env.VIP_ROLE_IDS || '')
-      .split(',')
-      .map(id => id.trim())
-      .filter(Boolean);
+  const { data: levels, error } =
+    await supabase
+      .from('vip_levels')
+      .select('role_id')
+      .eq('guild_id', guildId)
+      .not('role_id', 'is', null);
 
-  // 先移除舊的 VIP / VV 身分組
-  for (const oldRoleId of vipRoleIds) {
-    if (
-      oldRoleId !== roleId &&
-      member.roles.cache.has(oldRoleId)
-    ) {
-      await member.roles
-        .remove(oldRoleId)
-        .catch(err => {
-          console.log(
-            '[VIP 舊身分組移除失敗]',
-            oldRoleId,
-            err.message
-          );
-        });
-    }
+  if (error) {
+    console.error('[VIP] 讀取全部 VIP 身分組失敗', error);
   }
 
-  // 再發新的最高等級身分組
+  const allVipRoleIds =
+    (levels || [])
+      .map(level => String(level.role_id || '').trim())
+      .filter(Boolean);
+
+  const rolesToRemove =
+    allVipRoleIds.filter(oldRoleId =>
+      oldRoleId !== String(roleId) &&
+      member.roles.cache.has(oldRoleId)
+    );
+
+  if (rolesToRemove.length) {
+    await member.roles
+      .remove(rolesToRemove)
+      .catch(err => {
+        console.log('[VIP 舊身分組移除失敗]', err.message);
+      });
+  }
+
   if (!member.roles.cache.has(roleId)) {
     await member.roles
       .add(roleId)
       .catch(err => {
-        console.log('[VIP 身分組發放失敗]', err.message);
+        console.log('[VIP 新身分組發放失敗]', err.message);
       });
   }
 }
 
-async function grantVipLevelReward(userId, level, triggerType, triggerAmount) {
+async function grantVipLevelReward(
+  userId,
+  level,
+  triggerType,
+  triggerAmount,
+  oldLevelKey = null,
+  guildId = process.env.GUILD_ID
+) {
   const rewardAsd =
     Number(level.reward_asd || 0);
 
-  // ===== 發 ASD =====
   if (rewardAsd > 0) {
     const finalCoins =
       await changeCoins(userId, rewardAsd);
@@ -1572,7 +1582,6 @@ async function grantVipLevelReward(userId, level, triggerType, triggerAmount) {
     );
   }
 
-  // ===== 發優惠券 =====
   const coupons =
     parseVipCouponReward(level.reward_coupon);
 
@@ -1583,20 +1592,25 @@ async function grantVipLevelReward(userId, level, triggerType, triggerAmount) {
         coupon.name,
         'VIP',
         `${level.level_name} 升級獎勵`,
-        'coupon'
+        'coupon',
+        guildId
+
       );
     }
   }
 
-  // ===== 發 VIP 身分組，如果 vip_levels.role_id 有填才會發 =====
-  await giveVipRole(userId, level.role_id);
+  await giveVipRole(
+    userId,
+    level.role_id,
+    guildId
+  );
 
-  // ===== 寫入升級紀錄 =====
   await supabase
     .from('vip_upgrade_logs')
     .insert({
+      guild_id: guildId,
       user_id: userId,
-      old_level_key: null,
+      old_level_key: oldLevelKey,
       new_level_key: level.level_key,
       trigger_type: triggerType,
       trigger_amount: triggerAmount,
@@ -1605,7 +1619,6 @@ async function grantVipLevelReward(userId, level, triggerType, triggerAmount) {
       reward_note: level.reward_note
     });
 
-  // ===== 私訊通知 =====
   const user =
     await client.users
       .fetch(userId)
@@ -1628,12 +1641,11 @@ async function grantVipLevelReward(userId, level, triggerType, triggerAmount) {
     }).catch(() => {});
   }
 }
-
-async function checkAndUpgradeVip(userId, triggerType, amount) {
+async function checkAndUpgradeVip(userId, triggerType, amount, guildId = process.env.GUILD_ID) {
   const triggerAmount =
     Number(amount || 0);
 
-  if (!userId || !triggerAmount || triggerAmount <= 0) {
+  if (!userId || !guildId) {
     return null;
   }
 
@@ -1641,31 +1653,39 @@ async function checkAndUpgradeVip(userId, triggerType, amount) {
     await supabase
       .from('user_vips')
       .select('*')
+      .eq('guild_id', guildId)
       .eq('user_id', userId)
       .maybeSingle();
 
   const oldTotalSpent =
     Number(currentVip?.total_spent || 0);
+
   const oldTotalTopup =
     Number(currentVip?.total_topup || 0);
+
   const oldHighestTopup =
     Number(currentVip?.highest_single_topup || 0);
+
   const newTotalSpent =
     triggerType === 'spend'
       ? oldTotalSpent + triggerAmount
       : oldTotalSpent;
+
   const newTotalTopup =
     triggerType === 'topup'
       ? oldTotalTopup + triggerAmount
       : oldTotalTopup;
+
   const newHighestTopup =
     triggerType === 'topup'
       ? Math.max(oldHighestTopup, triggerAmount)
       : oldHighestTopup;
+
   const { data: levels, error: levelError } =
     await supabase
       .from('vip_levels')
       .select('*')
+      .eq('guild_id', guildId)
       .order('sort_order', { ascending: true });
 
   if (levelError || !levels?.length) {
@@ -1701,18 +1721,18 @@ async function checkAndUpgradeVip(userId, triggerType, amount) {
       .from('user_vips')
       .upsert(
         {
+          guild_id: guildId,
           user_id: userId,
-          level_key: currentVip?.level_key || null,
-          level_name: currentVip?.level_name || null,
           total_spent: newTotalSpent,
           total_topup: newTotalTopup,
           highest_single_topup: newHighestTopup,
           updated_at: new Date().toISOString()
         },
         {
-          onConflict: 'user_id'
+          onConflict: 'guild_id,user_id'
         }
       );
+
     return null;
   }
 
@@ -1726,6 +1746,7 @@ async function checkAndUpgradeVip(userId, triggerType, amount) {
     .from('user_vips')
     .upsert(
       {
+        guild_id: guildId,
         user_id: userId,
         level_key: newLevel.level_key,
         level_name: newLevel.level_name,
@@ -1735,16 +1756,14 @@ async function checkAndUpgradeVip(userId, triggerType, amount) {
         updated_at: new Date().toISOString()
       },
       {
-        onConflict: 'user_id'
+        onConflict: 'guild_id,user_id'
       }
     );
 
-  // 沒升級就只更新累積資料，不發獎勵
   if (newSortOrder <= oldSortOrder) {
     return null;
   }
 
-  // 如果一次跳很多級，會把中間每一級獎勵都發給他
   const rewardLevels =
     levels.filter(level =>
       Number(level.sort_order || 0) > oldSortOrder &&
@@ -1756,7 +1775,9 @@ async function checkAndUpgradeVip(userId, triggerType, amount) {
       userId,
       level,
       triggerType,
-      triggerAmount
+      triggerAmount,
+      currentVip?.level_key || null,
+      guildId
     );
   }
 
@@ -1824,10 +1845,17 @@ async function countOrderVipSpentOnce(order, reason = '付款完成') {
     };
   }
 
+  const guildId =
+    lockedOrder.guild_id || order.guild_id || process.env.GUILD_ID;
   await checkAndUpgradeVip(
     userId,
     'spend',
-    amount
+    amount,
+    guildId
+  );
+  await applyVipOrderCashback(
+    lockedOrder,
+    guildId
   );
 
   console.log(
@@ -1844,6 +1872,201 @@ async function countOrderVipSpentOnce(order, reason = '付款完成') {
     counted: true,
     amount
   };
+}
+async function checkVvipMonthlyKeep(userId, billingMonth = getBillingMonth(), guildId = process.env.GUILD_ID) {
+  const { data: vip } =
+    await supabase
+      .from('user_vips')
+      .select('*')
+      .eq('guild_id', guildId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+  if (!vip?.level_key) {
+    return null;
+  }
+
+  const { data: level } =
+    await supabase
+      .from('vip_levels')
+      .select('*')
+      .eq('guild_id', guildId)
+      .eq('level_key', vip.level_key)
+      .maybeSingle();
+
+  if (!level || !level.is_vvip) {
+    return null;
+  }
+
+  const required =
+    Number(level.monthly_keep_required || 0);
+
+  if (!required) {
+    return null;
+  }
+
+  const monthStart =
+    new Date(`${billingMonth}-01T00:00:00+08:00`);
+
+  const nextMonth =
+    new Date(monthStart);
+
+  nextMonth.setMonth(nextMonth.getMonth() + 1);
+
+  const { data: orders, error } =
+    await supabase
+      .from('play_orders')
+      .select('final_price, price')
+      .eq('guild_id', guildId)
+      .eq('customer_id', userId)
+      .eq('paid', true)
+      .gte('paid_at', monthStart.toISOString())
+      .lt('paid_at', nextMonth.toISOString());
+
+  if (error) {
+    console.error('[VVIP保級] 讀取月消費失敗', error);
+    return null;
+  }
+
+  const monthlySpent =
+    (orders || []).reduce(
+      (sum, order) =>
+        sum + Number(order.final_price || order.price || 0),
+      0
+    );
+
+  const isPassed =
+    monthlySpent >= required;
+
+  await supabase
+    .from('vip_monthly_keep_logs')
+    .upsert(
+      {
+        user_id: userId,
+        guild_id: guildId,
+        billing_month: billingMonth,
+        level_key: vip.level_key,
+        level_name: vip.level_name,
+        monthly_required: required,
+        monthly_spent: monthlySpent,
+        is_passed: isPassed,
+        checked_at: new Date().toISOString()
+      },
+      {
+        onConflict: 'guild_id,user_id,billing_month'
+      }
+    );
+
+  return {
+    userId,
+    billingMonth,
+    levelKey: vip.level_key,
+    levelName: vip.level_name,
+    required,
+    monthlySpent,
+    isPassed
+  };
+}
+async function applyVipOrderCashback(order, guildId = process.env.GUILD_ID) {
+  if (!order) return;
+
+  if (order.vip_cashback_given) {
+    return;
+  }
+
+  const userId =
+    order.customer_id;
+
+  const amount =
+    Number(order.final_price || order.price || 0);
+
+  if (!userId || !amount || amount <= 0) {
+    return;
+  }
+
+  const { data: vip } =
+    await supabase
+      .from('user_vips')
+      .select('*')
+      .eq('guild_id', guildId)
+      .eq('user_id', userId)
+      .maybeSingle();
+
+  if (!vip?.level_key) {
+    return;
+  }
+
+  const { data: level } =
+    await supabase
+      .from('vip_levels')
+      .select('*')
+      .eq('guild_id', guildId)
+      .eq('level_key', vip.level_key)
+      .maybeSingle();
+
+  if (!level) {
+    return;
+  }
+
+  const playerCount =
+    Number(order.player_count || 1);
+
+  let cashbackRate =
+    Number(level.cashback_rate || 0);
+
+  const multiMin =
+    Number(level.multi_player_min_count || 0);
+
+  const multiRate =
+    Number(level.multi_player_cashback_rate || 0);
+
+  if (
+    multiMin > 0 &&
+    playerCount >= multiMin &&
+    multiRate > cashbackRate
+  ) {
+    cashbackRate = multiRate;
+  }
+
+  const cashback =
+    Math.floor(amount * cashbackRate);
+
+  if (cashback > 0) {
+    const finalCoins =
+      await changeCoins(userId, cashback);
+
+    await sendWalletLog(
+      userId,
+      'VIP消費回饋',
+      cashback,
+      finalCoins,
+      `${level.level_name}｜訂單 ${order.order_no || order.id}｜消費回饋 ${cashback} ASD`
+    );
+  }
+
+  if (
+    vip.level_key === 'vip10' &&
+    playerCount >= 3
+  ) {
+    await addUserItem(
+      userId,
+      '9折優惠券',
+      'VIP10',
+      'VIP10 三陪以上消費獎勵',
+      'coupon',
+      guildId
+
+    );
+  }
+
+  await supabase
+    .from('play_orders')
+    .update({
+      vip_cashback_given: true,
+      vip_cashback_amount: cashback,
+      vip_cashback_at: new Date().toISOString()
+    })
+    .eq('id', order.id);
 }
 // 更新簽到
 async function updateCheckin(userId, date) {
@@ -2084,13 +2307,14 @@ async function addUserItem(
   itemName,
   rarity = null,
   description = null,
-  itemType = 'shop'
+  itemType = 'shop',
+  guildId = process.env.GUILD_ID
 ) {
-
   const { error } = await supabase
     .from('user_items')
     .insert([
       {
+        guild_id: guildId,
         user_id: userId,
         item_name: itemName,
         rarity,
@@ -2110,11 +2334,11 @@ async function addUserItem(
   }
 }
 // 讀取玩家商品
-async function getUserItems(userId) {
-
+async function getUserItems(userId, guildId = process.env.GUILD_ID) {
   const { data, error } = await supabase
     .from('user_items')
     .select('*')
+    .eq('guild_id', guildId)
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
 
@@ -3754,13 +3978,15 @@ async function sendBankTransferInfo(channel) {
     .setTitle('🏦 匯款資訊')
     .setDescription(
       `請依照以下資訊完成匯款：\n\n` +
-      `銀行：將來銀行\n` +
-      `銀行代碼：823\n` +
-      `帳號：88620979281818\n` +
+      `銀行：街口支付\n` +
+      `銀行代碼：396\n` +
+      `帳號：9029609498\n` +
       `戶名：許O星\n\n` +
+      `也可以掃描下方 QR Code 付款。\n\n` +
       `匯款完成後，請在此頻道上傳匯款截圖，等待客服確認。\n\n` +
       `若有其他銀行之需求，請在下方告訴客服。`
     )
+    .setImage('https://cdn.discordapp.com/attachments/1501098193276895360/1513855523810840727/QRCode1780884218322.png?ex=6a293f52&is=6a27edd2&hm=3f9d2aa241395c189c0cb9411638fbd6dc7e0679f771a4073c776b94710023b6&')
     .setFooter({
       text: '請確認金額正確後再匯款'
     })
@@ -3770,17 +3996,21 @@ async function sendBankTransferInfo(channel) {
     embeds: [embed]
   });
 }
-async function getAvailablePlayerOptions(service) {
+async function getAvailablePlayerOptions(service, guildId = process.env.GUILD_ID) {
   const { data: players, error } =
     await supabase
       .from('players')
       .select('*')
+      .eq('guild_id', guildId)
       .eq('status', 'available');
 
   if (error) {
     console.error('[指定陪陪] 讀取可接單陪陪失敗', error);
     return [];
   }
+
+  const targetService =
+    cleanServiceKey(service);
 
   return (players || [])
     .filter(player => {
@@ -3792,16 +4022,23 @@ async function getAvailablePlayerOptions(service) {
               .map(s => s.trim())
               .filter(Boolean);
 
-      if (!allowedServices.length) return true;
+      if (!allowedServices.length) return false;
 
-      return allowedServices.some(s =>
-        service.includes(s)
-      );
+      return allowedServices.some(s => {
+        const serviceKey =
+          cleanServiceKey(s);
+
+        return (
+          serviceKey === targetService ||
+          serviceKey.includes(targetService) ||
+          targetService.includes(serviceKey)
+        );
+      });
     })
     .slice(0, 24)
     .map(player => ({
       label: String(player.name || player.discord_id).slice(0, 100),
-      description: '目前可接單',
+      description: formatAvailableTime(player).slice(0, 100),
       value: player.discord_id
     }));
 }
@@ -4706,7 +4943,8 @@ async function handleSlashCommand(interaction) {
           await checkAndUpgradeVip(
             target.id,
             'topup',
-            amount
+            amount,
+            getGuildId(interaction)
           );
           return interaction.editReply({
             content:
@@ -4743,6 +4981,7 @@ async function handleSlashCommand(interaction) {
           if (!isAdminOrStaff(interaction)) {
             return replyError(interaction, '你沒有權限');
           }
+          const guildId = getGuildId(interaction);
           const target =
             interaction.options.getUser('玩家');
           const amount =
@@ -4761,6 +5000,7 @@ async function handleSlashCommand(interaction) {
             await supabase
               .from('user_vips')
               .select('*')
+              .eq('guild_id', guildId)
               .eq('user_id', target.id)
               .maybeSingle();
           if (readError) {
@@ -4792,6 +5032,7 @@ async function handleSlashCommand(interaction) {
             await supabase
               .from('user_vips')
               .upsert({
+                guild_id: guildId,
                 user_id: target.id,
                 total_spent: newTotalSpent,
                 total_topup: Number(oldVip?.total_topup || 0),
@@ -4799,7 +5040,7 @@ async function handleSlashCommand(interaction) {
                 vip_level: oldVip?.vip_level || 0,
                 updated_at: new Date().toISOString()
               }, {
-                onConflict: 'user_id'
+                onConflict: 'guild_id,user_id'
               })
               .select()
               .single();
@@ -4809,7 +5050,12 @@ async function handleSlashCommand(interaction) {
           }
           // 重新檢查 VIP 升級：用 0 金額觸發重新判斷，不再增加消費
           try {
-            await checkAndUpgradeVip(target.id, 'spend', 0);
+            await checkAndUpgradeVip(
+              target.id,
+              'spend',
+              0,
+              guildId
+            );
           } catch (vipError) {
             console.error('[調整累積消費] VIP 重新檢查失敗', vipError);
           }
@@ -4837,7 +5083,7 @@ async function handleSlashCommand(interaction) {
           if (!isAdminOrStaff(interaction)) {
             return replyError(interaction, '你沒有權限');
           }
-
+          const guildId = getGuildId(interaction);
           const target =
             interaction.options.getUser('玩家');
 
@@ -4862,6 +5108,7 @@ async function handleSlashCommand(interaction) {
             await supabase
               .from('user_vips')
               .select('*')
+              .eq('guild_id', guildId)
               .eq('user_id', target.id)
               .maybeSingle();
 
@@ -4914,6 +5161,7 @@ async function handleSlashCommand(interaction) {
           let updatedVip = null;
           let saveError = null;
           const payload = {
+            guild_id: guildId,
             user_id: target.id,
             total_spent: Number(oldVip?.total_spent || 0),
             total_topup: newTotalTopup,
@@ -4926,6 +5174,7 @@ async function handleSlashCommand(interaction) {
               await supabase
                 .from('user_vips')
                 .update(payload)
+                .eq('guild_id', guildId)
                 .eq('user_id', target.id)
                 .select()
                 .maybeSingle();
@@ -4947,7 +5196,12 @@ async function handleSlashCommand(interaction) {
           }
           // 重新檢查 VIP 升級：失敗不要擋掉累積儲值調整
           try {
-            await checkAndUpgradeVip(target.id, 'topup', 0);
+            await checkAndUpgradeVip(
+              target.id,
+              'topup',
+              0,
+              guildId
+            );
           } catch (vipError) {
             console.error('[調整累積儲值] VIP 重新檢查失敗', vipError);
           }
@@ -5028,6 +5282,7 @@ async function handleSlashCommand(interaction) {
           });
         }
         if (interaction.commandName === '查詢累積') {
+          const guildId = getGuildId(interaction);
           const target =
             interaction.options.getUser('玩家') ||
             interaction.user;
@@ -5036,6 +5291,7 @@ async function handleSlashCommand(interaction) {
             await supabase
               .from('user_vips')
               .select('*')
+              .eq('guild_id', guildId)
               .eq('user_id', target.id)
               .maybeSingle();
 
@@ -5419,9 +5675,11 @@ async function handleSlashCommand(interaction) {
         }
         // 我的商品
         if (interaction.commandName === '我的商品') {
-          const rawItems = await getUserItems(
-            interaction.user.id
-          );
+          const rawItems =
+            await getUserItems(
+              interaction.user.id,
+              getGuildId(interaction)
+            );
           const items = rawItems.filter(item => {
             const name =
               String(item.item_name || '');
@@ -6444,10 +6702,12 @@ async function handleButtonInteraction(interaction) {
     // ===== ATM 消費資訊 =====
     if (customId === 'consume_info') {
       const userData = await getUser(interaction.user.id);
+      const guildId = getGuildId(interaction);
       const { data: vipData, error: vipError } =
         await supabase
           .from('user_vips')
           .select('*')
+          .eq('guild_id', guildId)
           .eq('user_id', interaction.user.id)
           .maybeSingle();
       if (vipError) {
@@ -7220,6 +7480,7 @@ async function handleButtonInteraction(interaction) {
         try {
           const tipOrder =
             await saveTipToPlayOrders({
+              guildId: getGuildId(interaction),
               tipperId,
               staffId: selectedStaffId,
               item,
@@ -7357,6 +7618,7 @@ async function handleButtonInteraction(interaction) {
       try {
         const tipOrder =
           await saveTipToPlayOrders({
+            guildId: getGuildId(interaction),
             tipperId,
             staffId: selectedStaffId,
             item,
@@ -7458,6 +7720,7 @@ async function handleButtonInteraction(interaction) {
       try {
         const tipOrder =
           await saveTipToPlayOrders({
+            guildId: getGuildId(interaction),
             tipperId,
             staffId,
             item: '打賞',
@@ -7743,6 +8006,7 @@ async function handleButtonInteraction(interaction) {
             await supabase
               .from('players')
               .select('*')
+              .eq('guild_id', getGuildId(interaction))
               .eq('discord_id', playerId)
               .maybeSingle();
           const salaryRate =
@@ -8516,9 +8780,10 @@ async function handleStringSelectInteraction(interaction) {
                     ''
                 );
             const items =
-                await getUserItems(
-                    interaction.user.id
-                );
+              await getUserItems(
+                interaction.user.id,
+                getGuildId(interaction)
+              );
             const coupon =
                 items.find(
                     item =>
