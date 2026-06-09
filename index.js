@@ -1592,9 +1592,7 @@ async function grantVipLevelReward(
         coupon.name,
         'VIP',
         `${level.level_name} 升級獎勵`,
-        'coupon',
-        guildId
-
+        'coupon'
       );
     }
   }
