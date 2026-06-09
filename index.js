@@ -2345,7 +2345,7 @@ async function getUserItems(userId) {
   }
 
   return data || [];
-}
+} 
 // 刪除玩家商品
 async function removeUserItem(itemId) {
   const { error } = await supabase
