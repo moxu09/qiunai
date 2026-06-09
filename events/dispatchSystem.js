@@ -637,16 +637,9 @@ async function sendPlayLog({
   }
 
 }
-// 陪玩上班
 async function playerOnline(interaction) {
   const guildId =
     interaction.guildId || interaction.guild?.id || process.env.GUILD_ID;
-
-  if (!memberHasAnyServiceRole(interaction.member)) {
-    return interaction.editReply({
-      content: '❌ 你沒有任何可接單服務身分組，不能開始接單。'
-    });
-  }
 
   const { data: oldPlayer } =
     await supabase
@@ -655,6 +648,24 @@ async function playerOnline(interaction) {
       .eq('guild_id', guildId)
       .eq('discord_id', interaction.user.id)
       .maybeSingle();
+
+  const hasRoleService = memberHasAnyServiceRole(interaction.member);
+  const hasDbService = hasAllowedServicesFromDb(oldPlayer);
+
+  const { data: player } = await supabase
+    .from('players')
+    .select('*')
+    .eq('guild_id', interaction.guildId)
+    .eq('discord_id', interaction.user.id)
+    .maybeSingle();
+  const hasRoleService = memberHasAnyServiceRole(interaction.member);
+  const hasDbService = hasAllowedServicesFromDb(player);
+  if (!hasRoleService && !hasDbService) {
+    return interaction.reply({
+      content: '❌ 你沒有任何可接單服務身分組，也沒有後台設定的可接服務。',
+      ephemeral: true
+    });
+  }
 
   await supabase
     .from('players')
@@ -676,10 +687,26 @@ async function playerOnline(interaction) {
     });
 
   await interaction.editReply({
-    content: '🟢 你已開始接單，系統已依照你的服務身分組開放可接項目。'
+    content: hasRoleService
+      ? '🟢 你已開始接單，系統已依照你的服務身分組開放可接項目。'
+      : '🟢 你已開始接單，系統已依照後台設定的可接服務開放可接項目。'
   });
 }
+function hasAllowedServicesFromDb(player) {
+  if (!player) return false;
 
+  const services = player.allowed_services;
+
+  if (Array.isArray(services)) {
+    return services.length > 0;
+  }
+
+  if (typeof services === 'string') {
+    return services.trim().length > 0;
+  }
+
+  return false;
+}
 // 陪玩下班
 async function playerOffline(interaction) {
   const guildId =

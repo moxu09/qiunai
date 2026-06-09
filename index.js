@@ -2768,6 +2768,83 @@ async function refreshShop(client) {
       );
     }
 }
+async function sendTopupPanel(client) {
+  const channelId =
+    process.env.TOPUP_ORDER_CHANNEL;
+
+  if (!channelId) {
+    console.log('[TOPUP PANEL] 沒有設定 TOPUP_ORDER_CHANNEL，略過');
+    return;
+  }
+
+  const channel =
+    await client.channels.fetch(channelId).catch(() => null);
+
+  if (!channel) {
+    console.log('[TOPUP PANEL] 找不到儲值頻道');
+    return;
+  }
+
+  const embed =
+    new EmbedBuilder()
+      .setColor('#ffd166')
+      .setTitle('💳 ASD 儲值區')
+      .setDescription(
+        `歡迎來到 ASD 儲值區。\n\n` +
+        `點擊下方按鈕後，系統會建立專屬儲值臨時頻道。\n\n` +
+        `匯率：1 元台幣 = 1 ASD\n` +
+        `支援付款方式：匯款 / 無卡 / 刷卡 / 美金 / 加密貨幣`
+      )
+      .setFooter({
+        text: '深夜不關燈｜We Are Still Here'
+      })
+      .setTimestamp();
+
+  const row =
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId('order_start_topup')
+          .setLabel('建立儲值單')
+          .setEmoji('💳')
+          .setStyle(ButtonStyle.Success)
+      );
+
+  const panel =
+    await getPanelMessage('order_topup', process.env.GUILD_ID);
+
+  if (panel) {
+    try {
+      const oldMessage =
+        await channel.messages.fetch(panel.message_id);
+
+      await oldMessage.edit({
+        embeds: [embed],
+        components: [row]
+      });
+
+      console.log('[TOPUP PANEL] 已更新');
+      return;
+    } catch (err) {
+      console.log('[TOPUP PANEL] 舊面板不存在，重新建立');
+    }
+  }
+
+  const newMessage =
+    await channel.send({
+      embeds: [embed],
+      components: [row]
+    });
+
+  await savePanelMessage(
+    'order_topup',
+    channel.id,
+    newMessage.id,
+    process.env.GUILD_ID
+  );
+
+  console.log('[TOPUP PANEL] 已建立');
+}
 // ===== 發送訂單系統 =====
 async function sendCheckinPanel(client) {
 
@@ -3646,6 +3723,8 @@ await sendOrderSystem(client);
 console.log('✅ 訂單系統已載入');
 await refreshShop(client);
 console.log('✅ 商店系統已載入');
+await sendTopupPanel(client);
+console.log('✅ 儲值系統已載入');
 await sendAtmPanel(client);
 console.log('✅ ATM 系統已載入');
 await sendCheckinPanel(client);
