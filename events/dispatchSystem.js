@@ -649,21 +649,16 @@ async function playerOnline(interaction) {
       .eq('discord_id', interaction.user.id)
       .maybeSingle();
 
-  const hasRoleService = memberHasAnyServiceRole(interaction.member);
-  const hasDbService = hasAllowedServicesFromDb(oldPlayer);
+  const hasRoleService =
+    memberHasAnyServiceRole(interaction.member);
 
-  const { data: player } = await supabase
-    .from('players')
-    .select('*')
-    .eq('guild_id', interaction.guildId)
-    .eq('discord_id', interaction.user.id)
-    .maybeSingle();
-  const hasRoleService = memberHasAnyServiceRole(interaction.member);
-  const hasDbService = hasAllowedServicesFromDb(player);
+  const hasDbService =
+    hasAllowedServicesFromDb(oldPlayer);
+
   if (!hasRoleService && !hasDbService) {
     return interaction.reply({
       content: '❌ 你沒有任何可接單服務身分組，也沒有後台設定的可接服務。',
-      ephemeral: true
+      flags: 64
     });
   }
 
