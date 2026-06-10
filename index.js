@@ -893,6 +893,158 @@ function isAdmin(interaction) {
     interaction.member.permissions.has(PermissionFlagsBits.Administrator)
   );
 }
+async function handleGiveRoleCommand(interaction) {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({
+      flags: 64
+    });
+  }
+
+  const isAllowed =
+    interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
+    interaction.member.permissions.has(PermissionFlagsBits.ManageRoles);
+
+  if (!isAllowed) {
+    return interaction.editReply({
+      content: '❌ 你需要管理員權限或管理身分組權限才能使用這個指令。'
+    });
+  }
+
+  const role =
+    interaction.options.getRole('身份組');
+
+  const mode =
+    interaction.options.getString('發放對象');
+
+  const note =
+    interaction.options.getString('備註') || '無';
+
+  if (!role) {
+    return interaction.editReply({
+      content: '❌ 找不到這個身份組。'
+    });
+  }
+
+  if (role.id === interaction.guild.id) {
+    return interaction.editReply({
+      content: '❌ 不能發放 @everyone 身份組。'
+    });
+  }
+
+  if (role.managed) {
+    return interaction.editReply({
+      content: '❌ 這是系統 / 機器人管理的身份組，不能手動發放。'
+    });
+  }
+
+  const botMember =
+    await interaction.guild.members.fetchMe();
+
+  if (role.position >= botMember.roles.highest.position) {
+    return interaction.editReply({
+      content:
+        `❌ 我無法發放 <@&${role.id}>。\n` +
+        `請把機器人的身份組移到這個身份組上面。`
+    });
+  }
+
+  if (
+    role.position >= interaction.member.roles.highest.position &&
+    interaction.guild.ownerId !== interaction.user.id
+  ) {
+    return interaction.editReply({
+      content:
+        `❌ 你不能發放高於或等於你最高身份組的身份組。\n` +
+        `目標身份組：<@&${role.id}>`
+    });
+  }
+
+  let targetUsers = [];
+
+  if (mode === 'single' || mode === 'multiple') {
+    for (let i = 1; i <= 10; i++) {
+      const user =
+        interaction.options.getUser(`成員${i}`);
+
+      if (user && !targetUsers.some(item => item.id === user.id)) {
+        targetUsers.push(user);
+      }
+    }
+
+    if (!targetUsers.length) {
+      return interaction.editReply({
+        content: '❌ 請至少選擇一位成員。'
+      });
+    }
+  }
+
+  if (mode === 'all') {
+    await interaction.editReply({
+      content:
+        `⏳ 開始發放身份組給所有成員。\n` +
+        `身份組：<@&${role.id}>\n` +
+        `這可能需要一點時間。`
+    });
+
+    const members =
+      await interaction.guild.members.fetch();
+
+    targetUsers =
+      members
+        .filter(member => !member.user.bot)
+        .map(member => member.user);
+  }
+
+  let successCount = 0;
+  let failCount = 0;
+  const failedUsers = [];
+
+  for (const user of targetUsers) {
+    const member =
+      await interaction.guild.members
+        .fetch(user.id)
+        .catch(() => null);
+
+    if (!member) {
+      failCount++;
+      failedUsers.push(`<@${user.id}>：找不到成員`);
+      continue;
+    }
+
+    if (member.roles.cache.has(role.id)) {
+      successCount++;
+      continue;
+    }
+
+    try {
+      await member.roles.add(
+        role,
+        `由 ${interaction.user.tag} 使用 /給與身份組 發放｜備註：${note}`
+      );
+
+      successCount++;
+    } catch (err) {
+      failCount++;
+      failedUsers.push(`<@${user.id}>：${err.message || '發放失敗'}`);
+    }
+  }
+
+  const failedText =
+    failedUsers.length
+      ? `\n\n失敗名單：\n${failedUsers.slice(0, 10).join('\n')}`
+      : '';
+
+  return interaction.editReply({
+    content:
+      `✅ 身份組發放完成\n\n` +
+      `身份組：<@&${role.id}>\n` +
+      `發放對象：${mode === 'all' ? '所有人' : mode === 'multiple' ? '多人' : '單人'}\n` +
+      `成功：${successCount} 人\n` +
+      `失敗：${failCount} 人\n` +
+      `備註：${note}` +
+      failedText
+  });
+}
 async function findOrderForExtend({ guildId, orderNo, channelId }) {
   // 1. 有訂單編號就先用訂單編號找
   if (orderNo) {
@@ -3500,6 +3652,101 @@ const commands = [
         .setRequired(false)
     ),
   new SlashCommandBuilder()
+    .setName('給與身份組')
+    .setDescription('給指定成員、多位成員或所有人發放身份組')
+    .addRoleOption(option =>
+      option
+        .setName('身份組')
+        .setDescription('選擇要發放的身份組')
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName('發放對象')
+        .setDescription('選擇要發給誰')
+        .setRequired(true)
+        .addChoices(
+          {
+            name: '單人',
+            value: 'single'
+          },
+          {
+            name: '多人',
+            value: 'multiple'
+          },
+          {
+            name: '所有人',
+            value: 'all'
+          }
+        )
+    )
+    .addUserOption(option =>
+      option
+        .setName('成員1')
+        .setDescription('要發放的成員')
+        .setRequired(false)
+    )
+    .addUserOption(option =>
+      option
+        .setName('成員2')
+        .setDescription('多人發放用')
+        .setRequired(false)
+    )
+    .addUserOption(option =>
+      option
+        .setName('成員3')
+        .setDescription('多人發放用')
+        .setRequired(false)
+    )
+    .addUserOption(option =>
+      option
+        .setName('成員4')
+        .setDescription('多人發放用')
+        .setRequired(false)
+    )
+    .addUserOption(option =>
+      option
+        .setName('成員5')
+        .setDescription('多人發放用')
+        .setRequired(false)
+    )
+    .addUserOption(option =>
+      option
+        .setName('成員6')
+        .setDescription('多人發放用')
+        .setRequired(false)
+    )
+    .addUserOption(option =>
+      option
+        .setName('成員7')
+        .setDescription('多人發放用')
+        .setRequired(false)
+    )
+    .addUserOption(option =>
+      option
+        .setName('成員8')
+        .setDescription('多人發放用')
+        .setRequired(false)
+    )
+    .addUserOption(option =>
+      option
+        .setName('成員9')
+        .setDescription('多人發放用')
+        .setRequired(false)
+    )
+    .addUserOption(option =>
+      option
+        .setName('成員10')
+        .setDescription('多人發放用')
+        .setRequired(false)
+    )
+    .addStringOption(option =>
+      option
+        .setName('備註')
+        .setDescription('可不填，例如：活動身分組、補發、管理員發放')
+        .setRequired(false)
+    ),
+  new SlashCommandBuilder()
     .setName('加時')
     .setDescription('替訂單建立加時 / 續單付款')
     .addStringOption(option =>
@@ -5101,6 +5348,10 @@ async function handleSlashCommand(interaction) {
             content:
               `❌ 已扣除 <@${target.id}> ${amount} 星雨幣，目前餘額 ${finalCoins} 星雨幣`,
           });
+        }
+        if (interaction.commandName === '給與身份組') {
+          await handleGiveRoleCommand(interaction);
+          return;
         }
         if (interaction.commandName === '發送優惠券') {
           if (!isAdmin(interaction)) {

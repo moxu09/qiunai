@@ -6340,18 +6340,18 @@ async function acceptPlayOrder(interaction) {
   try {
     const orderId =
       interaction.customId.replace('accept_play_order_', '');
-
+    const guildId =
+      interaction.guildId || interaction.guild?.id || process.env.GUILD_ID;
     const { data: player, error: playerError } =
       await supabase
         .from('players')
         .select('*')
+        .eq('guild_id', guildId)
         .eq('discord_id', interaction.user.id)
-        .single();
-
+        .maybeSingle();
     if (playerError) {
       console.log('[接單錯誤 players]', playerError);
     }
-
     if (!player || player.status !== 'available') {
       return interaction.editReply({
         content: '❌ 你目前不是可接單狀態，請先按「開始接單」',
@@ -6361,8 +6361,9 @@ async function acceptPlayOrder(interaction) {
       await supabase
         .from('play_orders')
         .select('*')
+        .eq('guild_id', guildId)
         .eq('id', orderId)
-        .single();
+        .maybeSingle();
 
     if (orderError) {
       console.log('[接單錯誤 play_orders]', orderError);
@@ -6523,6 +6524,7 @@ async function acceptPlayOrder(interaction) {
         await supabase
           .from('players')
           .update({ status: 'busy' })
+          .eq('guild_id', guildId)
           .eq('discord_id', playerId);
       }
     } 
