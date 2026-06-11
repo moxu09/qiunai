@@ -38,11 +38,9 @@ function setup(supabaseInstance, clientInstance, helpers = {}) {
   client = clientInstance;
   paymentHelpers = helpers;
 }
-function getStaffGuildId(interaction = null) {
+function getStaffGuildId() {
   return (
     process.env.STAFF_GUILD_ID ||
-    interaction?.guildId ||
-    interaction?.guild?.id ||
     process.env.GUILD_ID
   );
 }
@@ -6344,10 +6342,8 @@ async function submitChangeOrderPrice(interaction) {
 // 接單
 async function acceptPlayOrder(interaction) {
   try {
-    const orderId =
-      interaction.customId.replace('accept_play_order_', '');
     const guildId =
-      interaction.guildId || interaction.guild?.id || process.env.GUILD_ID;
+      getStaffGuildId();
     const { data: player, error: playerError } =
       await supabase
         .from('players')
