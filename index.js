@@ -5292,9 +5292,9 @@ async function handleSlashCommand(interaction) {
           }
         // 儲值
         if (interaction.commandName === '發錢') {
-          if (interaction.guild.ownerId !== interaction.user.id) {
+          if (!isOwnerOrAdmin(interaction)) {
             return interaction.editReply({
-              content: '❌ 只有群主可以使用',
+              content: '❌ 只有群主或管理員可以使用',
             });
           }
           const target = interaction.options.getUser('玩家');
@@ -5325,9 +5325,9 @@ async function handleSlashCommand(interaction) {
         }
         // 扣錢
         if (interaction.commandName === '扣錢') {
-          if (interaction.guild.ownerId !== interaction.user.id) {
+          if (!isOwnerOrAdmin(interaction)) {
             return interaction.editReply({
-              content: '❌ 只有群主可以使用',
+              content: '❌ 只有群主或管理員可以使用',
             });
           }
           const target = interaction.options.getUser('玩家');
