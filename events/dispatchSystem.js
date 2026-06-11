@@ -38,6 +38,14 @@ function setup(supabaseInstance, clientInstance, helpers = {}) {
   client = clientInstance;
   paymentHelpers = helpers;
 }
+function getStaffGuildId(interaction = null) {
+  return (
+    process.env.STAFF_GUILD_ID ||
+    interaction?.guildId ||
+    interaction?.guild?.id ||
+    process.env.GUILD_ID
+  );
+}
 function getBillingMonth(date = new Date()) {
   const taiwanDate =
     new Date(date.getTime() + 8 * 60 * 60 * 1000);
@@ -645,8 +653,7 @@ async function playerOnline(interaction) {
   }
 
   const guildId =
-    interaction.guildId || interaction.guild?.id || process.env.GUILD_ID;
-
+    getStaffGuildId(interaction);
   const { data: oldPlayer } =
     await supabase
       .from('players')
@@ -662,8 +669,9 @@ async function playerOnline(interaction) {
     hasAllowedServicesFromDb(oldPlayer);
 
   if (!hasRoleService && !hasDbService) {
-    return interaction.editReply({
-      content: '❌ 你沒有任何可接單服務身分組，也沒有後台設定的可接服務。'
+    console.log('[開始接單] 沒有偵測到服務權限，但允許先上班', {
+      guildId,
+      userId: interaction.user.id
     });
   }
 
@@ -716,8 +724,7 @@ async function playerOffline(interaction) {
   }
 
   const guildId =
-    interaction.guildId || interaction.guild?.id || process.env.GUILD_ID;
-
+    getStaffGuildId(interaction);
   await supabase
     .from('players')
     .update({
@@ -861,8 +868,7 @@ async function playerStatus(interaction) {
   }
 
   const guildId =
-    interaction.guildId || interaction.guild?.id || process.env.GUILD_ID;
-
+    getStaffGuildId(interaction);
   const { data } = await supabase
     .from('players')
     .select('*')
