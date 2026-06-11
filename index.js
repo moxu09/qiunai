@@ -893,6 +893,12 @@ function isAdmin(interaction) {
     interaction.member.permissions.has(PermissionFlagsBits.Administrator)
   );
 }
+function isOwnerOrAdmin(interaction) {
+  return (
+    interaction.guild.ownerId === interaction.user.id ||
+    interaction.member.permissions.has(PermissionFlagsBits.Administrator)
+  );
+}
 async function handleGiveRoleCommand(interaction) {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({
