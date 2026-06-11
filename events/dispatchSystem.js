@@ -25,14 +25,483 @@ function createFlowId(userId) {
 
 function getServiceName(serviceType) {
   if (serviceType === 'valorant') return '特戰英豪';
+  if (serviceType === 'delta') return '三角洲行動';
+  if (serviceType === 'apex') return 'Apex';
+  if (serviceType === 'lol') return '英雄聯盟';
   if (serviceType === 'steam') return 'Steam';
-  if (serviceType === 'delta') return '三角洲';
+  if (serviceType === 'other') return '其他項目';
+
   if (serviceType === 'pubg') return '絕地求生';
+  if (serviceType === 'pubgm') return 'PUBG M';
+  if (serviceType === 'naraka') return 'NARAKA';
+  if (serviceType === 'minecraft') return 'Minecraft';
+  if (serviceType === 'voice_chat') return '語音聊天';
+  if (serviceType === 'song') return '點歌服務';
+  if (serviceType === 'custom') return '自訂輸入';
+
   if (serviceType === 'chat') return '陪聊';
   if (serviceType === 'emotion') return '出氣包';
+
   return '訂單';
 }
+const pendingPanelOrders = new Map();
 
+const GAME_ORDER_PANELS = [
+  {
+    envKey: 'VALORANT_ORDER_CHANNEL',
+    panelName: 'valorant',
+    title: '🎯 特戰英豪下單區',
+    description: '請選擇你要下單的特戰英豪項目。',
+    customId: 'game_order_select_valorant',
+    options: [
+      { label: '大神陪玩', value: 'god', description: '特戰英豪｜大神陪玩' },
+      { label: '技術陪玩', value: 'skill', description: '特戰英豪｜技術陪玩' },
+      { label: '娛樂陪玩', value: 'entertain', description: '特戰英豪｜娛樂陪玩' },
+      { label: '儲值星雨幣', value: 'topup', description: '建立儲值星雨幣頻道' }
+    ]
+  },
+  {
+    envKey: 'DELTA_ORDER_CHANNEL',
+    panelName: 'delta',
+    title: '🛡️ 三角洲行動下單區',
+    description: '請選擇你要下單的三角洲行動項目。',
+    customId: 'game_order_select_delta',
+    options: [
+      { label: '電腦版', value: 'pc', description: '三角洲行動｜電腦版' },
+      { label: '手機版', value: 'mobile', description: '三角洲行動｜手機版' },
+      { label: '儲值星雨幣', value: 'topup', description: '建立儲值星雨幣頻道' }
+    ]
+  },
+  {
+    envKey: 'APEX_ORDER_CHANNEL',
+    panelName: 'apex',
+    title: '🔺 Apex 下單區',
+    description: '請選擇你要下單的 Apex 項目。',
+    customId: 'game_order_select_apex',
+    options: [
+      { label: '大神陪玩', value: 'god', description: 'Apex｜大神陪玩' },
+      { label: '技術陪玩', value: 'skill', description: 'Apex｜技術陪玩' },
+      { label: '娛樂陪玩', value: 'entertain', description: 'Apex｜娛樂陪玩' },
+      { label: '儲值星雨幣', value: 'topup', description: '建立儲值星雨幣頻道' }
+    ]
+  },
+  {
+    envKey: 'LOL_ORDER_CHANNEL',
+    panelName: 'lol',
+    title: '🧙 英雄聯盟下單區',
+    description: '請先選擇英雄聯盟項目，下一步再選大神 / 技術 / 娛樂。',
+    customId: 'game_order_select_lol',
+    options: [
+      { label: '英雄聯盟', value: 'lol_main', description: '召喚峽谷' },
+      { label: 'ARAM', value: 'aram', description: '咆哮深淵' },
+      { label: '聯盟戰棋', value: 'tft', description: 'Teamfight Tactics' },
+      { label: '儲值星雨幣', value: 'topup', description: '建立儲值星雨幣頻道' }
+    ]
+  },
+  {
+    envKey: 'STEAM_ORDER_CHANNEL',
+    panelName: 'steam',
+    title: '🎮 Steam 下單區',
+    description: '請選擇你要下單的 Steam 遊戲類型。',
+    customId: 'game_order_select_steam',
+    options: [
+      { label: '肉鴿遊戲', value: 'roguelike', description: 'Steam｜肉鴿遊戲' },
+      { label: '生存遊戲', value: 'survival', description: 'Steam｜生存遊戲' },
+      { label: '恐怖遊戲', value: 'horror', description: 'Steam｜恐怖遊戲' },
+      { label: '派對遊戲', value: 'party', description: 'Steam｜派對遊戲' },
+      { label: '儲值星雨幣', value: 'topup', description: '建立儲值星雨幣頻道' }
+    ]
+  },
+  {
+    envKey: 'OTHER_ORDER_CHANNEL',
+    panelName: 'other',
+    title: '🌙 其他項目下單區',
+    description: '請選擇你要下單的其他服務項目。',
+    customId: 'game_order_select_other',
+    options: [
+      { label: 'PUBG M', value: 'pubgm', description: 'PUBG M' },
+      { label: 'NARAKA', value: 'naraka', description: 'NARAKA' },
+      { label: 'Minecraft', value: 'minecraft', description: 'Minecraft' },
+      { label: '語音聊天', value: 'voice_chat', description: '語音聊天' },
+      { label: '點歌服務', value: 'song', description: '點歌服務' },
+      { label: '自訂輸入', value: 'custom', description: '其他項目｜自訂需求' },
+      { label: '儲值星雨幣', value: 'topup', description: '建立儲值星雨幣頻道' }
+    ]
+  }
+];
+
+function findOptionLabel(panelName, value) {
+  const panel =
+    GAME_ORDER_PANELS.find(item => item.panelName === panelName);
+
+  const option =
+    panel?.options.find(item => item.value === value);
+
+  return option?.label || value;
+}
+
+function buildPanelInitialData(gameKey, value) {
+  const label = findOptionLabel(gameKey, value);
+
+  if (gameKey === 'valorant') {
+    return {
+      category: 'valorant',
+      gameLabel: '特戰英豪',
+      itemLabel: label,
+      serviceType: `特戰英豪｜${label}`,
+      playMode: label,
+      fromPanel: true
+    };
+  }
+
+  if (gameKey === 'delta') {
+    return {
+      category: 'delta',
+      gameLabel: '三角洲行動',
+      itemLabel: label,
+      serviceType: `三角洲行動｜${label}`,
+      deltaMode: label,
+      fromPanel: true
+    };
+  }
+
+  if (gameKey === 'apex') {
+    return {
+      category: 'apex',
+      gameLabel: 'Apex',
+      itemLabel: label,
+      serviceType: `Apex｜${label}`,
+      playMode: label,
+      fromPanel: true
+    };
+  }
+
+  if (gameKey === 'steam') {
+    return {
+      category: 'steam',
+      gameLabel: 'Steam',
+      itemLabel: label,
+      serviceType: `Steam｜${label}`,
+      steamCategory: label,
+      fromPanel: true
+    };
+  }
+
+  if (gameKey === 'other') {
+    return {
+      category: 'other',
+      gameLabel: '其他項目',
+      itemLabel: label,
+      serviceType: `其他項目｜${label}`,
+      playMode: label,
+      fromPanel: true
+    };
+  }
+
+  return {
+    category: gameKey,
+    gameLabel: getServiceName(gameKey),
+    itemLabel: label,
+    serviceType: `${getServiceName(gameKey)}｜${label}`,
+    playMode: label,
+    fromPanel: true
+  };
+}
+
+async function upsertGameOrderPanel(panel) {
+  const channelId = process.env[panel.envKey];
+
+  if (!channelId) {
+    console.log(`[下單分區] 未設定 ${panel.envKey}`);
+    return;
+  }
+
+  const channel =
+    await client.channels.fetch(channelId).catch(() => null);
+
+  if (!channel) {
+    console.log(`[下單分區] 找不到頻道：${panel.envKey}`);
+    return;
+  }
+
+  const embed =
+    new EmbedBuilder()
+      .setColor('#cdb4db')
+      .setTitle(panel.title)
+      .setDescription(
+        `${panel.description}\n\n` +
+        `選到「儲值星雨幣」會建立儲值頻道。\n` +
+        `選其他項目會建立專屬臨時下單頻道。`
+      )
+      .setFooter({
+        text: '深夜不關燈｜We Are Still Here'
+      })
+      .setTimestamp();
+
+  const menu =
+    new StringSelectMenuBuilder()
+      .setCustomId(panel.customId)
+      .setPlaceholder('請選擇下單項目')
+      .addOptions(
+        panel.options.map(option => ({
+          label: option.label.slice(0, 100),
+          description: option.description.slice(0, 100),
+          value: option.value
+        }))
+      );
+
+  const row =
+    new ActionRowBuilder()
+      .addComponents(menu);
+
+  const messages =
+    await channel.messages.fetch({
+      limit: 10
+    }).catch(() => null);
+
+  const oldPanel =
+    messages?.find(
+      msg =>
+        msg.author.id === client.user.id &&
+        msg.embeds.length > 0 &&
+        msg.embeds[0].title === panel.title
+    );
+
+  if (oldPanel) {
+    await oldPanel.edit({
+      embeds: [embed],
+      components: [row]
+    });
+    console.log(`[下單分區] 已更新：${panel.title}`);
+    return;
+  }
+
+  await channel.send({
+    embeds: [embed],
+    components: [row]
+  });
+
+  console.log(`[下單分區] 已建立：${panel.title}`);
+}
+
+async function sendGameOrderPanels() {
+  for (const panel of GAME_ORDER_PANELS) {
+    await upsertGameOrderPanel(panel);
+  }
+}
+
+async function handleGameOrderSelect(interaction) {
+  const gameKey =
+    interaction.customId.replace('game_order_select_', '');
+
+  const value =
+    interaction.values[0];
+
+  if (value === 'topup') {
+    return await createTopupTicket(interaction);
+  }
+
+  if (gameKey === 'lol') {
+    const flowId =
+      createFlowId(interaction.user.id);
+
+    pendingPanelOrders.set(flowId, {
+      userId: interaction.user.id,
+      gameKey,
+      lolMode: value
+    });
+
+    setTimeout(() => {
+      pendingPanelOrders.delete(flowId);
+    }, 15 * 60 * 1000);
+
+    const modeLabel =
+      findOptionLabel('lol', value);
+
+    const menu =
+      new StringSelectMenuBuilder()
+        .setCustomId(`lol_style_select_${flowId}`)
+        .setPlaceholder('請選擇陪玩類型')
+        .addOptions([
+          {
+            label: '大神陪玩',
+            value: 'god',
+            description: `${modeLabel}｜大神陪玩`
+          },
+          {
+            label: '技術陪玩',
+            value: 'skill',
+            description: `${modeLabel}｜技術陪玩`
+          },
+          {
+            label: '娛樂陪玩',
+            value: 'entertain',
+            description: `${modeLabel}｜娛樂陪玩`
+          }
+        ]);
+
+    const row =
+      new ActionRowBuilder()
+        .addComponents(menu);
+
+    return await interaction.reply({
+      content:
+        `你選擇的是：${modeLabel}\n\n` +
+        `請再選擇大神陪玩 / 技術陪玩 / 娛樂陪玩：`,
+      components: [row],
+      flags: 64
+    });
+  }
+
+  const initial =
+    buildPanelInitialData(gameKey, value);
+
+  return await createServiceTicket(
+    interaction,
+    initial.category,
+    initial
+  );
+}
+
+async function handleLolStyleSelect(interaction) {
+  const flowId =
+    interaction.customId.replace('lol_style_select_', '');
+
+  const pending =
+    pendingPanelOrders.get(flowId);
+
+  if (!pending) {
+    return await interaction.reply({
+      content: '❌ 這個選單已過期，請回英雄聯盟下單區重新選擇。',
+      flags: 64
+    });
+  }
+
+  if (pending.userId !== interaction.user.id) {
+    return await interaction.reply({
+      content: '❌ 只有剛剛選擇英雄聯盟項目的人可以操作。',
+      flags: 64
+    });
+  }
+
+  const modeLabel =
+    findOptionLabel('lol', pending.lolMode);
+
+  const styleMap = {
+    god: '大神陪玩',
+    skill: '技術陪玩',
+    entertain: '娛樂陪玩'
+  };
+
+  const styleLabel =
+    styleMap[interaction.values[0]] || interaction.values[0];
+
+  pendingPanelOrders.delete(flowId);
+
+  return await createServiceTicket(
+    interaction,
+    'lol',
+    {
+      category: 'lol',
+      gameLabel: '英雄聯盟',
+      itemLabel: modeLabel,
+      serviceType: `${modeLabel}｜${styleLabel}`,
+      playMode: styleLabel,
+      fromPanel: true
+    }
+  );
+}
+
+async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
+  const countMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(`service_player_count_${flowId}`)
+      .setPlaceholder('請選擇陪陪人數')
+      .addOptions([
+        { label: '1 位', value: '1' },
+        { label: '2 位', value: '2' },
+        { label: '3 位', value: '3' },
+        { label: '4 位', value: '4' }
+      ]);
+
+  const genderMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(`service_gender_${flowId}`)
+      .setPlaceholder('請選擇陪陪性別偏好')
+      .addOptions([
+        { label: '不指定', value: '不指定' },
+        { label: '男陪', value: '男陪' },
+        { label: '女陪', value: '女陪' }
+      ]);
+
+  const assignMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(`service_assign_${flowId}`)
+      .setPlaceholder('是否指定陪陪')
+      .addOptions([
+        { label: '不指定陪陪', value: '不指定' },
+        { label: '指定陪陪', value: '指定' },
+        { label: '預約指定陪陪', value: '預約指定' }
+      ]);
+
+  const durationMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(`service_duration_${flowId}`)
+      .setPlaceholder('請選擇時間')
+      .addOptions([
+        { label: '30 分鐘', value: '0.5' },
+        { label: '1 小時', value: '1' },
+        { label: '1.5 小時', value: '1.5' },
+        { label: '2 小時', value: '2' },
+        { label: '自訂', value: 'custom' }
+      ]);
+
+  const buttonRow =
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(`order_add_note_${flowId}`)
+          .setLabel('填寫備註 / 自訂需求')
+          .setStyle(ButtonStyle.Secondary),
+
+        new ButtonBuilder()
+          .setCustomId(`order_finish_need_${flowId}`)
+          .setLabel('送出訂單')
+          .setEmoji('📨')
+          .setStyle(ButtonStyle.Success)
+      );
+
+  if (initial.category === 'steam') {
+    buttonRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`steam_game_name_${flowId}`)
+        .setLabel('輸入 Steam 遊戲名稱')
+        .setStyle(ButtonStyle.Primary)
+    );
+  }
+
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor('#ffd166')
+        .setTitle('📋 下單需求填寫')
+        .setDescription(
+          `已選擇：${initial.serviceType || initial.itemLabel || '未填寫'}\n\n` +
+          `請依序選擇人數、性別偏好、指定方式與時間。\n` +
+          `有特殊需求可以按「填寫備註 / 自訂需求」。\n\n` +
+          `填寫完成後請按「送出訂單」，客服會協助正式報價。`
+        )
+        .setTimestamp()
+    ],
+    components: [
+      new ActionRowBuilder().addComponents(countMenu),
+      new ActionRowBuilder().addComponents(genderMenu),
+      new ActionRowBuilder().addComponents(assignMenu),
+      new ActionRowBuilder().addComponents(durationMenu),
+      buttonRow
+    ]
+  });
+}
 function setup(supabaseInstance, clientInstance, helpers = {}) {
   supabase = supabaseInstance;
   client = clientInstance;
@@ -1202,7 +1671,7 @@ async function createTipTicket(interaction) {
     content: `✅ 已建立打賞頻道：<#${channel.id}>`
   });
 }
-async function createServiceTicket(interaction, serviceType) {
+async function createServiceTicket(interaction, serviceType, initial = {}) {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({
       flags: 64
@@ -1246,64 +1715,105 @@ async function createServiceTicket(interaction, serviceType) {
       ]
     });
 
-  pendingServiceOrders.set(flowId, {
-    flowId,
-    guildId: interaction.guildId || interaction.guild?.id || process.env.GUILD_ID,
-    channelId: channel.id,
-    customerId: interaction.user.id,
-    customerUsername: interaction.user.username,
-    category: serviceType,
+    pendingServiceOrders.set(flowId, {
+      flowId,
+      guildId: interaction.guildId || interaction.guild?.id || process.env.GUILD_ID,
+      channelId: channel.id,
+      customerId: interaction.user.id,
+      customerUsername: interaction.user.username,
+      category: serviceType,
 
-    serviceType: null,
-    serviceTypes: [],
-    playMode: null,
-    rank: null,
-    steamCategory: null,
-    steamGameName: null,
-    deltaMode: null,
+      gameLabel: initial.gameLabel || getServiceName(serviceType),
+      itemLabel: initial.itemLabel || null,
 
-    playerCount: null,
-    genderPreference: null,
-    assignMode: null,
-    selectedPlayerIds: [],
+      serviceType: initial.serviceType || null,
+      serviceTypes: initial.serviceTypes || [],
+      playMode: initial.playMode || null,
+      rank: initial.rank || null,
+      steamCategory: initial.steamCategory || null,
+      steamGameName: initial.steamGameName || null,
+      deltaMode: initial.deltaMode || null,
 
-    duration: null,
-    rounds: null,
-    note: '',
-    quotedPrice: null,
-    paymentMethod: null,
-    timeSelectShown: false,
-    finishButtonShown: false
-  });
+      playerCount: null,
+      genderPreference: null,
+      assignMode: null,
+      selectedPlayerIds: [],
+
+      duration: null,
+      rounds: null,
+      note: '',
+      quotedPrice: null,
+      paymentMethod: null,
+      timeSelectShown: false,
+
+      // 新分區入口會先把「送出訂單」按鈕直接放進臨時頻道，避免重複出現
+      finishButtonShown: Boolean(initial.fromPanel)
+    });
 
   setTimeout(() => {
     pendingServiceOrders.delete(flowId);
   }, 60 * 60 * 1000);
 
-  await channel.send({
-    content: `<@${interaction.user.id}> <@&${process.env.STAFF_ROLE}>`,
-    embeds: [
-      new EmbedBuilder()
-        .setColor('#ffd166')
-        .setTitle(`🌙 ${serviceName} 下單頻道`)
-        .setDescription(
-          `請依照下方選項填寫需求。\n\n` +
-          `填寫完成後，客服會依照需求輸入正式報價。`
-        )
-        .setTimestamp()
-    ],
-    components: [
-      new ActionRowBuilder()
-        .addComponents(
-          new ButtonBuilder()
-            .setCustomId('owner_cancel_ticket')
-            .setLabel('我按錯了，關閉頻道')
-            .setEmoji('🗑️')
-            .setStyle(ButtonStyle.Danger)
-        )
-    ]
-  });
+  if (initial.fromPanel) {
+    await channel.send({
+      content: `<@${interaction.user.id}> <@&${process.env.STAFF_ROLE}>`,
+      embeds: [
+        new EmbedBuilder()
+          .setColor('#ffd166')
+          .setTitle(`🌙 ${serviceName} 下單頻道`)
+          .setDescription(
+            `請依照下方選項填寫需求。\n\n` +
+            `填寫完成後，客服會依照需求輸入正式報價。`
+          )
+          .setTimestamp()
+      ],
+      components: [
+        new ActionRowBuilder()
+          .addComponents(
+            new ButtonBuilder()
+              .setCustomId('owner_cancel_ticket')
+              .setLabel('我按錯了，關閉頻道')
+              .setEmoji('🗑️')
+              .setStyle(ButtonStyle.Danger)
+          )
+      ]
+    });
+    await sendQuickServiceNeedPanel(
+      channel,
+    flowId,
+    initial
+  );
 
+  return interaction.editReply({
+    content:
+      `✅ 已建立臨時下單頻道：<#${channel.id}>\n` +
+      `項目：${initial.serviceType || initial.itemLabel || getServiceName(serviceType)}`
+  });
+}
+
+await channel.send({
+  content: `<@${interaction.user.id}> <@&${process.env.STAFF_ROLE}>`,
+  embeds: [
+    new EmbedBuilder()
+      .setColor('#ffd166')
+      .setTitle(`🌙 ${serviceName} 下單頻道`)
+      .setDescription(
+        `請依照下方選項填寫需求。\n\n` +
+        `填寫完成後，客服會依照需求輸入正式報價。`
+      )
+      .setTimestamp()
+  ],
+  components: [
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId('owner_cancel_ticket')
+          .setLabel('我按錯了，關閉頻道')
+          .setEmoji('🗑️')
+          .setStyle(ButtonStyle.Danger)
+      )
+  ]
+});
   if (serviceType === 'valorant') {
     await showValorantStart(channel, flowId);
   }
@@ -7657,93 +8167,141 @@ async function submitSteamGameName(interaction) {
   });
 }
 function buildServiceTextFromPending(pending) {
+  const timeText =
+    pending.duration
+      ? `${pending.duration}小時`
+      : pending.rounds
+        ? `${pending.rounds}局`
+        : '';
+
   if (pending.category === 'valorant') {
-    const typeText =
-      Array.isArray(pending.serviceTypes) && pending.serviceTypes.length
-        ? pending.serviceTypes.join('＋')
-        : pending.serviceType;
     return [
       '特戰英豪',
-      typeText,
-      pending.playMode,
+      pending.itemLabel || pending.playMode || pending.serviceType,
       pending.rank,
-      pending.duration ? `${pending.duration}小時` : '',
-      pending.rounds ? `${pending.rounds}局` : ''
+      timeText
+    ].filter(Boolean).join('｜');
+  }
+
+  if (pending.category === 'apex') {
+    return [
+      'Apex',
+      pending.itemLabel || pending.playMode || pending.serviceType,
+      pending.rank,
+      timeText
+    ].filter(Boolean).join('｜');
+  }
+
+  if (pending.category === 'lol') {
+    return [
+      '英雄聯盟',
+      pending.itemLabel || '未選擇模式',
+      pending.playMode || '未選擇陪玩類型',
+      timeText
     ].filter(Boolean).join('｜');
   }
 
   if (pending.category === 'steam') {
     return [
       'Steam',
-      pending.steamCategory,
+      pending.steamCategory || pending.itemLabel,
       pending.steamGameName,
-      pending.duration ? `${pending.duration}小時` : ''
+      timeText
     ].filter(Boolean).join('｜');
   }
 
   if (pending.category === 'delta') {
     return [
-      '三角洲',
-      pending.deltaMode,
-      pending.duration ? `${pending.duration}小時` : '',
-      pending.rounds ? `${pending.rounds}局` : ''
+      '三角洲行動',
+      pending.deltaMode || pending.itemLabel,
+      timeText
+    ].filter(Boolean).join('｜');
+  }
+
+  if (pending.category === 'other') {
+    return [
+      '其他項目',
+      pending.itemLabel || pending.playMode || pending.serviceType,
+      timeText
     ].filter(Boolean).join('｜');
   }
 
   if (pending.category === 'chat') {
     return [
       '陪聊',
-      pending.duration ? `${pending.duration}小時` : ''
+      timeText
     ].filter(Boolean).join('｜');
   }
 
   if (pending.category === 'emotion') {
     return [
       '出氣包',
-      pending.duration ? `${pending.duration}小時` : ''
+      timeText
     ].filter(Boolean).join('｜');
   }
 
-  return '陪玩訂單';
+  return [
+    getServiceName(pending.category),
+    pending.itemLabel,
+    pending.playMode,
+    timeText
+  ].filter(Boolean).join('｜') || '陪玩訂單';
 }
 function getDispatchServiceKeyFromPending(pending) {
+  const text =
+    [
+      pending.serviceType,
+      pending.itemLabel,
+      pending.playMode,
+      pending.steamCategory,
+      pending.deltaMode
+    ]
+      .filter(Boolean)
+      .join('');
+
   if (pending.category === 'valorant') {
-    const serviceTypes =
-      Array.isArray(pending.serviceTypes)
-        ? pending.serviceTypes
-        : [];
-    if (
-      serviceTypes.includes('技術') ||
-      pending.serviceType === '技術'
-    ) {
-      return '特戰英豪技術陪玩';
-    }
-    if (
-      serviceTypes.includes('娛樂') ||
-      pending.serviceType === '娛樂'
-    ) {
-      return '特戰英豪娛樂陪玩';
-    }
+    if (text.includes('大神')) return '特戰英豪大神陪玩';
+    if (text.includes('技術')) return '特戰英豪技術陪玩';
+    if (text.includes('娛樂')) return '特戰英豪娛樂陪玩';
     return '特戰英豪';
   }
 
+  if (pending.category === 'apex') {
+    if (text.includes('大神')) return 'Apex大神陪玩';
+    if (text.includes('技術')) return 'Apex技術陪玩';
+    if (text.includes('娛樂')) return 'Apex娛樂陪玩';
+    return 'Apex';
+  }
+
+  if (pending.category === 'lol') {
+    if (text.includes('大神')) return '英雄聯盟大神陪玩';
+    if (text.includes('技術')) return '英雄聯盟技術陪玩';
+    if (text.includes('娛樂')) return '英雄聯盟娛樂陪玩';
+    return '英雄聯盟';
+  }
+
   if (pending.category === 'steam') {
-    if (pending.steamCategory === '恐怖遊戲') {
-      return 'STEAM恐怖遊戲陪玩';
-    }
-    return 'STEAM一般遊戲陪玩';
+    return pending.steamCategory
+      ? `Steam${pending.steamCategory}`
+      : 'Steam';
   }
 
   if (pending.category === 'delta') {
-    return '三角洲行動';
+    return pending.deltaMode
+      ? `三角洲行動${pending.deltaMode}`
+      : '三角洲行動';
+  }
+
+  if (pending.category === 'other') {
+    return pending.itemLabel || pending.playMode || '其他項目';
   }
 
   if (pending.category === 'chat') {
-    return '陪聊服務聊天陪伴';
+    return '語音聊天';
   }
 
   if (pending.category === 'emotion') {
-    return '陪聊服務出氣服務';
+    return '出氣包';
   }
 
   return getServiceName(pending.category);
@@ -9134,6 +9692,14 @@ async function handleDispatchInteraction(interaction) {
     }
   }
   if (interaction.isStringSelectMenu()) {
+    if (interaction.customId.startsWith('game_order_select_')) {
+      await handleGameOrderSelect(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith('lol_style_select_')) {
+      await handleLolStyleSelect(interaction);
+      return true;
+    }
     if (interaction.customId.startsWith('quote_select_coupon_')) {
       await handleQuoteSelectCoupon(interaction);
       return true;
@@ -9233,6 +9799,7 @@ module.exports = {
   setup,
   handleDispatchInteraction,
   sendPlayerPanel,
+  sendGameOrderPanels,
   startNewOrderFlow,
   sendDailyPlayerSummary,
   submitTopupForm,

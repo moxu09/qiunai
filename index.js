@@ -4023,8 +4023,8 @@ await rest.put(
 );
 console.log('✅ Slash Commands 已註冊');
 // ===== 初始化系統 =====
-await sendOrderSystem(client);
-console.log('✅ 訂單系統已載入');
+await dispatchSystem.sendGameOrderPanels();
+console.log('✅ 分區下單系統已載入');
 await refreshShop(client);
 console.log('✅ 商店系統已載入');
 await sendTopupPanel(client);
@@ -4878,6 +4878,8 @@ client.on(Events.InteractionCreate, async interaction => {
         interaction.customId.startsWith('steam_category_') ||
         interaction.customId.startsWith('delta_mode_') ||
         interaction.customId.startsWith('service_payment_method_') ||
+        interaction.customId.startsWith('game_order_select_') ||
+        interaction.customId.startsWith('lol_style_select_') ||
 
         interaction.customId.startsWith('quote_select_coupon_') ||
         interaction.customId.startsWith('quote_payment_method_') ||
