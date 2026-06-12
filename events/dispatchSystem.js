@@ -140,7 +140,47 @@ function findOptionLabel(panelName, value) {
 
   return option?.label || value;
 }
+async function resetSelectMenuMessage(interaction) {
+  try {
+    if (!interaction.message || !interaction.message.components?.length) {
+      return;
+    }
 
+    const rows =
+      interaction.message.components.map(row => {
+        const newRow =
+          new ActionRowBuilder();
+
+        for (const component of row.components) {
+          if (component.type !== 3) continue;
+
+          const menu =
+            StringSelectMenuBuilder.from(component);
+
+          const options =
+            component.options.map(option => ({
+              label: option.label,
+              value: option.value,
+              description: option.description || undefined,
+              emoji: option.emoji || undefined,
+              default: false
+            }));
+
+          menu.setOptions(options);
+
+          newRow.addComponents(menu);
+        }
+
+        return newRow;
+      });
+
+    await interaction.message.edit({
+      components: rows
+    });
+  } catch (err) {
+    console.error('[下拉選單重置失敗]', err);
+  }
+}
 function buildPanelInitialData(gameKey, value) {
   const label = findOptionLabel(gameKey, value);
 
@@ -300,6 +340,13 @@ async function handleGameOrderSelect(interaction) {
   const value =
     interaction.values[0];
 
+  await resetSelectMenuMessage(interaction);
+  const gameKey =
+    interaction.customId.replace('game_order_select_', '');
+
+  const value =
+    interaction.values[0];
+
   if (value === 'topup') {
     return await createTopupTicket(interaction);
   }
@@ -369,6 +416,10 @@ async function handleGameOrderSelect(interaction) {
 }
 
 async function handleLolStyleSelect(interaction) {
+  const flowId =
+    interaction.customId.replace('lol_style_select_', '');
+
+  await resetSelectMenuMessage(interaction);
   const flowId =
     interaction.customId.replace('lol_style_select_', '');
 
