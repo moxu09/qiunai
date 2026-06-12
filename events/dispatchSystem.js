@@ -158,9 +158,10 @@ function buildPanelInitialData(gameKey, value) {
     return {
       category: 'delta',
       gameLabel: '三角洲行動',
-      itemLabel: label,
+      itemLabel: label, // 電腦版 / 手機版
       serviceType: `三角洲行動｜${label}`,
-      deltaMode: label,
+      deltaPlatform: label,
+      deltaMode: null,
       fromPanel: true
     };
   }
@@ -456,6 +457,112 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
         { label: '自訂', value: 'custom' }
       ]);
 
+  const roundsMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(`service_rounds_${flowId}`)
+      .setPlaceholder('請選擇局數')
+      .addOptions([
+        { label: '1 局', value: '1' },
+        { label: '3 局', value: '3' },
+        { label: '5 局', value: '5' },
+        { label: '自訂', value: 'custom' }
+      ]);
+
+  const valorantRankMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(`valorant_rank_${flowId}`)
+      .setPlaceholder('請選擇目前段位')
+      .addOptions([
+        { label: '鐵牌', value: '鐵牌' },
+        { label: '銅牌', value: '銅牌' },
+        { label: '銀牌', value: '銀牌' },
+        { label: '金牌', value: '金牌' },
+        { label: '白金', value: '白金' },
+        { label: '鑽石', value: '鑽石' },
+        { label: '超凡', value: '超凡' },
+        { label: '神話', value: '神話' },
+        { label: '輻能', value: '輻能' },
+        { label: '不指定 / 尚未確認', value: '不指定' }
+      ]);
+  const apexRankMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(`apex_rank_${flowId}`)
+      .setPlaceholder('請選擇 Apex 目前段位')
+      .addOptions([
+        { label: '菜鳥', value: '菜鳥' },
+        { label: '青銅', value: '青銅' },
+        { label: '白銀', value: '白銀' },
+        { label: '黃金', value: '黃金' },
+        { label: '白金', value: '白金' },
+        { label: '鑽石', value: '鑽石' },
+        { label: '大師', value: '大師' },
+        { label: '頂尖獵殺者', value: '頂尖獵殺者' },
+        { label: '不指定 / 尚未確認', value: '不指定' }
+      ]);
+  const lolRankMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(`lol_rank_${flowId}`)
+      .setPlaceholder('請選擇英雄聯盟段位 / 娛樂')
+      .addOptions([
+        { label: '娛樂', value: '娛樂', description: '不看段位，娛樂陪玩' },
+        { label: '黑鐵', value: '黑鐵' },
+        { label: '銅牌', value: '銅牌' },
+        { label: '銀牌', value: '銀牌' },
+        { label: '金牌', value: '金牌' },
+        { label: '白金', value: '白金' },
+        { label: '翡翠', value: '翡翠' },
+        { label: '鑽石', value: '鑽石' },
+        { label: '大師', value: '大師' },
+        { label: '宗師', value: '宗師' },
+        { label: '菁英', value: '菁英' },
+        { label: '不指定 / 尚未確認', value: '不指定' }
+      ]);
+  const deltaModeMenu =
+    new StringSelectMenuBuilder()
+      .setCustomId(`delta_mode_${flowId}`)
+      .setPlaceholder('請選擇三角洲服務內容')
+      .addOptions([
+        {
+          label: '娛樂陪玩',
+          value: '娛樂陪玩',
+          description: '一般娛樂陪玩'
+        },
+        {
+          label: '基本單護',
+          value: '基本單護',
+          description: '基本單人護航'
+        },
+        {
+          label: '機密雙護',
+          value: '機密雙護',
+          description: '機密雙人護航'
+        },
+        {
+          label: '機密雙護（有保底）',
+          value: '機密雙護（有保底）',
+          description: '機密雙護含保底'
+        },
+        {
+          label: '猛攻護航',
+          value: '猛攻護航',
+          description: '猛攻模式護航'
+        },
+        {
+          label: '猛攻護航（有保底）',
+          value: '猛攻護航（有保底）',
+          description: '猛攻護航含保底'
+        }
+      ]);
+
+  const isDeltaOrder =
+    initial.category === 'delta';
+  const isTftOrder =
+    initial.category === 'lol' &&
+    initial.itemLabel === '聯盟戰棋';
+  const isApexOrder =
+    initial.category === 'apex';
+  const isLolOrder =
+    initial.category === 'lol';
   const buttonRow =
     new ActionRowBuilder()
       .addComponents(
@@ -480,6 +587,34 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
     );
   }
 
+  const needRows = [
+    ...(initial.category === 'valorant'
+      ? [new ActionRowBuilder().addComponents(valorantRankMenu)]
+      : []),
+
+    ...(isApexOrder
+      ? [new ActionRowBuilder().addComponents(apexRankMenu)]
+      : []),
+
+    ...(isLolOrder
+      ? [new ActionRowBuilder().addComponents(lolRankMenu)]
+      : []),
+
+    ...(isDeltaOrder
+      ? [new ActionRowBuilder().addComponents(deltaModeMenu)]
+      : []),
+
+    new ActionRowBuilder().addComponents(countMenu),
+    new ActionRowBuilder().addComponents(genderMenu),
+    new ActionRowBuilder().addComponents(assignMenu),
+
+    ...(initial.category === 'valorant'
+      ? []
+      : isTftOrder
+        ? [new ActionRowBuilder().addComponents(roundsMenu)]
+        : [new ActionRowBuilder().addComponents(durationMenu)])
+  ];
+
   await channel.send({
     embeds: [
       new EmbedBuilder()
@@ -487,19 +622,19 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
         .setTitle('📋 下單需求填寫')
         .setDescription(
           `已選擇：${initial.serviceType || initial.itemLabel || '未填寫'}\n\n` +
-          `請依序選擇人數、性別偏好、指定方式與時間。\n` +
+          `請依序選擇${isDeltaOrder ? '服務內容、' : ''}${isApexOrder ? '段位、' : ''}${isLolOrder ? '段位 / 娛樂、' : ''}人數、性別偏好、指定方式與${
+            isTftOrder ? '局數' : '時間'
+          }。\n` +
           `有特殊需求可以按「填寫備註 / 自訂需求」。\n\n` +
           `填寫完成後請按「送出訂單」，客服會協助正式報價。`
         )
         .setTimestamp()
     ],
-    components: [
-      new ActionRowBuilder().addComponents(countMenu),
-      new ActionRowBuilder().addComponents(genderMenu),
-      new ActionRowBuilder().addComponents(assignMenu),
-      new ActionRowBuilder().addComponents(durationMenu),
-      buttonRow
-    ]
+    components: needRows.slice(0, 5)
+  });
+
+  await channel.send({
+    components: [buttonRow]
   });
 }
 function setup(supabaseInstance, clientInstance, helpers = {}) {
@@ -1732,6 +1867,7 @@ async function createServiceTicket(interaction, serviceType, initial = {}) {
       rank: initial.rank || null,
       steamCategory: initial.steamCategory || null,
       steamGameName: initial.steamGameName || null,
+      deltaPlatform: initial.deltaPlatform || null,
       deltaMode: initial.deltaMode || null,
 
       playerCount: null,
@@ -2272,6 +2408,15 @@ function isValorantGoldOrBelow(rank) {
   return ['鐵牌', '銅牌', '銀牌', '金牌', '金牌含以下', '不指定'].includes(
     String(rank || '')
   );
+}
+function isValorantAboveGold(rank) {
+  return [
+    '白金',
+    '鑽石',
+    '超凡',
+    '神話',
+    '輻能'
+  ].includes(String(rank || ''));
 }
 async function showValorantTimeOrRoundOnce(channel, flowId, pending) {
   if (pending.timeSelectShown) {
@@ -7232,21 +7377,99 @@ async function handleValorantRankSelect(interaction) {
   const flowId =
     interaction.customId.replace('valorant_rank_', '');
 
-  const pending = pendingServiceOrders.get(flowId);
+  const pending =
+    pendingServiceOrders.get(flowId);
 
   if (!pending) {
     return interaction.editReply({
       content: '❌ 這筆訂單流程已過期，請重新下單。'
     });
   }
+
   pending.rank = interaction.values[0];
-  pending.timeSelectShown = false;
+
+  // 重新選段位時，清掉之前選過的時間 / 局數，避免資料混在一起
+  pending.duration = null;
+  pending.rounds = null;
+  pending.timeSelectShown = true;
+
   pendingServiceOrders.set(flowId, pending);
+
+  if (isValorantAboveGold(pending.rank)) {
+    await showServiceRoundSelect(
+      interaction.channel,
+      flowId
+    );
+
+    return interaction.editReply({
+      content:
+        `✅ 已選擇段位：${pending.rank}\n` +
+        `此段位屬於金牌以上，不含金牌，請改用「局數制」。`
+    });
+  }
+
+  await showServiceDurationSelect(
+    interaction.channel,
+    flowId,
+    'hour'
+  );
+
   return interaction.editReply({
-    content: `✅ 已選擇段位：${pending.rank}`
+    content:
+      `✅ 已選擇段位：${pending.rank}\n` +
+      `此段位屬於金牌以下，含金牌，請使用「時間制」。`
   });
 }
+async function handleApexRankSelect(interaction) {
+  await interaction.deferReply({
+    flags: 64
+  });
 
+  const flowId =
+    interaction.customId.replace('apex_rank_', '');
+
+  const pending =
+    pendingServiceOrders.get(flowId);
+
+  if (!pending) {
+    return interaction.editReply({
+      content: '❌ 這筆訂單流程已過期，請重新下單。'
+    });
+  }
+
+  pending.rank = interaction.values[0];
+
+  pendingServiceOrders.set(flowId, pending);
+
+  return interaction.editReply({
+    content: `✅ 已選擇 Apex 段位：${pending.rank}`
+  });
+}
+async function handleLolRankSelect(interaction) {
+  await interaction.deferReply({
+    flags: 64
+  });
+
+  const flowId =
+    interaction.customId.replace('lol_rank_', '');
+
+  const pending =
+    pendingServiceOrders.get(flowId);
+
+  if (!pending) {
+    return interaction.editReply({
+      content: '❌ 這筆訂單流程已過期，請重新下單。'
+    });
+  }
+
+  pending.rank = interaction.values[0];
+
+  pendingServiceOrders.set(flowId, pending);
+
+  return interaction.editReply({
+    content: `✅ 已選擇英雄聯盟段位 / 類型：${pending.rank}`
+  });
+}
 async function handleServicePlayerCountSelect(interaction) {
   await interaction.deferReply({
     flags: 64
@@ -7670,16 +7893,15 @@ async function handleDeltaModeSelect(interaction) {
 
   pending.deltaMode = interaction.values[0];
 
+  pending.serviceType =
+    `三角洲行動｜${pending.deltaPlatform || pending.itemLabel || '未選平台'}｜${pending.deltaMode}`;
+
   pendingServiceOrders.set(flowId, pending);
 
-  await showFinishNeedButtons(
-    interaction.channel,
-    flowId
-  );
   return interaction.editReply({
     content:
-      `✅ 已選擇三角洲玩法：${pending.deltaMode}\n` +
-      `如果需求都填好了，可以按下方「送出訂單」。`
+      `✅ 已選擇三角洲服務：${pending.deltaMode}\n` +
+      `平台：${pending.deltaPlatform || pending.itemLabel || '未選平台'}`
   });
 }
 async function showFinishNeedButtons(channel, flowId) {
@@ -8191,12 +8413,12 @@ function buildServiceTextFromPending(pending) {
       timeText
     ].filter(Boolean).join('｜');
   }
-
   if (pending.category === 'lol') {
     return [
       '英雄聯盟',
       pending.itemLabel || '未選擇模式',
       pending.playMode || '未選擇陪玩類型',
+      pending.rank,
       timeText
     ].filter(Boolean).join('｜');
   }
@@ -8213,7 +8435,8 @@ function buildServiceTextFromPending(pending) {
   if (pending.category === 'delta') {
     return [
       '三角洲行動',
-      pending.deltaMode || pending.itemLabel,
+      pending.deltaPlatform || pending.itemLabel,
+      pending.deltaMode,
       timeText
     ].filter(Boolean).join('｜');
   }
@@ -8272,7 +8495,6 @@ function getDispatchServiceKeyFromPending(pending) {
     if (text.includes('娛樂')) return 'Apex娛樂陪玩';
     return 'Apex';
   }
-
   if (pending.category === 'lol') {
     if (text.includes('大神')) return '英雄聯盟大神陪玩';
     if (text.includes('技術')) return '英雄聯盟技術陪玩';
@@ -9712,7 +9934,14 @@ async function handleDispatchInteraction(interaction) {
       await handleValorantRankSelect(interaction);
       return true;
     }
-
+    if (interaction.customId.startsWith('apex_rank_')) {
+      await handleApexRankSelect(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith('lol_rank_')) {
+      await handleLolRankSelect(interaction);
+      return true;
+    }
     if (interaction.customId.startsWith('service_player_count_')) {
       await handleServicePlayerCountSelect(interaction);
       return true;

@@ -2870,7 +2870,6 @@ async function refreshShop(client) {
         text: '星雨商店｜商品售出後恕不退換'
       })
       .setTimestamp()
-      .setImage('https://cdn.discordapp.com/attachments/1501098193276895360/1505278267391742253/7223dd02-5c3a-43d3-9acc-f3b618732607.png?ex=6a0a0b21&is=6a08b9a1&hm=66bcc7c8b5d5eec5e35640258ba7320834fef96a198228fbb0c0ccc233a9c88d&');
   let components = [];
   if (items.length > 0) {
     const menu = new StringSelectMenuBuilder()
@@ -3041,7 +3040,6 @@ async function sendCheckinPanel(client) {
       text: '星雨簽到系統｜每天記得來簽到 ✨'
       })
       .setTimestamp()
-      .setImage('https://cdn.discordapp.com/attachments/1501098193276895360/1505277098409988317/3c6bb34b-65a5-4a90-b743-f3cc8acaed09.png?ex=6a0a0a0a&is=6a08b88a&hm=ddc66df8cbe55ceb98c0b5d1eb335bfd97707221d789fc6270cf7782088ed7f0&');
   const panel =
     await getPanelMessage('checkin');
 
@@ -3163,7 +3161,6 @@ async function sendAtmPanel(client) {
         text: '星雨銀行｜交易請確認對象與金額'
       })
       .setTimestamp()
-      .setImage('https://cdn.discordapp.com/attachments/1501098193276895360/1505276094058729632/777d1c67-0ad2-4a58-be29-5d3b028211fa.png?ex=6a0a091b&is=6a08b79b&hm=ca2e66188d8c3be9cc6987423bbf34549f13fc4bf6c441e1a6b559b1342d3b3a&');
   const panel =
     await getPanelMessage('atm');
 
@@ -3235,9 +3232,6 @@ async function sendGachaPanel(client) {
         text: '星雨系統｜祝你抽到大獎 ✨'
       })
       .setTimestamp()
-      .setImage(
-        'https://cdn.discordapp.com/attachments/1501098193276895360/1505275402250354778/f930a8f2-ca2a-441d-8e92-31d9b074601d.png?ex=6a0a0876&is=6a08b6f6&hm=ceebc19dc6ce78f79f96906b11a0a2366841896808a35532bf2b9966e9d2bb8a&'
-        );
   const panel =
     await getPanelMessage('gacha');
 
@@ -4869,6 +4863,8 @@ client.on(Events.InteractionCreate, async interaction => {
 
         // ===== 新版服務下單流程 =====
         interaction.customId.startsWith('valorant_rank_') ||
+        interaction.customId.startsWith('apex_rank_') ||
+        interaction.customId.startsWith('lol_rank_') ||
         interaction.customId.startsWith('service_player_count_') ||
         interaction.customId.startsWith('service_gender_') ||
         interaction.customId.startsWith('service_assign_') ||
