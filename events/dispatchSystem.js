@@ -147,32 +147,43 @@ async function resetSelectMenuMessage(interaction) {
     }
 
     const rows =
-      interaction.message.components.map(row => {
-        const newRow =
-          new ActionRowBuilder();
+      interaction.message.components
+        .map(row => {
+          const newRow =
+            new ActionRowBuilder();
 
-        for (const component of row.components) {
-          if (component.type !== 3) continue;
+          for (const component of row.components) {
+            // String Select Menu
+            if (component.type === 3) {
+              const menu =
+                StringSelectMenuBuilder.from(component);
 
-          const menu =
-            StringSelectMenuBuilder.from(component);
+              const options =
+                component.options.map(option => ({
+                  label: option.label,
+                  value: option.value,
+                  description: option.description || undefined,
+                  emoji: option.emoji || undefined,
+                  default: false
+                }));
 
-          const options =
-            component.options.map(option => ({
-              label: option.label,
-              value: option.value,
-              description: option.description || undefined,
-              emoji: option.emoji || undefined,
-              default: false
-            }));
+              menu.setOptions(options);
+              newRow.addComponents(menu);
+            }
 
-          menu.setOptions(options);
+            // Button
+            if (component.type === 2) {
+              newRow.addComponents(
+                ButtonBuilder.from(component)
+              );
+            }
+          }
 
-          newRow.addComponents(menu);
-        }
+          return newRow;
+        })
+        .filter(row => row.components.length > 0);
 
-        return newRow;
-      });
+    if (!rows.length) return;
 
     await interaction.message.edit({
       components: rows
@@ -334,6 +345,12 @@ async function sendGameOrderPanels() {
 }
 
 async function handleGameOrderSelect(interaction) {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({
+      flags: 64
+    });
+  }
+
   const gameKey =
     interaction.customId.replace('game_order_select_', '');
 
@@ -341,18 +358,15 @@ async function handleGameOrderSelect(interaction) {
     interaction.values[0];
 
   await resetSelectMenuMessage(interaction);
-  const gameKey =
-    interaction.customId.replace('game_order_select_', '');
-
-  const value =
-    interaction.values[0];
 
   if (value === 'topup') {
     return await createTopupTicket(interaction);
   }
+
   if (value === 'tip') {
     return await createTipTicket(interaction);
   }
+
   if (gameKey === 'lol') {
     const flowId =
       createFlowId(interaction.user.id);
@@ -396,12 +410,11 @@ async function handleGameOrderSelect(interaction) {
       new ActionRowBuilder()
         .addComponents(menu);
 
-    return await interaction.reply({
+    return await interaction.editReply({
       content:
         `你選擇的是：${modeLabel}\n\n` +
         `請再選擇大神陪玩 / 技術陪玩 / 娛樂陪玩：`,
-      components: [row],
-      flags: 64
+      components: [row]
     });
   }
 
@@ -416,27 +429,35 @@ async function handleGameOrderSelect(interaction) {
 }
 
 async function handleLolStyleSelect(interaction) {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferUpdate().catch(async () => {
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({
+          flags: 64
+        });
+      }
+    });
+  }
+
   const flowId =
     interaction.customId.replace('lol_style_select_', '');
 
   await resetSelectMenuMessage(interaction);
-  const flowId =
-    interaction.customId.replace('lol_style_select_', '');
 
   const pending =
     pendingPanelOrders.get(flowId);
 
   if (!pending) {
-    return await interaction.reply({
+    return await interaction.editReply({
       content: '❌ 這個選單已過期，請回英雄聯盟下單區重新選擇。',
-      flags: 64
+      components: []
     });
   }
 
   if (pending.userId !== interaction.user.id) {
-    return await interaction.reply({
+    return await interaction.editReply({
       content: '❌ 只有剛剛選擇英雄聯盟項目的人可以操作。',
-      flags: 64
+      components: []
     });
   }
 
