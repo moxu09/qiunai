@@ -124,6 +124,7 @@ const GAME_ORDER_PANELS = [
       { label: 'Minecraft', value: 'minecraft', description: 'Minecraft' },
       { label: '語音聊天', value: 'voice_chat', description: '語音聊天' },
       { label: '點歌服務', value: 'song', description: '點歌服務' },
+      { label: '打賞', value: 'tip', description: '建立打賞頻道' },
       { label: '自訂輸入', value: 'custom', description: '其他項目｜自訂需求' },
       { label: '儲值星雨幣', value: 'topup', description: '建立儲值星雨幣頻道' }
     ]
@@ -232,6 +233,7 @@ async function upsertGameOrderPanel(panel) {
       .setDescription(
         `${panel.description}\n\n` +
         `選到「儲值星雨幣」會建立儲值頻道。\n` +
+        `選到「打賞」會建立打賞頻道。\n` +
         `選其他項目會建立專屬臨時下單頻道。`
       )
       .setFooter({
@@ -301,7 +303,9 @@ async function handleGameOrderSelect(interaction) {
   if (value === 'topup') {
     return await createTopupTicket(interaction);
   }
-
+  if (value === 'tip') {
+    return await createTipTicket(interaction);
+  }
   if (gameKey === 'lol') {
     const flowId =
       createFlowId(interaction.user.id);
