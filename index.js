@@ -3078,71 +3078,72 @@ async function sendCheckinPanel(client) {
   console.log('[CHECKIN] 已建立');
 }
 async function sendAtmPanel(client) {
+
   const channel =
     await client.channels.fetch(
-      process.env.ATM_CHANNEL
-    ).catch(() => null);
+      process.env.CHANNEL_ID
+    );
 
-  if (!channel) {
-    console.log('[ATM] 找不到 ATM_CHANNEL');
-    return;
-  }
-
-  const row1 =
+  if (!channel) return;
+  const balanceButton =
+    new ButtonBuilder()
+      .setCustomId('check_coins')
+      .setLabel('💰 查看餘額')
+      .setStyle(ButtonStyle.Primary);
+  const transferButton =
+    new ButtonBuilder()
+      .setCustomId('transfer_menu')
+      .setLabel('💸 玩家轉帳')
+      .setStyle(ButtonStyle.Primary);
+  const consumeButton =
+    new ButtonBuilder()
+      .setCustomId('consume_info')
+      .setLabel('💠 消費資訊')
+      .setStyle(ButtonStyle.Primary);
+  const transferRecordButton =
+    new ButtonBuilder()
+      .setCustomId('transfer_records')
+      .setLabel('📜 交易紀錄')
+      .setStyle(ButtonStyle.Success);
+  const bagButton =
+    new ButtonBuilder()
+      .setCustomId('my_bag')
+      .setLabel('🎒 我的背包')
+      .setStyle(ButtonStyle.Success);
+  const switchBenefitButton =
+    new ButtonBuilder()
+      .setCustomId('switch_benefit')
+      .setLabel('🔄 切換權益')
+      .setStyle(ButtonStyle.Secondary);
+  const monthlyInfoButton =
+    new ButtonBuilder()
+      .setCustomId('monthly_info')
+      .setLabel('🌙 查詢月結')
+      .setStyle(ButtonStyle.Secondary);
+  const monthlyPayButton =
+    new ButtonBuilder()
+      .setCustomId('monthly_bill_pay')
+      .setLabel('🌙 月結繳費')
+      .setStyle(ButtonStyle.Secondary);
+  const row =
     new ActionRowBuilder()
       .addComponents(
-        new ButtonBuilder()
-          .setCustomId('check_coins')
-          .setLabel('💰 查看餘額')
-          .setStyle(ButtonStyle.Primary),
-
-        new ButtonBuilder()
-          .setCustomId('transfer_menu')
-          .setLabel('💸 玩家轉帳')
-          .setStyle(ButtonStyle.Primary),
-
-        new ButtonBuilder()
-          .setCustomId('consume_info')
-          .setLabel('💠 消費資訊')
-          .setStyle(ButtonStyle.Primary)
+        balanceButton,
+        transferButton,
+        consumeButton,
+        transferRecordButton,
+        bagButton
       );
-
   const row2 =
     new ActionRowBuilder()
       .addComponents(
-        new ButtonBuilder()
-          .setCustomId('transfer_records')
-          .setLabel('📜 交易紀錄')
-          .setStyle(ButtonStyle.Success),
-
-        new ButtonBuilder()
-          .setCustomId('my_bag')
-          .setLabel('🎒 我的背包')
-          .setStyle(ButtonStyle.Success)
+        switchBenefitButton,
+        monthlyInfoButton,
+        monthlyPayButton
       );
-
-  const row3 =
-    new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder()
-          .setCustomId('switch_benefit')
-          .setLabel('🔄 切換權益')
-          .setStyle(ButtonStyle.Secondary),
-
-        new ButtonBuilder()
-          .setCustomId('monthly_info')
-          .setLabel('🌙 查詢月結')
-          .setStyle(ButtonStyle.Secondary),
-
-        new ButtonBuilder()
-          .setCustomId('monthly_bill_pay')
-          .setLabel('🌙 月結繳費')
-          .setStyle(ButtonStyle.Secondary)
-      );
-
   const embed =
     new EmbedBuilder()
-      .setColor('#5865F2')
+      .setColor('#00ffff')
       .setTitle('🏦 星雨 ATM')
       .setDescription(
         `💳 歡迎使用星雨銀行\n\n` +
@@ -3152,17 +3153,14 @@ async function sendAtmPanel(client) {
         `💸 玩家轉帳｜轉帳給指定玩家\n` +
         `💠 消費資訊｜查看累積消費\n` +
         `📜 交易紀錄｜查看最近錢包明細\n` +
-        `🎒 我的背包｜查看持有商品\n` +
         `🔄 切換權益｜每日最多切換 2 次\n` +
-        `🌙 查詢月結｜查看保證金與剩餘額度\n` +
-        `🌙 月結繳費｜繳納目前月結金額`
+        `🌙 查詢月結｜查看保證金與剩餘額度`
       )
       .setThumbnail(client.user.displayAvatarURL())
       .setFooter({
         text: '星雨銀行｜交易請確認對象與金額'
       })
-      .setTimestamp();
-
+      .setTimestamp()
   const panel =
     await getPanelMessage('atm');
 
@@ -3175,7 +3173,7 @@ async function sendAtmPanel(client) {
 
       await msg.edit({
         embeds: [embed],
-        components: [row1, row2, row3]
+        components: [row, row2]
       });
 
       console.log('[ATM] 已更新');
@@ -3189,7 +3187,7 @@ async function sendAtmPanel(client) {
   const newMsg =
     await channel.send({
       embeds: [embed],
-      components: [row1, row2, row3]
+      components: [row, row2]
     });
 
   await savePanelMessage(
