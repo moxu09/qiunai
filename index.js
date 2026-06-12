@@ -3094,7 +3094,7 @@ async function sendAtmPanel(client) {
         new ButtonBuilder()
           .setCustomId('check_coins')
           .setLabel('💰 查看餘額')
-          .setStyle(ButtonStyle.Success),
+          .setStyle(ButtonStyle.Primary),
 
         new ButtonBuilder()
           .setCustomId('transfer_menu')
@@ -3104,7 +3104,7 @@ async function sendAtmPanel(client) {
         new ButtonBuilder()
           .setCustomId('consume_info')
           .setLabel('💠 消費資訊')
-          .setStyle(ButtonStyle.Secondary)
+          .setStyle(ButtonStyle.Primary)
       );
 
   const row2 =
@@ -3113,12 +3113,12 @@ async function sendAtmPanel(client) {
         new ButtonBuilder()
           .setCustomId('transfer_records')
           .setLabel('📜 交易紀錄')
-          .setStyle(ButtonStyle.Secondary),
+          .setStyle(ButtonStyle.Success),
 
         new ButtonBuilder()
           .setCustomId('my_bag')
           .setLabel('🎒 我的背包')
-          .setStyle(ButtonStyle.Primary)
+          .setStyle(ButtonStyle.Success)
       );
 
   const row3 =
@@ -3127,7 +3127,7 @@ async function sendAtmPanel(client) {
         new ButtonBuilder()
           .setCustomId('switch_benefit')
           .setLabel('🔄 切換權益')
-          .setStyle(ButtonStyle.Primary),
+          .setStyle(ButtonStyle.Secondary),
 
         new ButtonBuilder()
           .setCustomId('monthly_info')
@@ -3137,7 +3137,7 @@ async function sendAtmPanel(client) {
         new ButtonBuilder()
           .setCustomId('monthly_bill_pay')
           .setLabel('🌙 月結繳費')
-          .setStyle(ButtonStyle.Success)
+          .setStyle(ButtonStyle.Secondary)
       );
 
   const embed =
