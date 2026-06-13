@@ -1,5 +1,9 @@
 require('dotenv').config();
 const fs = require('fs');
+const {
+  startQiunaiSalaryReportCron,
+  sendQiunaiDailySalaryReports,
+} = require("./events/qiunaiSalaryReport");
 process.on('uncaughtException', err => {
   console.error('[Uncaught Exception]', err);
 });
@@ -28,6 +32,8 @@ const {
 } = require('discord.js');
 // ===== 初始化 =====
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const STAFF_TABLE = 'qiunai_staff';
+const CURRENT_GUILD_ID = process.env.GUILD_ID || null;
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -36,6 +42,82 @@ const client = new Client({
     GatewayIntentBits.MessageContent
   ],
 });
+function parseAllowedServices(value) {
+  if (!value) return [];
+
+  if (Array.isArray(value)) return value;
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {}
+
+    return value
+      .split(',')
+      .map(v => v.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+async function getStaffByDiscordId(discordId) {
+  let query = supabase
+    .from(STAFF_TABLE)
+    .select('*')
+    .eq('discord_id', discordId);
+
+  if (CURRENT_GUILD_ID) {
+    query = query.eq('guild_id', CURRENT_GUILD_ID);
+  }
+
+  const { data, error } = await query.maybeSingle();
+
+  if (error) {
+    console.error('[讀取 qiunai_staff 員工失敗]', error);
+    return null;
+  }
+
+  return data;
+}
+
+async function listActiveStaff() {
+  let query = supabase
+    .from(STAFF_TABLE)
+    .select('*');
+
+  if (CURRENT_GUILD_ID) {
+    query = query.eq('guild_id', CURRENT_GUILD_ID);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    console.error('[讀取 qiunai_staff 員工清單失敗]', error);
+    return [];
+  }
+
+  return data || [];
+}
+
+async function listStaffByService(serviceKey) {
+  const staffList = await listActiveStaff();
+
+  return staffList.filter(staff => {
+    if (staff.is_active === false) return false;
+
+    const services = parseAllowedServices(staff.allowed_services);
+
+    if (!serviceKey) return true;
+
+    return (
+      services.includes(serviceKey) ||
+      services.includes('all') ||
+      services.includes('ALL')
+    );
+  });
+}
 // ===== 陪玩排單系統 =====
 const dispatchSystem = require('./events/dispatchSystem');
 
@@ -229,19 +311,7 @@ async function handleTipGiftSelect(interaction) {
   tipData.amount = gift.price;
   pendingTips.set(tipId, tipData);
 
-  const { data: players, error } =
-    await supabase
-      .from('players')
-      .select('*')
-      .not('discord_id', 'is', null)
-      .order('status', { ascending: true });
-
-  if (error) {
-    console.error('[打賞] 讀取陪陪失敗', error);
-    return interaction.editReply({
-      content: '❌ 讀取陪陪名單失敗'
-    });
-  }
+  const players = await listActiveStaff();
 
   const seenPlayerIds = new Set();
   const playerOptions =
@@ -262,7 +332,7 @@ async function handleTipGiftSelect(interaction) {
             ? '在線'
             : '離線 / 未接單';
         return {
-          label: `${player.name || player.discord_id}`.slice(0, 100),
+          label: `${player.display_name || player.real_name || player.discord_name || player.name || player.discord_id}`.slice(0, 100),
           description: `${statusText}｜都可以打賞`.slice(0, 100),
           value: String(player.discord_id)
         };
@@ -769,10 +839,62 @@ async function saveTipToPlayOrders({
     console.error('[打賞寫入薪資網失敗]', error);
     throw error;
   }
+  const salaryRate = 0.8;
+  const staffSalary = Math.floor(Number(amount || 0) * salaryRate);
+  await saveQiunaiSalaryOrder({
+    orderId: data.id,
+    orderNo: data.order_no || data.id,
+    discordId: staffId,
+    staffName: null,
+    customerName: `<@${tipperId}>`,
+    serviceName: `打賞：${item}`,
+    orderAmount: Number(amount),
+    staffSalary,
+    bonusAmount: 0,
+    finishedAt: new Date().toISOString()
+  });
+  return data;
+}
+async function saveQiunaiSalaryOrder({
+  orderId,
+  orderNo,
+  discordId,
+  staffName,
+  customerName,
+  serviceName,
+  orderAmount,
+  staffSalary,
+  bonusAmount = 0,
+  finishedAt = new Date().toISOString()
+}) {
+  if (!discordId) return null;
+
+  const { data, error } = await supabase
+    .from('qiunai_salary_orders')
+    .insert({
+      order_id: String(orderNo || orderId || ''),
+      discord_id: String(discordId),
+      staff_name: staffName || null,
+      customer_name: customerName || null,
+      service_name: serviceName || '陪玩訂單',
+      order_amount: Number(orderAmount || 0),
+      staff_salary: Number(staffSalary || 0),
+      bonus_amount: Number(bonusAmount || 0),
+      platform_income: Number(orderAmount || 0),
+      platform_expense: Number(staffSalary || 0) + Number(bonusAmount || 0),
+      status: '未發薪',
+      order_finished_at: finishedAt
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error('[秋奈薪資] 寫入 qiunai_salary_orders 失敗', error);
+    throw error;
+  }
 
   return data;
 }
-
 async function sendTipCloseButtons(channel) {
   const row = new ActionRowBuilder()
     .addComponents(
@@ -4034,7 +4156,8 @@ console.log('✅ 私人房間系統已載入');
 console.log('🌧️ 星雨機器人已成功上線');
 startDailySummaryScheduler();
 startMonthlyBillScheduler();
-
+// ===== 秋奈薪資每日報告 =====
+startQiunaiSalaryReportCron(client, supabase);
 setInterval(async () => {
   try {
     const now =
@@ -4374,23 +4497,20 @@ async function sendBankTransferInfo(channel) {
   });
 }
 async function getAvailablePlayerOptions(service, guildId = process.env.GUILD_ID) {
-  const { data: players, error } =
-    await supabase
-      .from('players')
-      .select('*')
-      .eq('guild_id', guildId)
-      .eq('status', 'available');
+  const players = await listActiveStaff();
 
-  if (error) {
-    console.error('[指定陪陪] 讀取可接單陪陪失敗', error);
-    return [];
-  }
-
-  const targetService =
-    cleanServiceKey(service);
+  const targetService = cleanServiceKey(service);
 
   return (players || [])
     .filter(player => {
+      if (!player.discord_id) return false;
+
+      const isAvailable =
+        player.status === 'available' ||
+        player.is_online === true;
+
+      if (!isAvailable) return false;
+
       const allowedServices =
         Array.isArray(player.allowed_services)
           ? player.allowed_services
@@ -4402,8 +4522,7 @@ async function getAvailablePlayerOptions(service, guildId = process.env.GUILD_ID
       if (!allowedServices.length) return false;
 
       return allowedServices.some(s => {
-        const serviceKey =
-          cleanServiceKey(s);
+        const serviceKey = cleanServiceKey(s);
 
         return (
           serviceKey === targetService ||
@@ -4414,9 +4533,15 @@ async function getAvailablePlayerOptions(service, guildId = process.env.GUILD_ID
     })
     .slice(0, 24)
     .map(player => ({
-      label: String(player.name || player.discord_id).slice(0, 100),
+      label: String(
+        player.display_name ||
+        player.real_name ||
+        player.discord_name ||
+        player.name ||
+        player.discord_id
+      ).slice(0, 100),
       description: formatAvailableTime(player).slice(0, 100),
-      value: player.discord_id
+      value: String(player.discord_id)
     }));
 }
 // ===== Interaction Handler =====
@@ -8473,13 +8598,7 @@ async function handleButtonInteraction(interaction) {
     // ===== 寫入薪資紀錄：多位陪陪平分 =====
     if (assignedPlayers.length > 0 && totalPrice > 0) {
       for (const playerId of assignedPlayers) {
-        const { data: player } =
-            await supabase
-              .from('players')
-              .select('*')
-              .eq('guild_id', getGuildId(interaction))
-              .eq('discord_id', playerId)
-              .maybeSingle();
+        const player = await getStaffByDiscordId(playerId);
           const salaryRate =
             Number(player?.salary_rate || 0.8);
           const salaryAmount =
@@ -8496,6 +8615,23 @@ async function handleButtonInteraction(interaction) {
               salary_amount: salaryAmount,
               status: 'unpaid'
             });
+          await saveQiunaiSalaryOrder({
+            orderId: order.id,
+            orderNo: order.order_no,
+            discordId: playerId,
+            staffName:
+              player?.display_name ||
+              player?.real_name ||
+              player?.discord_name ||
+              player?.name ||
+              null,
+            customerName: order.customer_name || order.customer_username || `<@${order.customer_id}>`,
+            serviceName: order.service || order.order_item || '陪玩訂單',
+            orderAmount: splitAmount,
+            staffSalary: salaryAmount,
+            bonusAmount: 0,
+            finishedAt: new Date().toISOString()
+          });
         }
       }
       await interaction.channel.send({
@@ -9651,6 +9787,20 @@ async function handleError(interaction) {
 // ===== 聊天掉落 =====
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+  // ===== 秋奈薪資報告測試 =====
+  if (message.content === "!秋奈薪資報告測試") {
+    if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+      await message.reply("❌ 你沒有權限使用這個測試指令。");
+      return;
+    }
+
+    await message.reply("⏳ 正在發送秋奈每日薪資報告測試...");
+
+    await sendQiunaiDailySalaryReports(client, supabase);
+
+    await message.reply("✅ 秋奈每日薪資報告測試完成。");
+    return;
+  }
   const channelId = message.channel.id;
   if (dropCooldown.has(channelId)) return;
   const random = Math.floor(Math.random() * 100);

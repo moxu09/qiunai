@@ -724,6 +724,24 @@ function getStaffGuildId() {
     process.env.GUILD_ID
   );
 }
+function applyStaffGuildFilter(query) {
+  const guildId = getStaffGuildId();
+
+  if (!guildId) return query;
+
+  return query.eq('guild_id', guildId);
+}
+
+function getStaffDisplayName(staff) {
+  return String(
+    staff?.display_name ||
+    staff?.real_name ||
+    staff?.discord_name ||
+    staff?.name ||
+    staff?.discord_id ||
+    '未知員工'
+  );
+}
 function getBillingMonth(date = new Date()) {
   const taiwanDate =
     new Date(date.getTime() + 8 * 60 * 60 * 1000);
@@ -1145,12 +1163,14 @@ async function memberHasRequiredServiceRole(guild, userId, requiredRoleIds = [])
   );
 }
 async function getQualifiedPlayerOptions(pending) {
-  const { data: players, error } =
-    await supabase
-      .from('players')
+  let playerQuery =
+    supabase
+      .from('qiunai_staff')
       .select('*')
       .not('discord_id', 'is', null)
       .order('status', { ascending: true });
+  playerQuery = applyStaffGuildFilter(playerQuery);
+  const { data: players, error } = await playerQuery;
 
   if (error) {
     console.error('[新下單] 讀取陪陪失敗', error);
@@ -1193,13 +1213,13 @@ async function getQualifiedPlayerOptions(pending) {
     },
 
     ...onlinePlayers.map(player => ({
-      label: `🟢 ${String(player.name || player.discord_id)}`.slice(0, 100),
+      label: `🟢 ${getStaffDisplayName(player)}`.slice(0, 100),
       description: '目前在線，可直接安排'.slice(0, 100),
       value: `online_${player.discord_id}`
     })),
 
     ...offlinePlayers.map(player => ({
-      label: `⚪ ${String(player.name || player.discord_id)}`.slice(0, 100),
+      label: `⚪ ${getStaffDisplayName(player)}`.slice(0, 100),
       description: formatAvailableTime(player).slice(0, 100),
       value: `reserve_${player.discord_id}`
     }))
@@ -1208,12 +1228,14 @@ async function getQualifiedPlayerOptions(pending) {
   return options.slice(0, 25);
 }
 async function getAvailablePlayerOptions(service) {
-  const { data: players, error } =
-    await supabase
-      .from('players')
+  let playerQuery =
+    supabase
+      .from('qiunai_staff')
       .select('*')
       .eq('status', 'available')
       .not('discord_id', 'is', null);
+  playerQuery = applyStaffGuildFilter(playerQuery); 
+  const { data: players, error } = await playerQuery;
 
   if (error) {
     console.error('[指定陪陪] 讀取可接單陪陪失敗', error);
@@ -1238,7 +1260,7 @@ async function getAvailablePlayerOptions(service) {
     })
     .slice(0, 24)
     .map(player => ({
-      label: String(player.name || player.discord_id).slice(0, 100),
+      label: getStaffDisplayName(player).slice(0, 100),
       description: formatAvailableTime(player).slice(0, 100),
       value: player.discord_id
     }));
@@ -1289,23 +1311,26 @@ async function playerOnline(interaction) {
     });
   }
 
-  const { data: players, error } =
-    await supabase
-      .from('players')
+  let playerQuery =
+    supabase
+      .from('qiunai_staff')
       .select('*')
       .eq('discord_id', interaction.user.id)
       .limit(1);
 
+  playerQuery = applyStaffGuildFilter(playerQuery);
+
+  const { data: players, error } = await playerQuery;
+
   if (error) {
-    console.error('[開始接單] 讀取 players 失敗:', error);
+    console.error('[開始接單] 讀取 qiunai_staff 失敗:', error);
 
     return interaction.editReply({
       content: '❌ 讀取陪陪資料失敗，請稍後再試。'
     });
   }
 
-  const player =
-    players?.[0];
+  const player = players?.[0];
 
   if (!player) {
     return interaction.editReply({
@@ -1313,17 +1338,21 @@ async function playerOnline(interaction) {
     });
   }
 
-  const { error: updateError } =
-    await supabase
-      .from('players')
+  let updateQuery =
+    supabase
+      .from('qiunai_staff')
       .update({
         status: 'available',
         online_started_at: new Date().toISOString()
       })
       .eq('discord_id', interaction.user.id);
 
+  updateQuery = applyStaffGuildFilter(updateQuery);
+
+  const { error: updateError } = await updateQuery;
+
   if (updateError) {
-    console.error('[開始接單] 更新狀態失敗:', updateError);
+    console.error('[開始接單] 更新 qiunai_staff 狀態失敗:', updateError);
 
     return interaction.editReply({
       content: '❌ 開始接單失敗，請稍後再試。'
@@ -1351,12 +1380,17 @@ function hasAllowedServicesFromDb(player) {
 }
 // 陪玩下班
 async function playerOffline(interaction) {
-  await supabase
-    .from('players')
-    .update({
-      status: 'offline'
-    })
-    .eq('discord_id', interaction.user.id);
+  let updateQuery =
+    supabase
+      .from('qiunai_staff')
+      .update({
+        status: 'offline'
+      })
+      .eq('discord_id', interaction.user.id);
+
+  updateQuery = applyStaffGuildFilter(updateQuery);
+
+  await updateQuery;
 
   return interaction.editReply({
     content: '🔴 你已停止接單'
@@ -1391,10 +1425,13 @@ async function sendDailyPlayerSummary() {
     end
   } = getTodayRangeTW();
 
-  const { data: players, error: playerError } =
-    await supabase
-      .from('players')
+  const guildId = getStaffGuildId();
+  let playerQuery =
+    supabase
+      .from('qiunai_staff')
       .select('*');
+  playerQuery = applyStaffGuildFilter(playerQuery);
+  const { data: players, error: playerError } = await playerQuery;
 
   if (playerError) {
     console.log('[每日陪玩總結] 讀取陪玩失敗', playerError);
@@ -1405,13 +1442,17 @@ async function sendDailyPlayerSummary() {
     return;
   }
 
-  const { data: orders, error: orderError } =
-    await supabase
+  let orderQuery =
+    supabase
       .from('play_orders')
       .select('*')
       .eq('status', 'completed')
       .gte('completed_at', start)
       .lte('completed_at', end);
+  if (guildId) {
+    orderQuery = orderQuery.eq('guild_id', guildId);
+  }
+  const { data: orders, error: orderError } = await orderQuery;
 
   if (orderError) {
     console.log('[每日陪玩總結] 讀取訂單失敗', orderError);
@@ -1486,12 +1527,14 @@ async function sendDailyPlayerSummary() {
 }
 // 查看狀態
 async function playerStatus(interaction) {
-  const { data: players, error } =
-    await supabase
-      .from('players')
+  let playerQuery =
+    supabase
+      .from('qiunai_staff')
       .select('*')
       .eq('discord_id', interaction.user.id)
       .limit(1);
+  playerQuery = applyStaffGuildFilter(playerQuery);
+  const { data: players, error } = await playerQuery;
 
   if (error) {
     console.error('[我的狀態] 讀取 players 失敗:', error);
@@ -3301,11 +3344,13 @@ async function handleNewOrderPlayerSelect(interaction) {
   if (reserveIds.length > 0) {
     pending.selectedPlayerType = 'reserve';
     pendingNewOrders.set(flowId, pending);
-    const { data: players } =
-      await supabase
-        .from('players')
+    let reserveQuery =
+      supabase
+        .from('qiunai_staff')
         .select('*')
         .in('discord_id', reserveIds);
+    reserveQuery = applyStaffGuildFilter(reserveQuery);
+    const { data: players } = await reserveQuery;
     const availableText =
       (players || [])
         .map(player => {
@@ -6991,13 +7036,17 @@ async function acceptPlayOrder(interaction) {
     const orderId =
       interaction.customId.replace('accept_play_order_', '');
 
-    const { data: playerRows, error: playerError } =
-      await supabase
-        .from('players')
+    let playerQuery =
+      supabase
+        .from('qiunai_staff')
         .select('*')
         .eq('discord_id', interaction.user.id)
         .eq('status', 'available')
         .limit(1);
+
+    playerQuery = applyStaffGuildFilter(playerQuery);
+
+    const { data: playerRows, error: playerError } = await playerQuery;
 
     const player =
       playerRows?.[0];
@@ -7150,12 +7199,17 @@ async function acceptPlayOrder(interaction) {
 
     if (isFull) {
       for (const playerId of assignedPlayerIds) {
-        await supabase
-          .from('players')
-          .update({
-            status: 'busy'
-          })
-          .eq('discord_id', playerId);
+        let busyQuery =
+          supabase
+            .from('qiunai_staff')
+            .update({
+              status: 'busy'
+            })
+            .eq('discord_id', playerId);
+
+        busyQuery = applyStaffGuildFilter(busyQuery);
+
+        await busyQuery;
       }
     }
 
@@ -7642,11 +7696,15 @@ function getServiceKeywordFromPending(pending) {
 }
 
 async function showServicePlayerSelect(channel, flowId, pending) {
-  const { data: players, error } =
-    await supabase
-      .from('players')
+  let playerQuery =
+    supabase
+      .from('qiunai_staff')
       .select('*')
       .order('status', { ascending: true });
+
+  playerQuery = applyStaffGuildFilter(playerQuery);
+
+  const { data: players, error } = await playerQuery;
 
   if (error) {
     console.error('[新版指定陪陪] 讀取陪陪失敗', error);
@@ -7698,13 +7756,13 @@ async function showServicePlayerSelect(channel, flowId, pending) {
 
   const options = [
     ...onlinePlayers.map(player => ({
-      label: `🟢 ${String(player.name || player.discord_id)}`.slice(0, 100),
+      label: `🟢 ${getStaffDisplayName(player)}`.slice(0, 100),
       description: '目前在線，可直接安排'.slice(0, 100),
       value: `online_${player.discord_id}`
     })),
 
     ...offlinePlayers.map(player => ({
-      label: `⚪ ${String(player.name || player.discord_id)}`.slice(0, 100),
+      label: `⚪ ${getStaffDisplayName(player)}`.slice(0, 100),
       description: formatAvailableTime(player).slice(0, 100),
       value: `reserve_${player.discord_id}`
     }))
@@ -7829,11 +7887,13 @@ async function handleServiceSelectedPlayersSelect(interaction) {
   pendingServiceOrders.set(flowId, pending);
 
   if (reserveIds.length > 0) {
-    const { data: players } =
-      await supabase
-        .from('players')
+    let reserveQuery =
+      supabase
+        .from('qiunai_staff')
         .select('*')
         .in('discord_id', reserveIds);
+    reserveQuery = applyStaffGuildFilter(reserveQuery);
+    const { data: players } = await reserveQuery;
 
     const availableText =
       (players || [])
