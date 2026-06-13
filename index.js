@@ -5506,10 +5506,11 @@ async function handleSlashCommand(interaction) {
               .upsert({
                 guild_id: guildId,
                 user_id: target.id,
+                level_key: oldVip?.level_key || null,
+                level_name: oldVip?.level_name || null,
                 total_spent: newTotalSpent,
                 total_topup: Number(oldVip?.total_topup || 0),
                 highest_single_topup: Number(oldVip?.highest_single_topup || 0),
-                vip_level: oldVip?.vip_level || 0,
                 updated_at: new Date().toISOString()
               }, {
                 onConflict: 'guild_id,user_id'
@@ -5635,10 +5636,11 @@ async function handleSlashCommand(interaction) {
           const payload = {
             guild_id: guildId,
             user_id: target.id,
+            level_key: oldVip?.level_key || null,
+            level_name: oldVip?.level_name || null,
             total_spent: Number(oldVip?.total_spent || 0),
             total_topup: newTotalTopup,
             highest_single_topup: newHighestSingleTopup,
-            vip_level: Number(oldVip?.vip_level || 0),
             updated_at: new Date().toISOString()
           };
           if (oldVip) {
