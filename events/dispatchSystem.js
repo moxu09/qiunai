@@ -725,11 +725,7 @@ function getStaffGuildId() {
   );
 }
 function applyStaffGuildFilter(query) {
-  const guildId = getStaffGuildId();
-
-  if (!guildId) return query;
-
-  return query.eq('guild_id', guildId);
+  return query;
 }
 
 function getStaffDisplayName(staff) {

@@ -255,20 +255,13 @@ function splitMessage(text, maxLength = 1900) {
 
 async function sendQiunaiDailySalaryReports(client, supabase) {
   const { dateText, startIso, endIso } = getTaipeiDayRange();
-  const guildId = process.env.STAFF_GUILD_ID || process.env.GUILD_ID || null;
   console.log(`[QIUNAI_REPORT] 開始發送秋奈每日薪資報告：${dateText}`);
 
-  let staffQuery = supabase
+  const { data: staffList, error: staffError } = await supabase
     .from("qiunai_staff")
     .select("*")
     .eq("is_active", true)
     .not("salary_channel_id", "is", null);
-
-  if (guildId) {
-    staffQuery = staffQuery.eq("guild_id", guildId);
-  }
-  const { data: staffList, error: staffError } = await staffQuery;
-
   if (staffError) {
     console.error("[QIUNAI_REPORT] 讀取 qiunai_staff 失敗", staffError);
     return;
@@ -298,10 +291,18 @@ async function sendQiunaiDailySalaryReports(client, supabase) {
     return;
   }
 
-  const orders = todayOrders || [];
-  const bonuses = todayBonuses || [];
   const staffs = staffList || [];
-
+  const staffDiscordIds = new Set(
+    staffs
+      .map(staff => String(staff.discord_id || "").trim())
+      .filter(Boolean) 
+  );
+  const orders = (todayOrders || []).filter(order =>
+    staffDiscordIds.has(String(order.discord_id || "").trim())
+  );
+  const bonuses = (todayBonuses || []).filter(bonus =>
+    staffDiscordIds.has(String(bonus.discord_id || "").trim())
+  );
   let successCount = 0;
   let failCount = 0;
 
@@ -341,7 +342,6 @@ async function sendQiunaiDailySalaryReports(client, supabase) {
     .order("created_at", { ascending: true })
     .limit(1)
     .maybeSingle();
-
   if (settingError) {
     console.error("[QIUNAI_REPORT] 讀取 qiunai_salary_settings 失敗", settingError);
   }

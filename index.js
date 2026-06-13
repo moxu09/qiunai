@@ -33,7 +33,7 @@ const {
 // ===== 初始化 =====
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const STAFF_TABLE = 'qiunai_staff';
-const CURRENT_GUILD_ID = process.env.GUILD_ID || null;
+const CURRENT_GUILD_ID = null;
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
