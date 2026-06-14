@@ -798,6 +798,156 @@ async function giveMonthlyVip(
       expires_at: expiresAt.toISOString()
     });
 }
+function getManualCommissionRate(tier) {
+  if (tier === 'rate_80') return 80;
+  if (tier === 'rate_85') return 85;
+  if (tier === 'rate_90') return 90;
+  if (tier === 'manager_95') return 95;
+
+  return null;
+}
+
+function getTaipeiDate(date = new Date()) {
+  return new Date(date.getTime() + 8 * 60 * 60 * 1000);
+}
+
+function getTaipeiMonthText(date = new Date()) {
+  const taipeiDate = getTaipeiDate(date);
+  return taipeiDate.toISOString().slice(0, 7);
+}
+
+function getTaipeiYearText(date = new Date()) {
+  const taipeiDate = getTaipeiDate(date);
+  return taipeiDate.toISOString().slice(0, 4);
+}
+
+function getNextMonthTextFromIso(isoText) {
+  const date = new Date(isoText);
+  const taipeiDate = getTaipeiDate(date);
+
+  const year = taipeiDate.getUTCFullYear();
+  const month = taipeiDate.getUTCMonth();
+
+  const next = new Date(Date.UTC(year, month + 1, 1));
+
+  return next.toISOString().slice(0, 7);
+}
+
+async function getFirstReachOrderAmountDate(discordId, targetAmount) {
+  const { data, error } = await supabase
+    .from('qiunai_salary_orders')
+    .select('order_amount, order_finished_at')
+    .eq('discord_id', String(discordId))
+    .or('is_deleted.eq.false,is_deleted.is.null')
+    .order('order_finished_at', { ascending: true });
+
+  if (error) {
+    console.error('[抽成計算] 讀取累積接單金額失敗:', error);
+    return null;
+  }
+
+  let total = 0;
+
+  for (const order of data || []) {
+    total += Number(order.order_amount || 0);
+
+    if (total >= targetAmount) {
+      return order.order_finished_at;
+    }
+  }
+
+  return null;
+}
+
+async function getPreviousYearSalaryTotal(discordId, finishedAt) {
+  const year = Number(getTaipeiYearText(new Date(finishedAt)));
+  const previousYear = year - 1;
+
+  const start = new Date(`${previousYear}-01-01T00:00:00+08:00`).toISOString();
+  const end = new Date(`${previousYear}-12-31T23:59:59.999+08:00`).toISOString();
+
+  const { data, error } = await supabase
+    .from('qiunai_salary_orders')
+    .select('staff_salary')
+    .eq('discord_id', String(discordId))
+    .or('is_deleted.eq.false,is_deleted.is.null')
+    .gte('order_finished_at', start)
+    .lte('order_finished_at', end);
+
+  if (error) {
+    console.error('[抽成計算] 讀取去年薪資失敗:', error);
+    return 0;
+  }
+
+  return (data || []).reduce(
+    (sum, order) => sum + Number(order.staff_salary || 0),
+    0
+  );
+}
+
+async function getQiunaiCommissionInfo(discordId, finishedAt = new Date().toISOString()) {
+  const finishedDate = new Date(finishedAt);
+  const openingEnd = new Date('2026-09-01T00:00:00+08:00');
+
+  // 2026/9/1 前，全部固定 90%
+  if (finishedDate < openingEnd) {
+    return {
+      rate: 90,
+      level: '開幕期固定 90%'
+    };
+  }
+
+  const staff = await getStaffByDiscordId(discordId);
+
+  const manualRate =
+    getManualCommissionRate(staff?.commission_tier);
+
+  // 九月後，後台有手動設定就優先用手動設定
+  if (manualRate) {
+    return {
+      rate: manualRate,
+      level:
+        manualRate === 95
+          ? '主管津貼 95%'
+          : `後台設定 ${manualRate}%`
+    };
+  }
+
+  // 去年薪資滿 100,000，隔年整年 90%
+  const previousYearSalary =
+    await getPreviousYearSalaryTotal(discordId, finishedAt);
+
+  if (previousYearSalary >= 100000) {
+    return {
+      rate: 90,
+      level: '年度薪資達標｜隔年 90%'
+    };
+  }
+
+  // 歷史接單金額滿 10,000，達標的下個月開始 85%
+  const firstReach10kDate =
+    await getFirstReachOrderAmountDate(discordId, 10000);
+
+  if (firstReach10kDate) {
+    const reachNextMonth =
+      getNextMonthTextFromIso(firstReach10kDate);
+
+    const orderMonth =
+      getTaipeiMonthText(new Date(finishedAt));
+
+    if (orderMonth >= reachNextMonth) {
+      return {
+        rate: 85,
+        level: '累積接單滿 10,000｜85%'
+      };
+    }
+  }
+
+  return {
+    rate: 80,
+    level: '九月後預設 80%'
+  };
+}
 async function saveTipToPlayOrders({
   guildId,
   tipperId,
@@ -839,8 +989,6 @@ async function saveTipToPlayOrders({
     console.error('[打賞寫入薪資網失敗]', error);
     throw error;
   }
-  const salaryRate = 0.8;
-  const staffSalary = Math.floor(Number(amount || 0) * salaryRate);
   await saveQiunaiSalaryOrder({
     orderId: data.id,
     orderNo: data.order_no || data.id,
@@ -849,11 +997,170 @@ async function saveTipToPlayOrders({
     customerName: `<@${tipperId}>`,
     serviceName: `打賞：${item}`,
     orderAmount: Number(amount),
-    staffSalary,
     bonusAmount: 0,
     finishedAt: new Date().toISOString()
   });
   return data;
+}
+function getManualCommissionRate(tier) {
+  if (tier === 'rate_80') return 80;
+  if (tier === 'rate_85') return 85;
+  if (tier === 'rate_90') return 90;
+  if (tier === 'manager_95') return 95;
+  return null;
+}
+
+function getTaipeiMonthText(date = new Date()) {
+  const taipeiDate =
+    new Date(date.getTime() + 8 * 60 * 60 * 1000);
+
+  return taipeiDate.toISOString().slice(0, 7);
+}
+
+function getTaipeiYearText(date = new Date()) {
+  const taipeiDate =
+    new Date(date.getTime() + 8 * 60 * 60 * 1000);
+
+  return taipeiDate.toISOString().slice(0, 4);
+}
+
+function getNextMonthTextFromIso(isoText) {
+  const date = new Date(isoText);
+  const taipeiDate =
+    new Date(date.getTime() + 8 * 60 * 60 * 1000);
+
+  const year =
+    taipeiDate.getUTCFullYear();
+
+  const month =
+    taipeiDate.getUTCMonth();
+
+  const next =
+    new Date(Date.UTC(year, month + 1, 1));
+
+  return next.toISOString().slice(0, 7);
+}
+
+async function getFirstReachAmountDate(discordId, targetAmount) {
+  const { data, error } = await supabase
+    .from('qiunai_salary_orders')
+    .select('*')
+    .eq('discord_id', String(discordId))
+    .eq('is_deleted', false)
+    .order('order_finished_at', { ascending: true });
+
+  if (error) {
+    console.error('[抽成計算] 讀取歷史訂單失敗', error);
+    return null;
+  }
+
+  let total = 0;
+
+  for (const order of data || []) {
+    total += Number(order.order_amount || 0);
+
+    if (total >= targetAmount) {
+      return order.order_finished_at;
+    }
+  }
+
+  return null;
+}
+
+async function getPreviousYearSalaryTotal(discordId, finishedAt) {
+  const year =
+    Number(getTaipeiYearText(new Date(finishedAt)));
+
+  const previousYear =
+    year - 1;
+
+  const start =
+    new Date(`${previousYear}-01-01T00:00:00+08:00`).toISOString();
+
+  const end =
+    new Date(`${previousYear}-12-31T23:59:59.999+08:00`).toISOString();
+
+  const { data, error } = await supabase
+    .from('qiunai_salary_orders')
+    .select('staff_salary')
+    .eq('discord_id', String(discordId))
+    .eq('is_deleted', false)
+    .gte('order_finished_at', start)
+    .lte('order_finished_at', end);
+
+  if (error) {
+    console.error('[抽成計算] 讀取去年薪資失敗', error);
+    return 0;
+  }
+
+  return (data || []).reduce(
+    (sum, order) => sum + Number(order.staff_salary || 0),
+    0
+  );
+}
+
+async function getQiunaiCommissionInfo(discordId, finishedAt = new Date().toISOString()) {
+  const finishedDate =
+    new Date(finishedAt);
+
+  const openingEnd =
+    new Date('2026-09-01T00:00:00+08:00');
+
+  if (finishedDate < openingEnd) {
+    return {
+      rate: 90,
+      level: '開幕期 90%'
+    };
+  }
+
+  const staff =
+    await getStaffByDiscordId(discordId);
+
+  const manualRate =
+    getManualCommissionRate(staff?.commission_tier);
+
+  if (manualRate) {
+    return {
+      rate: manualRate,
+      level:
+        manualRate === 95
+          ? '主管津貼 95%'
+          : `手動檔位 ${manualRate}%`
+    };
+  }
+
+  const previousYearSalary =
+    await getPreviousYearSalaryTotal(discordId, finishedAt);
+
+  if (previousYearSalary >= 100000) {
+    return {
+      rate: 90,
+      level: '年度薪資達標｜隔年 90%'
+    };
+  }
+
+  const firstReach10kDate =
+    await getFirstReachAmountDate(discordId, 10000);
+
+  if (firstReach10kDate) {
+    const reachNextMonth =
+      getNextMonthTextFromIso(firstReach10kDate);
+
+    const orderMonth =
+      getTaipeiMonthText(new Date(finishedAt));
+
+    if (orderMonth >= reachNextMonth) {
+      return {
+        rate: 85,
+        level: '累積接單滿 10,000｜85%'
+      };
+    }
+  }
+
+  return {
+    rate: 80,
+    level: '預設 80%'
+  };
 }
 async function saveQiunaiSalaryOrder({
   orderId,
@@ -869,28 +1176,54 @@ async function saveQiunaiSalaryOrder({
 }) {
   if (!discordId) return null;
 
+  const commission =
+    await getQiunaiCommissionInfo(discordId, finishedAt);
+
+  const finalOrderAmount =
+    Number(orderAmount || 0);
+
+  const finalBonusAmount =
+    Number(bonusAmount || 0);
+
+  const finalStaffSalary =
+    Math.round(finalOrderAmount * (commission.rate / 100));
+
+  const staff =
+    await getStaffByDiscordId(discordId);
+
+  const finalStaffName =
+    staffName ||
+    staff?.display_name ||
+    staff?.real_name ||
+    staff?.discord_name ||
+    staff?.name ||
+    null;
+
   const { data, error } = await supabase
     .from('qiunai_salary_orders')
     .insert({
       order_id: String(orderNo || orderId || ''),
       discord_id: String(discordId),
-      staff_name: staffName || null,
+      staff_name: finalStaffName,
       customer_name: customerName || null,
       service_name: serviceName || '陪玩訂單',
-      order_amount: Number(orderAmount || 0),
-      staff_salary: Number(staffSalary || 0),
-      bonus_amount: Number(bonusAmount || 0),
-      platform_income: Number(orderAmount || 0),
-      platform_expense: Number(staffSalary || 0) + Number(bonusAmount || 0),
+      order_amount: finalOrderAmount,
+      staff_salary: finalStaffSalary,
+      bonus_amount: finalBonusAmount,
+      salary_rate: commission.rate,
+      salary_level: commission.level,
+      platform_income: finalOrderAmount,
+      platform_expense: finalStaffSalary + finalBonusAmount,
       status: '未發薪',
-      order_finished_at: finishedAt
+      order_finished_at: finishedAt,
+      is_deleted: false
     })
     .select()
     .single();
 
   if (error) {
-    console.error('[秋奈薪資] 寫入 qiunai_salary_orders 失敗', error);
-    throw error;
+    console.error('[秋奈薪資網] 寫入薪資訂單失敗:', error);
+    return null;
   }
 
   return data;
@@ -8597,43 +8930,52 @@ async function handleButtonInteraction(interaction) {
           Math.floor(totalPrice / playerCount);
     // ===== 寫入薪資紀錄：多位陪陪平分 =====
     if (assignedPlayers.length > 0 && totalPrice > 0) {
+      const finishedAt =
+        new Date().toISOString();
       for (const playerId of assignedPlayers) {
-        const player = await getStaffByDiscordId(playerId);
-          const salaryRate =
-            Number(player?.salary_rate || 0.8);
-          const salaryAmount =
-            Math.floor(splitAmount * salaryRate);
-          await supabase
-            .from('salary_orders')
-            .insert({
-              order_id: order.id,
-              order_no: order.order_no,
-              player_id: playerId,
-              customer_id: order.customer_id,
-              service: order.service || order.order_item || '陪玩訂單',
-              total_amount: splitAmount,
-              salary_amount: salaryAmount,
-              status: 'unpaid'
-            });
-          await saveQiunaiSalaryOrder({
-            orderId: order.id,
-            orderNo: order.order_no,
-            discordId: playerId,
-            staffName:
-              player?.display_name ||
-              player?.real_name ||
-              player?.discord_name ||
-              player?.name ||
-              null,
-            customerName: order.customer_name || order.customer_username || `<@${order.customer_id}>`,
-            serviceName: order.service || order.order_item || '陪玩訂單',
-            orderAmount: splitAmount,
-            staffSalary: salaryAmount,
-            bonusAmount: 0,
-            finishedAt: new Date().toISOString()
+        const player =
+          await getStaffByDiscordId(playerId);
+        const commission =
+          await getQiunaiCommissionInfo(playerId, finishedAt);
+        const salaryAmount =
+          Math.round(splitAmount * (commission.rate / 100));
+        // 舊 salary_orders 若你還有其他地方用，這裡也同步寫正確抽成
+        await supabase
+          .from('salary_orders')
+          .insert({
+            order_id: order.id,
+            order_no: order.order_no,
+            player_id: playerId,
+            customer_id: order.customer_id,
+            service: order.service || order.order_item || '陪玩訂單',
+            total_amount: splitAmount,
+            salary_amount: salaryAmount,
+            status: 'unpaid'
           });
-        }
+        await saveQiunaiSalaryOrder({
+          orderId: order.id,
+          orderNo: order.order_no,
+          discordId: playerId,
+          staffName:
+            player?.display_name ||
+            player?.real_name ||
+            player?.discord_name ||
+            player?.name ||
+            null,
+          customerName:
+            order.customer_name ||
+            order.customer_username ||
+            `<@${order.customer_id}>`,
+          serviceName:
+            order.service ||
+            order.order_item ||
+            '陪玩訂單',
+          orderAmount: splitAmount,
+          bonusAmount: 0,
+          finishedAt
+        });
       }
+    }
       await interaction.channel.send({
         embeds: [
           new EmbedBuilder()
