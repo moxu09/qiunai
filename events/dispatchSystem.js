@@ -959,10 +959,24 @@ function normalizeAllowedServices(value) {
       .filter(Boolean);
   }
 
-  return String(value || '')
-    .split(',')
-    .map(item => item.trim())
-    .filter(Boolean);
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map(item => String(item).trim())
+          .filter(Boolean);
+      }
+    } catch {}
+
+    return value
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
 }
 
 function matchPlayerService(player, keyword) {
@@ -1165,13 +1179,18 @@ async function getQualifiedPlayerOptions(pending) {
       .select('*')
       .not('discord_id', 'is', null)
       .order('status', { ascending: true });
+
   playerQuery = applyStaffGuildFilter(playerQuery);
+
   const { data: players, error } = await playerQuery;
 
   if (error) {
     console.error('[新下單] 讀取陪陪失敗', error);
     return [];
   }
+
+  const serviceKeyword =
+    getServiceKeywordFromPending(pending);
 
   const seenPlayerIds = new Set();
 
@@ -1192,7 +1211,16 @@ async function getQualifiedPlayerOptions(pending) {
           return false;
         }
 
-        return true;
+        const allowedServices =
+          normalizeAllowedServices(player.allowed_services);
+
+        // 沒有設定可接服務，不顯示
+        if (!allowedServices.length) return false;
+
+        return matchAllowedServiceName(
+          allowedServices,
+          serviceKeyword
+        );
       });
 
   const onlinePlayers =
@@ -1230,13 +1258,18 @@ async function getAvailablePlayerOptions(service) {
       .select('*')
       .eq('status', 'available')
       .not('discord_id', 'is', null);
-  playerQuery = applyStaffGuildFilter(playerQuery); 
+
+  playerQuery = applyStaffGuildFilter(playerQuery);
+
   const { data: players, error } = await playerQuery;
 
   if (error) {
     console.error('[指定陪陪] 讀取可接單陪陪失敗', error);
     return [];
   }
+
+  const targetService =
+    cleanServiceKey(service || '');
 
   const seenPlayerIds = new Set();
 
@@ -1252,7 +1285,17 @@ async function getAvailablePlayerOptions(service) {
 
       seenPlayerIds.add(id);
 
-      return true;
+      if (!targetService) return true;
+
+      const allowedServices =
+        normalizeAllowedServices(player.allowed_services);
+
+      if (!allowedServices.length) return false;
+
+      return matchAllowedServiceName(
+        allowedServices,
+        targetService
+      );
     })
     .slice(0, 24)
     .map(player => ({
@@ -1261,8 +1304,6 @@ async function getAvailablePlayerOptions(service) {
       value: player.discord_id
     }));
 }
-
-
 // ===== 派單紀錄 =====
 async function sendPlayLog({
   title,
@@ -6359,9 +6400,15 @@ async function openDispatchPlayerMenu(interaction) {
       content: '❌ 這張訂單目前狀態不能再選擇陪陪'
     });
   }
-  const playerOptions =
-    await getAvailablePlayerOptions(service, getGuildId(interaction));
+  const service =
+    order.dispatch_service_key ||
+    order.service ||
+    order.order_item ||
+    order.game ||
+    '';
 
+  const playerOptions =
+    await getAvailablePlayerOptions(service);
   if (!playerOptions.length) {
     return interaction.editReply({
       content: '❌ 目前沒有可接單陪陪'
@@ -7651,46 +7698,121 @@ async function handleServiceGenderSelect(interaction) {
     content: `✅ 已選擇性別偏好：${pending.genderPreference}`
   });
 }
-function getServiceKeywordFromPending(pending) {
-  if (pending.category === 'valorant') {
-    const serviceTypes =
-      Array.isArray(pending.serviceTypes)
-        ? pending.serviceTypes
-        : [];
-    if (
-      serviceTypes.includes('技術') ||
-      pending.serviceType === '技術'
-    ) {
-      return '特戰英豪技術陪玩';
-    }
-    if (
-      serviceTypes.includes('娛樂') ||
-      pending.serviceType === '娛樂'
-    ) {
-      return '特戰英豪娛樂陪玩';
-    }
+function getServiceKeywordFromPending(pending = {}) {
+  const text = [
+    pending.serviceType,
+    pending.gameLabel,
+    pending.itemLabel,
+    pending.playMode,
+    pending.deltaMode,
+    pending.steamCategory,
+    pending.game,
+    pending.item
+  ]
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+    .join('｜');
+
+  if (pending.category === 'valorant' || text.includes('特戰英豪')) {
+    if (text.includes('大神')) return '特戰英豪大神陪玩';
+    if (text.includes('技術')) return '特戰英豪技術陪玩';
+    if (text.includes('娛樂')) return '特戰英豪娛樂陪玩';
     return '特戰英豪';
   }
 
-  if (pending.category === 'steam') {
-    return 'Steam';
+  if (pending.category === 'apex' || text.includes('Apex')) {
+    if (text.includes('大神')) return 'Apex大神陪玩';
+    if (text.includes('技術')) return 'Apex技術陪玩';
+    if (text.includes('娛樂')) return 'Apex娛樂陪玩';
+    return 'Apex';
   }
 
-  if (pending.category === 'delta') {
+  if (pending.category === 'delta' || text.includes('三角洲')) {
+    if (text.includes('娛樂陪玩')) return '三角洲行動娛樂陪玩';
+    if (text.includes('基本單護')) return '三角洲行動基本單護';
+    if (text.includes('機密雙護') && text.includes('保底')) return '三角洲行動機密雙護保底';
+    if (text.includes('機密雙護')) return '三角洲行動機密雙護';
+    if (text.includes('猛攻') && text.includes('保底')) return '三角洲行動猛攻護航保底';
+    if (text.includes('猛攻')) return '三角洲行動猛攻護航';
     return '三角洲行動';
   }
 
-  if (pending.category === 'chat') {
-    return '陪聊';
+  if (
+    pending.category === 'lol' ||
+    text.includes('英雄聯盟') ||
+    text.includes('ARAM') ||
+    text.includes('聯盟戰棋')
+  ) {
+    if (text.includes('聯盟戰棋')) return '聯盟戰棋';
+
+    if (text.includes('ARAM')) {
+      if (text.includes('大神')) return 'ARAM大神陪玩';
+      if (text.includes('技術')) return 'ARAM技術陪玩';
+      if (text.includes('娛樂')) return 'ARAM娛樂陪玩';
+      return 'ARAM';
+    }
+
+    if (text.includes('大神')) return '英雄聯盟大神陪玩';
+    if (text.includes('技術')) return '英雄聯盟技術陪玩';
+    if (text.includes('娛樂')) return '英雄聯盟娛樂陪玩';
+    return '英雄聯盟';
   }
 
-  if (pending.category === 'emotion') {
-    return '出氣包';
+  if (pending.category === 'steam' || text.includes('Steam')) {
+    if (text.includes('肉鴿')) return 'Steam肉鴿遊戲';
+    if (text.includes('生存')) return 'Steam生存遊戲';
+    if (text.includes('恐怖')) return 'Steam恐怖遊戲';
+    if (text.includes('派對')) return 'Steam派對遊戲';
+    return 'Steam';
   }
 
-  return getServiceName(pending.category);
+  if (pending.category === 'other') {
+    if (text.includes('語音聊天')) return '語音聊天';
+    if (text.includes('點歌')) return '點歌服務';
+    if (text.includes('PUBG M')) return 'PUBG M';
+    if (text.includes('NARAKA')) return 'NARAKA';
+    if (text.includes('Minecraft')) return 'Minecraft';
+  }
+
+  return '';
+}
+function getServiceGroupName(targetService) {
+  const target =
+    cleanServiceKey(targetService);
+
+  if (target.includes('特戰英豪')) return '特戰英豪';
+  if (target.includes('三角洲行動')) return '三角洲行動';
+  if (target.includes('Apex')) return 'Apex';
+  if (target.includes('英雄聯盟')) return '英雄聯盟';
+  if (target.includes('ARAM')) return 'ARAM';
+  if (target.includes('聯盟戰棋')) return '聯盟戰棋';
+  if (target.includes('Steam')) return 'Steam';
+
+  return target;
 }
 
+function matchAllowedServiceName(allowedServices, targetService) {
+  const target =
+    cleanServiceKey(targetService);
+
+  if (!target) return false;
+
+  const services =
+    normalizeAllowedServices(allowedServices)
+      .map(service => cleanServiceKey(service))
+      .filter(Boolean);
+
+  if (!services.length) return false;
+
+  const group =
+    getServiceGroupName(target);
+
+  return (
+    services.includes(target) ||
+    services.includes('全部服務') ||
+    services.includes(`${group}全部`)
+  );
+}
 async function showServicePlayerSelect(channel, flowId, pending) {
   let playerQuery =
     supabase
@@ -7718,30 +7840,13 @@ async function showServicePlayerSelect(channel, flowId, pending) {
         const allowedServices =
           normalizeAllowedServices(player.allowed_services);
 
-        // 沒填 allowed_services 的先顯示，避免陪陪資料沒補完整時完全沒人可選
-        if (!allowedServices.length) return true;
+        // 沒有設定可接服務，就不要顯示，避免誤接錯項目
+        if (!allowedServices.length) return false;
 
-        const clean = text =>
-          String(text || '')
-            .replace(/\s+/g, '')
-            .replace(/[｜|]/g, '')
-            .replace(/　/g, '')
-            .replace(/[\u200B-\u200D\uFEFF]/g, '')
-            .trim();
-
-        const target =
-          clean(serviceKeyword);
-
-        return allowedServices.some(service => {
-          const serviceText =
-            clean(service);
-
-          return (
-            serviceText === target ||
-            serviceText.includes(target) ||
-            target.includes(serviceText)
-          );
-        });
+        return matchAllowedServiceName(
+          allowedServices,
+          serviceKeyword
+        );
       });
 
   const onlinePlayers =
