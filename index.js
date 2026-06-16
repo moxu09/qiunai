@@ -5920,6 +5920,9 @@ async function handleSlashCommand(interaction) {
             interaction.options.getString('模式');
           const note =
             interaction.options.getString('備註') || '手動調整累積消費';
+          if (!guildId) {
+            return replyError(interaction, '找不到群組 ID，無法調整累積消費');
+          }
           if (!target) {
             return replyError(interaction, '找不到玩家');
           }
@@ -5939,47 +5942,69 @@ async function handleSlashCommand(interaction) {
           }
           const oldTotalSpent =
             Number(oldVip?.total_spent || 0);
-          let newTotalSpent = oldTotalSpent;
+          let newTotalSpent =
+            oldTotalSpent;
           if (mode === 'add') {
             if (amount <= 0) {
               return replyError(interaction, '增加金額必須大於 0');
             }
-            newTotalSpent = oldTotalSpent + amount;
+            newTotalSpent =
+              oldTotalSpent + amount;
           }
           if (mode === 'subtract') {
             if (amount <= 0) {
               return replyError(interaction, '扣除金額必須大於 0');
             }
-            newTotalSpent = Math.max(0, oldTotalSpent - amount);
+            newTotalSpent =
+              Math.max(0, oldTotalSpent - amount);
           }
           if (mode === 'set') {
             if (amount < 0) {
               return replyError(interaction, '直接設定金額不能小於 0');
             }
-            newTotalSpent = amount;
+            newTotalSpent =
+              amount;
           }
-          const { data: updatedVip, error: upsertError } =
-            await supabase
-              .from('user_vips')
-              .upsert({
-                guild_id: guildId,
-                user_id: target.id,
-                level_key: oldVip?.level_key || null,
-                level_name: oldVip?.level_name || null,
-                total_spent: newTotalSpent,
-                total_topup: Number(oldVip?.total_topup || 0),
-                highest_single_topup: Number(oldVip?.highest_single_topup || 0),
-                updated_at: new Date().toISOString()
-              }, {
-                onConflict: 'guild_id,user_id'
-              })
-              .select()
-              .single();
-          if (upsertError || !updatedVip) {
-            console.error('[調整累積消費] 更新失敗', upsertError);
-            return replyError(interaction, '更新累積消費失敗');
+          const payload = {
+            guild_id: guildId,
+            user_id: target.id,
+            level_key: oldVip?.level_key || null,
+            level_name: oldVip?.level_name || null,
+            total_spent: newTotalSpent,
+            total_topup: Number(oldVip?.total_topup || 0),
+            highest_single_topup: Number(oldVip?.highest_single_topup || 0),
+            updated_at: new Date().toISOString()
+          };
+          let updatedVip = null;
+          let saveError = null;
+          if (oldVip) {
+            const { data, error } =
+              await supabase
+                .from('user_vips')
+                .update(payload)
+                .eq('guild_id', guildId)
+                .eq('user_id', target.id)
+                .select()
+                .maybeSingle();
+            updatedVip = data;
+            saveError = error;
+          } else {
+            const { data, error } =
+              await supabase
+                .from('user_vips')
+                .insert(payload)
+                .select()
+                .maybeSingle();
+            updatedVip = data;
+            saveError = error;
           }
-          // 重新檢查 VIP 升級：用 0 金額觸發重新判斷，不再增加消費
+          if (saveError || !updatedVip) {
+            console.error('[調整累積消費] 更新失敗', saveError);
+            return replyError(
+              interaction,
+              `更新累積消費失敗：${saveError?.message || '未知錯誤'}`
+            );
+          }
           try {
             await checkAndUpgradeVip(
               target.id,
@@ -5997,7 +6022,13 @@ async function handleSlashCommand(interaction) {
                 .setTitle('✅ 已調整累積消費')
                 .setDescription(
                   `會員：<@${target.id}>\n` +
-                  `模式：${mode === 'add' ? '增加' : mode === 'subtract' ? '扣除' : '直接設定'}\n` +
+                  `模式：${
+                    mode === 'add'
+                      ? '增加'
+                      : mode === 'subtract'
+                        ? '扣除'
+                        : '直接設定'
+                  }\n` +
                   `調整金額：NT$${amount.toLocaleString('zh-TW')}\n\n` +
                   `原本累積消費：NT$${oldTotalSpent.toLocaleString('zh-TW')}\n` +
                   `現在累積消費：NT$${newTotalSpent.toLocaleString('zh-TW')}\n\n` +
@@ -6008,7 +6039,7 @@ async function handleSlashCommand(interaction) {
                 })
                 .setTimestamp()
             ]
-         });
+          });
         }
         if (interaction.commandName === '調整累積儲值') {
           if (!isAdminOrStaff(interaction)) {
