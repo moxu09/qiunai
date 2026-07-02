@@ -20,6 +20,7 @@ const {
   ButtonStyle,
   EmbedBuilder,
   StringSelectMenuBuilder,
+  ChannelSelectMenuBuilder,
   UserSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
@@ -144,6 +145,7 @@ const dropCooldown = new Map();
 const orderPayments = new Map();
 const pendingTips = new Map();
 const pendingTopups = new Map();
+const pendingChannelDeletes = new Map();
 const TIP_GIFTS = [
   {
     key: 'tip_33_bear_cookie',
@@ -319,6 +321,348 @@ async function saveTipToPlayOrdersForStaff({
 
   return orders;
 }
+function getTipStaffSelectionContent(tipData = {}) {
+  const staffIds =
+    getTipStaffIds(tipData);
+
+  if (!staffIds.length) {
+    return (
+      '目前尚未選擇受賞陪陪。\n' +
+      '可以從上方任一個選單選擇陪陪，選完請按「選好了，下一步」。'
+    );
+  }
+
+  return (
+    `目前已選擇：${formatTipStaffMentions(staffIds)}\n` +
+    '可以繼續從上方其他選單加入陪陪，選完請按「選好了，下一步」。'
+  );
+}
+function buildTipStaffSelectionRow(tipId) {
+  return new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`tip_staff_done_${tipId}`)
+        .setLabel('選好了，下一步')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`tip_staff_clear_${tipId}`)
+        .setLabel('清空已選')
+        .setStyle(ButtonStyle.Secondary)
+    );
+}
+async function sendTipStaffSelectionStatus(channel, tipId, tipData) {
+  const message =
+    await channel.send({
+      content: getTipStaffSelectionContent(tipData),
+      components: [buildTipStaffSelectionRow(tipId)]
+    });
+
+  tipData.staffSelectionMessageId = message.id;
+  pendingTips.set(tipId, tipData);
+}
+async function updateTipStaffSelectionStatus(channel, tipId, tipData) {
+  const payload = {
+    content: getTipStaffSelectionContent(tipData),
+    components: [buildTipStaffSelectionRow(tipId)]
+  };
+
+  if (tipData.staffSelectionMessageId) {
+    const message =
+      await channel.messages
+        .fetch(tipData.staffSelectionMessageId)
+        .catch(() => null);
+
+    if (message) {
+      await message.edit(payload);
+      return;
+    }
+  }
+
+  await sendTipStaffSelectionStatus(channel, tipId, tipData);
+}
+function buildTipPaymentMenu(tipId) {
+  return new StringSelectMenuBuilder()
+    .setCustomId(`tip_payment_${tipId}`)
+    .setPlaceholder('請選擇付款方式')
+    .addOptions([
+      {
+        label: '匯款 / 轉帳',
+        description: '顯示銀行帳號，付款後上傳截圖',
+        value: '匯款'
+      },
+      {
+        label: '無卡',
+        description: '顯示無卡帳號，付款後上傳截圖',
+        value: '無卡'
+      },
+      {
+        label: '刷卡',
+        description: '顯示刷卡付款連結，付款後上傳截圖',
+        value: '刷卡'
+      },
+      {
+        label: '儲值卡 / 錢包',
+        description: '直接使用 ASD 餘額扣款',
+        value: '儲值卡'
+      },
+      {
+        label: '美金轉帳',
+        description: '請等待客服提供帳號',
+        value: '美金轉帳'
+      },
+      {
+        label: '加密貨幣',
+        description: '請等待客服提供錢包地址',
+        value: '加密貨幣'
+      }
+    ]);
+}
+async function sendTipPaymentSelectPrompt(channel, tipId, selectedStaffText) {
+  const row =
+    new ActionRowBuilder()
+      .addComponents(buildTipPaymentMenu(tipId));
+
+  await channel.send({
+    content:
+      `✅ 已選擇受賞陪陪：${selectedStaffText}\n\n` +
+      `請選擇付款方式：`,
+    components: [row]
+  });
+}
+function buildBulkDeleteChannelSelect(deleteId) {
+  return new ActionRowBuilder()
+    .addComponents(
+      new ChannelSelectMenuBuilder()
+        .setCustomId(`bulk_delete_channels_${deleteId}`)
+        .setPlaceholder('選擇要刪除的頻道，可多選')
+        .setMinValues(1)
+        .setMaxValues(25)
+        .setChannelTypes(
+          ChannelType.GuildText,
+          ChannelType.GuildAnnouncement,
+          ChannelType.GuildForum
+        )
+    );
+}
+function buildBulkDeleteConfirmRow(deleteId) {
+  return new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`bulk_delete_confirm_${deleteId}`)
+        .setLabel('確認刪除')
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId(`bulk_delete_cancel_${deleteId}`)
+        .setLabel('取消')
+        .setStyle(ButtonStyle.Secondary)
+    );
+}
+async function formatBulkDeleteChannelList(guild, channelIds = []) {
+  const lines = [];
+
+  for (const channelId of channelIds) {
+    const channel =
+      await guild.channels
+        .fetch(channelId)
+        .catch(() => null);
+
+    lines.push(
+      channel
+        ? `<#${channel.id}>｜${channel.name}`
+        : `找不到頻道｜${channelId}`
+    );
+  }
+
+  return lines.join('\n');
+}
+async function handleBulkDeleteChannelsCommand(interaction) {
+  if (!isAdminOrStaff(interaction)) {
+    return interaction.editReply({
+      content: '❌ 只有客服或管理員可以使用這個指令'
+    });
+  }
+
+  const deleteId =
+    `${interaction.user.id}_${Date.now()}`;
+
+  pendingChannelDeletes.set(deleteId, {
+    createdBy: interaction.user.id,
+    channelIds: [],
+    createdAt: Date.now()
+  });
+
+  setTimeout(() => {
+    pendingChannelDeletes.delete(deleteId);
+  }, 10 * 60 * 1000);
+
+  return interaction.editReply({
+    content:
+      '請選擇要刪除的頻道。\n' +
+      '選完後會先顯示確認清單，不會直接刪除。',
+    components: [
+      buildBulkDeleteChannelSelect(deleteId),
+      buildBulkDeleteConfirmRow(deleteId)
+    ]
+  });
+}
+async function handleBulkDeleteChannelSelect(interaction) {
+  const deleteId =
+    interaction.customId.replace('bulk_delete_channels_', '');
+  const deleteData =
+    pendingChannelDeletes.get(deleteId);
+
+  if (!deleteData) {
+    return interaction.reply({
+      content: '❌ 這次批量刪除操作已過期，請重新使用指令。',
+      flags: 64
+    });
+  }
+
+  if (interaction.user.id !== deleteData.createdBy) {
+    return interaction.reply({
+      content: '❌ 只有建立這次操作的人可以選擇頻道。',
+      flags: 64
+    });
+  }
+
+  const channelIds =
+    [
+      ...new Set(
+        interaction.values
+          .map(id => String(id || '').trim())
+          .filter(Boolean)
+      )
+    ];
+
+  deleteData.channelIds = channelIds;
+  pendingChannelDeletes.set(deleteId, deleteData);
+
+  const listText =
+    await formatBulkDeleteChannelList(interaction.guild, channelIds);
+
+  return interaction.update({
+    content:
+      `已選擇 ${channelIds.length} 個頻道，確認後會刪除：\n\n` +
+      `${listText}`,
+    components: [
+      buildBulkDeleteChannelSelect(deleteId),
+      buildBulkDeleteConfirmRow(deleteId)
+    ]
+  });
+}
+async function handleBulkDeleteConfirm(interaction) {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ flags: 64 });
+  }
+
+  const deleteId =
+    interaction.customId.replace('bulk_delete_confirm_', '');
+  const deleteData =
+    pendingChannelDeletes.get(deleteId);
+
+  if (!deleteData) {
+    return interaction.editReply({
+      content: '❌ 這次批量刪除操作已過期，請重新使用指令。'
+    });
+  }
+
+  if (interaction.user.id !== deleteData.createdBy) {
+    return interaction.editReply({
+      content: '❌ 只有建立這次操作的人可以確認刪除。'
+    });
+  }
+
+  if (!isAdminOrStaff(interaction)) {
+    return interaction.editReply({
+      content: '❌ 只有客服或管理員可以確認刪除'
+    });
+  }
+
+  const channelIds =
+    [
+      ...new Set(deleteData.channelIds || [])
+    ];
+
+  if (!channelIds.length) {
+    return interaction.editReply({
+      content: '❌ 尚未選擇任何頻道'
+    });
+  }
+
+  await interaction.message.edit({
+    components: []
+  }).catch(() => {});
+
+  const deleted = [];
+  const failed = [];
+
+  for (const channelId of channelIds) {
+    const channel =
+      await interaction.guild.channels
+        .fetch(channelId)
+        .catch(() => null);
+
+    if (!channel) {
+      failed.push(`找不到頻道｜${channelId}`);
+      continue;
+    }
+
+    const label =
+      `${channel.name}｜${channel.id}`;
+
+    if (!channel.deletable) {
+      failed.push(`${label}：機器人沒有權限刪除`);
+      continue;
+    }
+
+    try {
+      await channel.delete(
+        `批量刪除頻道｜${interaction.user.tag} (${interaction.user.id})`
+      );
+      deleted.push(label);
+    } catch (error) {
+      failed.push(`${label}：${error.message || error}`);
+    }
+  }
+
+  pendingChannelDeletes.delete(deleteId);
+
+  const deletedText =
+    deleted.length
+      ? deleted.map(item => `✅ ${item}`).join('\n')
+      : '無';
+  const failedText =
+    failed.length
+      ? failed.map(item => `❌ ${item}`).join('\n')
+      : '無';
+
+  return interaction.editReply({
+    content:
+      `批量刪除完成。\n\n` +
+      `成功刪除：${deleted.length}\n${deletedText}\n\n` +
+      `刪除失敗：${failed.length}\n${failedText}`
+  });
+}
+async function handleBulkDeleteCancel(interaction) {
+  const deleteId =
+    interaction.customId.replace('bulk_delete_cancel_', '');
+  const deleteData =
+    pendingChannelDeletes.get(deleteId);
+
+  if (deleteData && interaction.user.id !== deleteData.createdBy) {
+    return interaction.reply({
+      content: '❌ 只有建立這次操作的人可以取消。',
+      flags: 64
+    });
+  }
+
+  pendingChannelDeletes.delete(deleteId);
+
+  return interaction.update({
+    content: '✅ 已取消批量刪除頻道',
+    components: []
+  });
+}
 async function sendTipGiftSelect(channel, tipId) {
   const menu =
     new StringSelectMenuBuilder()
@@ -467,6 +811,7 @@ async function handleTipGiftSelect(interaction) {
       `請選擇要打賞的陪陪：`,
     components: rows.slice(0, 5)
   });
+  await sendTipStaffSelectionStatus(interaction.channel, tipId, tipData);
   return interaction.editReply({
     content: '✅ 已選擇打賞禮物'
   });
@@ -499,9 +844,13 @@ async function handleTipStaffSelect(interaction) {
     });
   }
 
-  const selectedStaffId =
-    interaction.values[0];
-  const selectedStaffIds =
+  if (tipData.staffSelectionCompleted) {
+    return interaction.editReply({
+      content: '✅ 已進入付款方式選擇，若要更換陪陪請重新建立打賞流程。'
+    });
+  }
+
+  const incomingStaffIds =
     [
       ...new Set(
         interaction.values
@@ -509,63 +858,114 @@ async function handleTipStaffSelect(interaction) {
           .filter(Boolean)
       )
     ];
+  const selectedStaffIds =
+    [
+      ...new Set([
+        ...getTipStaffIds(tipData),
+        ...incomingStaffIds
+      ])
+    ];
   const selectedStaffText =
     formatTipStaffMentions(selectedStaffIds);
 
-  tipData.selectedStaffId = selectedStaffId;
+  tipData.selectedStaffId = selectedStaffIds[0];
   tipData.selectedStaffIds = selectedStaffIds;
   pendingTips.set(tipId, tipData);
 
-  const menu =
-    new StringSelectMenuBuilder()
-      .setCustomId(`tip_payment_${tipId}`)
-      .setPlaceholder('請選擇付款方式')
-      .addOptions([
-        {
-          label: '匯款 / 轉帳',
-          description: '顯示銀行帳號，付款後上傳截圖',
-          value: '匯款'
-        },
-        {
-          label: '無卡',
-          description: '顯示無卡帳號，付款後上傳截圖',
-          value: '無卡'
-        },
-        {
-          label: '刷卡',
-          description: '顯示刷卡付款連結，付款後上傳截圖',
-          value: '刷卡'
-        },
-        {
-          label: '儲值卡 / 錢包',
-          description: '直接使用 ASD 餘額扣款',
-          value: '儲值卡'
-        },
-        {
-          label: '美金轉帳',
-          description: '請等待客服提供帳號',
-          value: '美金轉帳'
-        },
-        {
-          label: '加密貨幣',
-          description: '請等待客服提供錢包地址',
-          value: '加密貨幣'
-        }
-      ]);
-
-  const row =
-    new ActionRowBuilder()
-      .addComponents(menu);
-
-  await interaction.channel.send({
-    content:
-      `✅ 已選擇受賞陪陪：${selectedStaffText}\n\n` +
-      `請選擇付款方式：`,
-    components: [row]
-  });
+  await updateTipStaffSelectionStatus(interaction.channel, tipId, tipData);
 
   return interaction.editReply({
-    content: '✅ 已選擇受賞陪陪'
+    content:
+      `✅ 已加入：${formatTipStaffMentions(incomingStaffIds)}\n` +
+      `目前已選：${selectedStaffText}`
+  });
+}
+
+async function handleTipStaffDone(interaction) {
+  const tipId =
+    interaction.customId.replace('tip_staff_done_', '');
+  const tipData =
+    pendingTips.get(tipId);
+
+  if (!tipData) {
+    return interaction.editReply({
+      content: '❌ 這筆打賞流程已過期，請重新建立打賞頻道。'
+    });
+  }
+
+  if (interaction.user.id !== tipData.createdBy) {
+    return interaction.editReply({
+      content: '❌ 只有建立這筆打賞的人可以操作。'
+    });
+  }
+
+  const selectedStaffIds =
+    getTipStaffIds(tipData);
+
+  if (!selectedStaffIds.length) {
+    return interaction.editReply({
+      content: '❌ 請至少先選擇一位受賞陪陪。'
+    });
+  }
+
+  const selectedStaffText =
+    formatTipStaffMentions(selectedStaffIds);
+
+  tipData.staffSelectionCompleted = true;
+  pendingTips.set(tipId, tipData);
+
+  await interaction.message.edit({
+    content: `✅ 已選擇受賞陪陪：${selectedStaffText}`,
+    components: []
+  }).catch(() => {});
+
+  await sendTipPaymentSelectPrompt(
+    interaction.channel,
+    tipId,
+    selectedStaffText
+  );
+
+  return interaction.editReply({
+    content: '✅ 已進入付款方式選擇'
+  });
+}
+
+async function handleTipStaffClear(interaction) {
+  const tipId =
+    interaction.customId.replace('tip_staff_clear_', '');
+  const tipData =
+    pendingTips.get(tipId);
+
+  if (!tipData) {
+    return interaction.editReply({
+      content: '❌ 這筆打賞流程已過期，請重新建立打賞頻道。'
+    });
+  }
+
+  if (interaction.user.id !== tipData.createdBy) {
+    return interaction.editReply({
+      content: '❌ 只有建立這筆打賞的人可以操作。'
+    });
+  }
+
+  if (tipData.staffSelectionCompleted) {
+    return interaction.editReply({
+      content: '✅ 已進入付款方式選擇，若要更換陪陪請重新建立打賞流程。'
+    });
+  }
+
+  tipData.selectedStaffId = null;
+  tipData.selectedStaffIds = [];
+  pendingTips.set(tipId, tipData);
+
+  await updateTipStaffSelectionStatus(
+    interaction.channel,
+    tipId,
+    tipData
+  );
+
+  return interaction.editReply({
+    content: '✅ 已清空受賞陪陪名單'
   });
 }
 
@@ -4376,6 +4776,9 @@ const commands = [
     .setName('隱藏餘額')
     .setDescription('切換是否隱藏自己的錢包餘額'),
   new SlashCommandBuilder()
+    .setName('批量刪除頻道')
+    .setDescription('一次選擇多個文字頻道並刪除'),
+  new SlashCommandBuilder()
     .setName('交易紀錄')
     .setDescription('查看最近交易'),
   new SlashCommandBuilder()
@@ -5610,6 +6013,16 @@ client.on(Events.InteractionCreate, async interaction => {
         return await dispatchSystem.handleDispatchInteraction(interaction);
       }
       const customId = interaction.customId;
+      if (
+        customId.startsWith('bulk_delete_confirm_') ||
+        customId.startsWith('bulk_delete_cancel_')
+      ) {
+        if (customId.startsWith('bulk_delete_confirm_')) {
+          return await handleBulkDeleteConfirm(interaction);
+        }
+
+        return await handleBulkDeleteCancel(interaction);
+      }
       // ===== 訂單評價按鈕：會開 Modal，不能先 defer =====
       if (customId.startsWith('order_review_')) {
         await handleButtonInteraction(interaction);
@@ -5619,6 +6032,20 @@ client.on(Events.InteractionCreate, async interaction => {
       if (customId === 'monthly_bill_pay') {
         await handleButtonInteraction(interaction);
         return;
+      }
+      if (
+        customId.startsWith('tip_staff_done_') ||
+        customId.startsWith('tip_staff_clear_')
+      ) {
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.deferReply({ flags: 64 });
+        }
+
+        if (customId.startsWith('tip_staff_done_')) {
+          return await handleTipStaffDone(interaction);
+        }
+
+        return await handleTipStaffClear(interaction);
       }
       // ===== 填寫打賞需求 =====
       if (interaction.customId === "fill_tip_need") {
@@ -5797,6 +6224,11 @@ client.on(Events.InteractionCreate, async interaction => {
       if (handled) return;
       await handleButtonInteraction(interaction);
       return;
+    }
+    if (interaction.isChannelSelectMenu()) {
+      if (interaction.customId.startsWith('bulk_delete_channels_')) {
+        return await handleBulkDeleteChannelSelect(interaction);
+      }
     }
     // ===== String Select =====
     if (interaction.isStringSelectMenu()) {
@@ -6022,6 +6454,9 @@ async function handleSlashCommand(interaction) {
   // ping
   if (interaction.commandName === 'ping') {
     return interaction.editReply('Pong!');
+  }
+  if (interaction.commandName === '批量刪除頻道') {
+    return await handleBulkDeleteChannelsCommand(interaction);
   }
   if (interaction.commandName === '隱藏餘額') {
     const userData =
@@ -9527,23 +9962,6 @@ async function handleButtonInteraction(interaction) {
       for (const playerId of assignedPlayers) {
         const player =
           await getStaffByDiscordId(playerId);
-        const commission =
-          await getQiunaiCommissionInfo(playerId, finishedAt);
-        const salaryAmount =
-          Math.round(splitAmount * (commission.rate / 100));
-        // 舊 salary_orders 若你還有其他地方用，這裡也同步寫正確抽成
-        await supabase
-          .from('salary_orders')
-          .insert({
-            order_id: order.id,
-            order_no: order.order_no,
-            player_id: playerId,
-            customer_id: order.customer_id,
-            service: order.service || order.order_item || '陪玩訂單',
-            total_amount: splitAmount,
-            salary_amount: salaryAmount,
-            status: 'unpaid'
-          });
         await saveQiunaiSalaryOrder({
           orderId: order.id,
           orderNo: order.order_no,
