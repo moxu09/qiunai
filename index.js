@@ -4772,7 +4772,13 @@ const commands = [
     .setDescription('查看自己的排名'),
   new SlashCommandBuilder()
     .setName('餘額')
-    .setDescription('公開查看自己的 ASD 餘額'),  
+    .setDescription('公開查看自己的 ASD 餘額，管理員可指定玩家')
+    .addUserOption(option =>
+      option
+        .setName('玩家')
+        .setDescription('管理員可指定要查詢餘額的玩家')
+        .setRequired(false)
+    ),
   new SlashCommandBuilder()
     .setName('隱藏餘額')
     .setDescription('切換是否隱藏自己的錢包餘額'),
@@ -5996,7 +6002,16 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isChatInputCommand()) {
       if (!interaction.deferred && !interaction.replied) {
         if (
-          interaction.commandName === '餘額' ||
+          interaction.commandName === '餘額'
+        ) {
+          const target =
+            interaction.options.getUser('玩家');
+          const selfLookup =
+            !target || target.id === interaction.user.id;
+          await interaction.deferReply(
+            selfLookup ? undefined : { flags: 64 }
+          );
+        } else if (
           interaction.commandName === '查詢累積'
         ) {
           await interaction.deferReply(); // 公開，頻道都看得到
@@ -6513,12 +6528,25 @@ async function handleSlashCommand(interaction) {
     });
   }
   if (interaction.commandName === '餘額') {
+    const target =
+      interaction.options.getUser('玩家') || interaction.user;
+    const isSelf =
+      target.id === interaction.user.id;
+
+    if (!isSelf && !isAdmin(interaction)) {
+      return interaction.editReply({
+        content: '❌ 只有管理員可以查看其他人的餘額'
+      });
+    }
+
     const userData =
-      await getUser(interaction.user.id);
+      await getUser(target.id);
     const balanceHidden =
       Boolean(userData.balance_hidden);
+    const canSeeHiddenBalance =
+      !isSelf && isAdmin(interaction);
     const balanceText =
-      balanceHidden
+      balanceHidden && !canSeeHiddenBalance
         ? '已隱藏'
         : `${Number(userData.coins || 0).toLocaleString('zh-TW')} ASD`;
     const guildId = getGuildId(interaction);
@@ -6526,7 +6554,7 @@ async function handleSlashCommand(interaction) {
       await supabase
         .from('member_monthly_accounts')
         .select('*')
-        .eq('user_id', interaction.user.id)
+        .eq('user_id', target.id)
         .maybeSingle();
     if (monthlyError) {
       console.error('[餘額查詢] 查詢月結資料失敗', monthlyError);
@@ -6553,7 +6581,8 @@ async function handleSlashCommand(interaction) {
           .setColor('#57F287')
           .setTitle('💰 ASD 餘額查詢')
           .setDescription(
-            `<@${interaction.user.id}> 的錢包與月結資訊\n\n` +
+            `<@${target.id}> 的錢包與月結資訊\n` +
+            `${!isSelf ? `查詢者：<@${interaction.user.id}>\n` : ''}\n` +
             `💰 **錢包餘額**\n` +
             `${balanceText}\n\n` +
             `🌙 **月結狀態**\n` +
