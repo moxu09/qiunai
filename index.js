@@ -39,6 +39,7 @@ const { recordAccountingLedger } = createAccountingLedger(supabase, {
 });
 const STAFF_TABLE = 'qiunai_staff';
 const CURRENT_GUILD_ID = null;
+const CATEGORY_CHANNEL_LIMIT = 50;
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -47,6 +48,85 @@ const client = new Client({
     GatewayIntentBits.MessageContent
   ],
 });
+
+function getCategoryIds(value) {
+  return String(value || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(Boolean);
+}
+
+async function getCategoryById(guild, categoryId) {
+  if (!categoryId) return null;
+
+  const cached = guild.channels.cache.get(categoryId);
+  if (cached) return cached;
+
+  return await guild.channels.fetch(categoryId).catch(() => null);
+}
+
+function getCategoryChildCount(guild, categoryId) {
+  return guild.channels.cache.filter(channel => channel.parentId === categoryId).size;
+}
+
+async function resolveTicketParentId(guild, categoryValue, fallbackName = '訂單區') {
+  await guild.channels.fetch().catch(() => null);
+
+  const categoryIds = getCategoryIds(categoryValue);
+  const categories = [];
+
+  for (const categoryId of categoryIds) {
+    const category = await getCategoryById(guild, categoryId);
+
+    if (!category || category.type !== ChannelType.GuildCategory) continue;
+
+    categories.push(category);
+
+    if (getCategoryChildCount(guild, category.id) < CATEGORY_CHANNEL_LIMIT) {
+      return category.id;
+    }
+  }
+
+  const baseCategory = categories[0];
+  if (!baseCategory) return categoryIds[0] || null;
+
+  const prefix = baseCategory.name || fallbackName;
+  const siblingCategories = guild.channels.cache
+    .filter(channel =>
+      channel.type === ChannelType.GuildCategory &&
+      channel.name.startsWith(prefix)
+    )
+    .sort((a, b) => a.position - b.position);
+
+  for (const category of siblingCategories.values()) {
+    if (getCategoryChildCount(guild, category.id) < CATEGORY_CHANNEL_LIMIT) {
+      return category.id;
+    }
+  }
+
+  const nextIndex = siblingCategories.size + 1;
+  const permissionOverwrites =
+    baseCategory.permissionOverwrites?.cache?.map(overwrite => ({
+      id: overwrite.id,
+      allow: overwrite.allow.bitfield,
+      deny: overwrite.deny.bitfield,
+      type: overwrite.type
+    })) || [];
+
+  const newCategory = await guild.channels.create({
+    name: `${prefix}-${nextIndex}`,
+    type: ChannelType.GuildCategory,
+    permissionOverwrites,
+    reason: '訂單分類已滿，自動建立分流分類'
+  });
+
+  console.log(
+    `[ORDER_CATEGORY] 分類 ${baseCategory.id} 已滿，自動建立分流分類 ${newCategory.name} (${newCategory.id})`
+  );
+
+  return newCategory.id;
+}
+
 function parseAllowedServices(value) {
   if (!value) return [];
 
@@ -5771,7 +5851,7 @@ async function sendBankTransferInfo(channel) {
       `匯款完成後，請在此頻道上傳匯款截圖，等待客服確認。\n\n` +
       `若有其他銀行之需求，請在下方告訴客服。`
     ) 
-    .setImage('https://cdn.discordapp.com/attachments/1501098193276895360/1513855523810840727/QRCode1780884218322.png?ex=6a293f52&is=6a27edd2&hm=3f9d2aa241395c189c0cb9411638fbd6dc7e0679f771a4073c776b94710023b6&')
+    .setImage('https://cdn.discordapp.com/attachments/1501098193276895360/1524312607320965220/image.png?ex=6a4f4a3d&is=6a4df8bd&hm=85a35d149d4c0bf2a1958f6c8fbc5bedb6b731db7ff0cae74c754b09c0edc2a7&')
     .setFooter({
       text: '請確認金額正確後再匯款'
     })
@@ -8498,12 +8578,17 @@ async function createMonthlyBillPaymentChannel(interaction, bill) {
 
   const channelName =
     `月結繳費-${safeName}-${ticketNumber}`;
+  const parentId = await resolveTicketParentId(
+    interaction.guild,
+    process.env.ORDER_CATEGORY,
+    '訂單區'
+  );
 
   const payChannel =
     await interaction.guild.channels.create({
       name: channelName,
       type: ChannelType.GuildText,
-      parent: process.env.ORDER_CATEGORY,
+      parent: parentId,
       topic: `monthly_bill:${bill.id};owner:${interaction.user.id}`,
       permissionOverwrites: [
         {
@@ -10729,11 +10814,16 @@ async function handleStringSelectInteraction(interaction) {
               : '訂單';
         const channelName =
           `${channelPrefix}-${safeName}-${ticketNumber}`;
+        const parentId = await resolveTicketParentId(
+          interaction.guild,
+          process.env.ORDER_CATEGORY,
+          '訂單區'
+        );
         const orderChannel =
           await interaction.guild.channels.create({
             name: channelName,
             type: ChannelType.GuildText,
-            parent: process.env.ORDER_CATEGORY,
+            parent: parentId,
             topic: `owner:${interaction.user.id}`,
             permissionOverwrites: [
               {
