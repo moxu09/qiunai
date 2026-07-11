@@ -67,9 +67,11 @@ function buildPersonalReport({ dateText, staff, orders, extraBonuses }) {
       : orders
           .slice(0, 15)
           .map((order, index) => {
-            return `${index + 1}. ${order.service_name || "未命名服務"}｜訂單 $${money(
-              order.order_amount
-            )}｜薪資 $${money(order.staff_salary)}${
+            return `${index + 1}. ${
+              order.service_name || "未命名服務"
+            }｜訂單 $${money(order.order_amount)}｜薪資 $${money(
+              order.staff_salary
+            )}${
               Number(order.bonus_amount || 0) > 0
                 ? `｜獎金 $${money(order.bonus_amount)}`
                 : ""
@@ -115,7 +117,8 @@ function buildPersonalReport({ dateText, staff, orders, extraBonuses }) {
 
 function buildAdminReport({ dateText, orders, extraBonuses }) {
   const totalIncome = orders.reduce(
-    (sum, order) => sum + Number(order.platform_income || order.order_amount || 0),
+    (sum, order) =>
+      sum + Number(order.platform_income || order.order_amount || 0),
     0
   );
 
@@ -136,14 +139,15 @@ function buildAdminReport({ dateText, orders, extraBonuses }) {
 
   const totalBonus = orderBonus + extraBonusTotal;
 
-  const totalExpense = orders.reduce((sum, order) => {
-    const expense = Number(
-      order.platform_expense ||
-        Number(order.staff_salary || 0) + Number(order.bonus_amount || 0)
-    );
+  const totalExpense =
+    orders.reduce((sum, order) => {
+      const expense = Number(
+        order.platform_expense ||
+          Number(order.staff_salary || 0) + Number(order.bonus_amount || 0)
+      );
 
-    return sum + expense;
-  }, 0) + extraBonusTotal;
+      return sum + expense;
+    }, 0) + extraBonusTotal;
 
   const profit = totalIncome - totalExpense;
 
@@ -293,14 +297,12 @@ async function sendQiunaiDailySalaryReports(client, supabase) {
 
   const staffs = staffList || [];
   const staffDiscordIds = new Set(
-    staffs
-      .map(staff => String(staff.discord_id || "").trim())
-      .filter(Boolean) 
+    staffs.map((staff) => String(staff.discord_id || "").trim()).filter(Boolean)
   );
-  const orders = (todayOrders || []).filter(order =>
+  const orders = (todayOrders || []).filter((order) =>
     staffDiscordIds.has(String(order.discord_id || "").trim())
   );
-  const bonuses = (todayBonuses || []).filter(bonus =>
+  const bonuses = (todayBonuses || []).filter((bonus) =>
     staffDiscordIds.has(String(bonus.discord_id || "").trim())
   );
   let successCount = 0;
@@ -343,7 +345,10 @@ async function sendQiunaiDailySalaryReports(client, supabase) {
     .limit(1)
     .maybeSingle();
   if (settingError) {
-    console.error("[QIUNAI_REPORT] 讀取 qiunai_salary_settings 失敗", settingError);
+    console.error(
+      "[QIUNAI_REPORT] 讀取 qiunai_salary_settings 失敗",
+      settingError
+    );
   }
 
   if (setting?.report_channel_id) {

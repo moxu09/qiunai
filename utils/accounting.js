@@ -66,11 +66,9 @@ function createAccountingLedger(supabase, options = {}) {
       updated_at: new Date().toISOString(),
     };
 
-    const { error } = await supabase
-      .from("accounting_ledger")
-      .upsert(payload, {
-        onConflict: "app_key,dedupe_key",
-      });
+    const { error } = await supabase.from("accounting_ledger").upsert(payload, {
+      onConflict: "app_key,dedupe_key",
+    });
 
     if (error) {
       if (error.code === "PGRST205" || error.code === "42P01") {
