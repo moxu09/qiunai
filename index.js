@@ -50,7 +50,7 @@ const {
 // ===== 初始化 =====
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
 const { recordAccountingLedger } = createAccountingLedger(supabase, {
   appKey: process.env.ACCOUNTING_APP_KEY || "qiunai",
@@ -85,14 +85,14 @@ async function getCategoryById(guild, categoryId) {
 
 function getCategoryChildCount(guild, categoryId) {
   return guild.channels.cache.filter(
-    (channel) => channel.parentId === categoryId
+    (channel) => channel.parentId === categoryId,
   ).size;
 }
 
 async function resolveTicketParentId(
   guild,
   categoryValue,
-  fallbackName = "訂單區"
+  fallbackName = "訂單區",
 ) {
   await guild.channels.fetch().catch(() => null);
 
@@ -119,7 +119,7 @@ async function resolveTicketParentId(
     .filter(
       (channel) =>
         channel.type === ChannelType.GuildCategory &&
-        channel.name.startsWith(prefix)
+        channel.name.startsWith(prefix),
     )
     .sort((a, b) => a.position - b.position);
 
@@ -146,7 +146,7 @@ async function resolveTicketParentId(
   });
 
   console.log(
-    `[ORDER_CATEGORY] 分類 ${baseCategory.id} 已滿，自動建立分流分類 ${newCategory.name} (${newCategory.id})`
+    `[ORDER_CATEGORY] 分類 ${baseCategory.id} 已滿，自動建立分流分類 ${newCategory.name} (${newCategory.id})`,
   );
 
   return newCategory.id;
@@ -292,7 +292,7 @@ function buildTipStaffSelectionRow(tipId) {
     new ButtonBuilder()
       .setCustomId(`tip_staff_clear_${tipId}`)
       .setLabel("清空已選")
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(ButtonStyle.Secondary),
   );
 }
 async function sendTipStaffSelectionStatus(channel, tipId, tipData) {
@@ -378,8 +378,8 @@ function buildBulkDeleteChannelSelect(deleteId) {
       .setChannelTypes(
         ChannelType.GuildText,
         ChannelType.GuildAnnouncement,
-        ChannelType.GuildForum
-      )
+        ChannelType.GuildForum,
+      ),
   );
 }
 function buildBulkDeleteConfirmRow(deleteId) {
@@ -391,7 +391,7 @@ function buildBulkDeleteConfirmRow(deleteId) {
     new ButtonBuilder()
       .setCustomId(`bulk_delete_cancel_${deleteId}`)
       .setLabel("取消")
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(ButtonStyle.Secondary),
   );
 }
 async function formatBulkDeleteChannelList(guild, channelIds = []) {
@@ -401,7 +401,7 @@ async function formatBulkDeleteChannelList(guild, channelIds = []) {
       return channel
         ? `<#${channel.id}>｜${channel.name}`
         : `找不到頻道｜${channelId}`;
-    })
+    }),
   );
   return lines.join("\n");
 }
@@ -420,9 +420,12 @@ async function handleBulkDeleteChannelsCommand(interaction) {
     createdAt: Date.now(),
   });
 
-  setTimeout(() => {
-    pendingChannelDeletes.delete(deleteId);
-  }, 10 * 60 * 1000);
+  setTimeout(
+    () => {
+      pendingChannelDeletes.delete(deleteId);
+    },
+    10 * 60 * 1000,
+  );
 
   return interaction.editReply({
     content:
@@ -453,7 +456,7 @@ async function handleBulkDeleteChannelSelect(interaction) {
 
   const channelIds = [
     ...new Set(
-      interaction.values.map((id) => String(id || "").trim()).filter(Boolean)
+      interaction.values.map((id) => String(id || "").trim()).filter(Boolean),
     ),
   ];
 
@@ -462,7 +465,7 @@ async function handleBulkDeleteChannelSelect(interaction) {
 
   const listText = await formatBulkDeleteChannelList(
     interaction.guild,
-    channelIds
+    channelIds,
   );
 
   return interaction.update({
@@ -536,7 +539,7 @@ async function handleBulkDeleteConfirm(interaction) {
 
     try {
       await channel.delete(
-        `批量刪除頻道｜${interaction.user.tag} (${interaction.user.id})`
+        `批量刪除頻道｜${interaction.user.tag} (${interaction.user.id})`,
       );
       deleted.push(label);
     } catch (error) {
@@ -587,7 +590,7 @@ async function sendTipGiftSelect(channel, tipId) {
         label: `${gift.name}｜${gift.price} ASD`.slice(0, 100),
         description: gift.description.slice(0, 100),
         value: gift.key,
-      }))
+      })),
     );
 
   const selectRow = new ActionRowBuilder().addComponents(menu);
@@ -597,7 +600,7 @@ async function sendTipGiftSelect(channel, tipId) {
       .setCustomId("owner_cancel_ticket")
       .setLabel("我按錯了，關閉頻道")
       .setEmoji("🗑️")
-      .setStyle(ButtonStyle.Danger)
+      .setStyle(ButtonStyle.Danger),
   );
 
   await channel.send({
@@ -614,12 +617,15 @@ async function startTipFlowInChannel(channel, user) {
     channelId: channel.id,
   });
 
-  setTimeout(() => {
-    const currentTip = pendingTips.get(tipId);
-    if (currentTip?.keepForPayment) return;
+  setTimeout(
+    () => {
+      const currentTip = pendingTips.get(tipId);
+      if (currentTip?.keepForPayment) return;
 
-    pendingTips.delete(tipId);
-  }, 30 * 60 * 1000);
+      pendingTips.delete(tipId);
+    },
+    30 * 60 * 1000,
+  );
 
   await sendTipGiftSelect(channel, tipId);
 
@@ -750,7 +756,7 @@ async function handleTipStaffSelect(interaction) {
 
   const incomingStaffIds = [
     ...new Set(
-      interaction.values.map((id) => String(id || "").trim()).filter(Boolean)
+      interaction.values.map((id) => String(id || "").trim()).filter(Boolean),
     ),
   ];
   const selectedStaffIds = [
@@ -810,7 +816,7 @@ async function handleTipStaffDone(interaction) {
   await sendTipPaymentSelectPrompt(
     interaction.channel,
     tipId,
-    selectedStaffText
+    selectedStaffText,
   );
 
   return interaction.editReply({
@@ -910,7 +916,7 @@ async function handleTipPaymentSelect(interaction) {
       new ButtonBuilder()
         .setCustomId(`cancel_tip_wallet_${tipId}`)
         .setLabel("取消此付款方式")
-        .setStyle(ButtonStyle.Danger)
+        .setStyle(ButtonStyle.Danger),
     );
 
     await interaction.channel.send({
@@ -925,9 +931,9 @@ async function handleTipPaymentSelect(interaction) {
               `品項：${item}\n` +
               `每位金額：${Number(amount).toLocaleString("zh-TW")} ASD\n` +
               `總扣款金額：${Number(totalAmount).toLocaleString(
-                "zh-TW"
+                "zh-TW",
               )} ASD\n\n` +
-              `確認後會直接從你的 ASD 餘額扣款。`
+              `確認後會直接從你的 ASD 餘額扣款。`,
           )
           .setTimestamp(),
       ],
@@ -977,7 +983,7 @@ async function handleTipPaymentSelect(interaction) {
         name: "付款狀態",
         value: "等待客服確認付款",
         inline: false,
-      }
+      },
     )
     .setTimestamp();
 
@@ -990,7 +996,7 @@ async function handleTipPaymentSelect(interaction) {
     new ButtonBuilder()
       .setCustomId(`cancel_tip_flow_${tipId}`)
       .setLabel("❌ 取消打賞")
-      .setStyle(ButtonStyle.Danger)
+      .setStyle(ButtonStyle.Danger),
   );
 
   await interaction.channel.send({
@@ -1017,7 +1023,7 @@ async function handleTipPaymentSelect(interaction) {
           .setDescription(
             `<@${tipperId}> 你選擇了：${paymentMethod}\n\n` +
               `請等待客服提供付款帳號 / 錢包地址。\n` +
-              `付款完成後請上傳付款截圖，等待客服確認。`
+              `付款完成後請上傳付款截圖，等待客服確認。`,
           )
           .setTimestamp(),
       ],
@@ -1047,7 +1053,7 @@ async function savePanelMessage(
   panelName,
   channelId,
   messageId,
-  guildId = process.env.GUILD_ID
+  guildId = process.env.GUILD_ID,
 ) {
   if (!channelId || !messageId) {
     console.warn("[Panel] skip save - missing data", {
@@ -1068,7 +1074,7 @@ async function savePanelMessage(
     },
     {
       onConflict: "guild_id,panel_name",
-    }
+    },
   );
 
   if (res.error) {
@@ -1285,7 +1291,7 @@ async function getPreviousYearSalaryTotal(discordId, finishedAt) {
   const start = new Date(`${previousYear}-01-01T00:00:00+08:00`).toISOString();
 
   const end = new Date(
-    `${previousYear}-12-31T23:59:59.999+08:00`
+    `${previousYear}-12-31T23:59:59.999+08:00`,
   ).toISOString();
 
   const { data, error } = await supabase
@@ -1303,13 +1309,13 @@ async function getPreviousYearSalaryTotal(discordId, finishedAt) {
 
   return (data || []).reduce(
     (sum, order) => sum + Number(order.staff_salary || 0),
-    0
+    0,
   );
 }
 
 async function getQiunaiCommissionInfo(
   discordId,
-  finishedAt = new Date().toISOString()
+  finishedAt = new Date().toISOString(),
 ) {
   const finishedDate = new Date(finishedAt);
 
@@ -1335,7 +1341,7 @@ async function getQiunaiCommissionInfo(
 
   const previousYearSalary = await getPreviousYearSalaryTotal(
     discordId,
-    finishedAt
+    finishedAt,
   );
 
   if (previousYearSalary >= 100000) {
@@ -1382,7 +1388,7 @@ async function saveQiunaiSalaryOrder({
   const isTip = String(serviceName || "").includes("打賞");
   const regularCommission = await getQiunaiCommissionInfo(
     discordId,
-    finishedAt
+    finishedAt,
   );
   const commission =
     isTip && regularCommission.rate !== 95
@@ -1394,7 +1400,7 @@ async function saveQiunaiSalaryOrder({
   const finalBonusAmount = Number(bonusAmount || 0);
 
   const finalStaffSalary = Math.round(
-    finalOrderAmount * (commission.rate / 100)
+    finalOrderAmount * (commission.rate / 100),
   );
 
   const staff = await getStaffByDiscordId(discordId);
@@ -1436,6 +1442,53 @@ async function saveQiunaiSalaryOrder({
 
   return data;
 }
+async function payTipWithWalletAtomic({
+  operationKey,
+  guildId,
+  tipperId,
+  staffIds,
+  item,
+  amount,
+  channelId,
+}) {
+  const finishedAt = new Date().toISOString();
+  const staff = await Promise.all(
+    staffIds.map(async (staffId) => {
+      const regularCommission = await getQiunaiCommissionInfo(
+        staffId,
+        finishedAt,
+      );
+      const commission =
+        regularCommission.rate === 95
+          ? regularCommission
+          : { rate: 90, level: "打賞固定 90%" };
+      const profile = await getStaffByDiscordId(staffId);
+      return {
+        staff_id: String(staffId),
+        staff_name:
+          profile?.display_name ||
+          profile?.real_name ||
+          profile?.discord_name ||
+          profile?.name ||
+          null,
+        salary_rate: commission.rate,
+        salary_level: commission.level,
+      };
+    }),
+  );
+  const { data, error } = await supabase.rpc("pay_tip_with_wallet_atomic", {
+    p_operation_key: operationKey,
+    p_guild_id: guildId,
+    p_user_id: tipperId,
+    p_item: item,
+    p_amount: Number(amount),
+    p_channel_id: channelId,
+    p_salary_table: "qiunai_salary_orders",
+    p_staff: staff,
+  });
+  if (error) throw error;
+  return data;
+}
 async function sendTipCloseButtons(channel) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -1446,7 +1499,7 @@ async function sendTipCloseButtons(channel) {
     new ButtonBuilder()
       .setCustomId("delete_order_now")
       .setLabel("🗑️ 直接刪除")
-      .setStyle(ButtonStyle.Danger)
+      .setStyle(ButtonStyle.Danger),
   );
 
   await channel.send({
@@ -1469,7 +1522,7 @@ async function sendOrderReviewPanel(channel, order, assignedPlayers = []) {
     new ButtonBuilder()
       .setCustomId(`order_review_3_${order.id}`)
       .setLabel("🌟🌟🌟 普通")
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(ButtonStyle.Secondary),
   );
 
   const row2 = new ActionRowBuilder().addComponents(
@@ -1481,7 +1534,7 @@ async function sendOrderReviewPanel(channel, order, assignedPlayers = []) {
     new ButtonBuilder()
       .setCustomId(`order_review_1_${order.id}`)
       .setLabel("🌟 很不滿意")
-      .setStyle(ButtonStyle.Danger)
+      .setStyle(ButtonStyle.Danger),
   );
 
   await channel.send({
@@ -1497,7 +1550,7 @@ async function sendOrderReviewPanel(channel, order, assignedPlayers = []) {
               assignedPlayers.length
                 ? assignedPlayers.map((id) => `<@${id}>`).join("、")
                 : "未指定"
-            }`
+            }`,
         )
         .setFooter({
           text: "評價送出後，會提供填寫文字心得的選項",
@@ -1512,7 +1565,7 @@ async function sendManualOrderReviewPanel(channel, customer, staff) {
   const makeButton = (rating, label, style) =>
     new ButtonBuilder()
       .setCustomId(
-        `manual_review_${rating}_${customer.id}_${staff.id}_${surveyId}`
+        `manual_review_${rating}_${customer.id}_${staff.id}_${surveyId}`,
       )
       .setLabel(label)
       .setStyle(style);
@@ -1525,7 +1578,7 @@ async function sendManualOrderReviewPanel(channel, customer, staff) {
         .setTitle("💬 滿意度調查")
         .setDescription(
           `<@${customer.id}> 請為 <@${staff.id}> 的服務留下評價。\n\n` +
-            "這份調查由客服手動建立，不需要對應訂單。"
+            "這份調查由客服手動建立，不需要對應訂單。",
         )
         .setFooter({ text: "選擇評分後即可填寫文字心得" })
         .setTimestamp(),
@@ -1534,11 +1587,11 @@ async function sendManualOrderReviewPanel(channel, customer, staff) {
       new ActionRowBuilder().addComponents(
         makeButton(5, "🌟🌟🌟🌟🌟 超級滿意", ButtonStyle.Success),
         makeButton(4, "🌟🌟🌟🌟 很滿意", ButtonStyle.Primary),
-        makeButton(3, "🌟🌟🌟 普通", ButtonStyle.Secondary)
+        makeButton(3, "🌟🌟🌟 普通", ButtonStyle.Secondary),
       ),
       new ActionRowBuilder().addComponents(
         makeButton(2, "🌟🌟 不太滿意", ButtonStyle.Secondary),
-        makeButton(1, "🌟 很不滿意", ButtonStyle.Danger)
+        makeButton(1, "🌟 很不滿意", ButtonStyle.Danger),
       ),
     ],
   });
@@ -1765,7 +1818,7 @@ async function handleGiveRoleCommand(interaction) {
     try {
       await member.roles.add(
         role,
-        `由 ${interaction.user.tag} 使用 /給與身份組 發放｜備註：${note}`
+        `由 ${interaction.user.tag} 使用 /給與身份組 發放｜備註：${note}`,
       );
 
       successCount++;
@@ -1883,7 +1936,7 @@ async function sendWalletLog(
   amount,
   balance,
   note = "",
-  persist = true
+  persist = true,
 ) {
   if (amount === 0 && type !== "十抽") return;
 
@@ -1927,7 +1980,7 @@ async function sendWalletLog(
           name: "💳 目前餘額",
           value: `${balance} 星雨幣`,
           inline: true,
-        }
+        },
       )
       .setTimestamp();
 
@@ -1993,7 +2046,7 @@ async function sendNoCardPaymentInfo(channel) {
         `銀行代碼：013\n` +
         `帳號：134500100962\n` +
         `戶名：許O星\n\n` +
-        `付款完成後，請在此頻道上傳存款明細，等待客服確認。`
+        `付款完成後，請在此頻道上傳存款明細，等待客服確認。`,
     )
     .setFooter({
       text: "請確認金額正確後再付款",
@@ -2016,7 +2069,7 @@ async function sendCardPaymentInfo(channel) {
         `截圖請包含：\n` +
         `1. 付款成功畫面\n` +
         `2. 付款金額\n` +
-        `3. 交易時間或交易編號`
+        `3. 交易時間或交易編號`,
     )
     .setFooter({
       text: "請確認金額正確後再付款",
@@ -2046,7 +2099,7 @@ async function payOrderByWallet(order) {
     -amount,
     finalCoins,
     `訂單 ${order.order_no || order.id}｜${order.service || "陪玩訂單"}`,
-    false
+    false,
   );
 
   const { data: paidOrder, error: paidOrderError } = await supabase
@@ -2222,7 +2275,7 @@ async function handleSlashExtendOrder(interaction) {
   if (insertError || !extension) {
     console.error(
       "[加時指令] 建立加時失敗完整錯誤",
-      JSON.stringify(insertError, null, 2)
+      JSON.stringify(insertError, null, 2),
     );
     return interaction.editReply({
       content:
@@ -2282,7 +2335,7 @@ async function handleSlashExtendOrder(interaction) {
             `加時內容：${extensionText}\n` +
             `加時金額：NT$${amount.toLocaleString("zh-TW")}\n` +
             `建立客服：<@${interaction.user.id}>\n` +
-            `備註：${note || "無"}`
+            `備註：${note || "無"}`,
         )
         .setTimestamp(),
     ],
@@ -2351,7 +2404,7 @@ async function giveVipRole(userId, roleId, guildId = process.env.GUILD_ID) {
 
   const rolesToRemove = allVipRoleIds.filter(
     (oldRoleId) =>
-      oldRoleId !== String(roleId) && member.roles.cache.has(oldRoleId)
+      oldRoleId !== String(roleId) && member.roles.cache.has(oldRoleId),
   );
 
   if (rolesToRemove.length) {
@@ -2373,7 +2426,7 @@ async function grantVipLevelReward(
   triggerType,
   triggerAmount,
   oldLevelKey = null,
-  guildId = process.env.GUILD_ID
+  guildId = process.env.GUILD_ID,
 ) {
   const rewardAsd = Number(level.reward_asd || 0);
 
@@ -2385,7 +2438,7 @@ async function grantVipLevelReward(
       "VIP升級獎勵",
       rewardAsd,
       finalCoins,
-      `升級 ${level.level_name}｜獲得 ${rewardAsd} ASD`
+      `升級 ${level.level_name}｜獲得 ${rewardAsd} ASD`,
     );
   }
 
@@ -2398,7 +2451,7 @@ async function grantVipLevelReward(
         coupon.name,
         "VIP",
         `${level.level_name} 升級獎勵`,
-        "coupon"
+        "coupon",
       );
     }
   }
@@ -2430,7 +2483,7 @@ async function grantVipLevelReward(
               `恭喜你升級為 **${level.level_name}**！\n\n` +
                 `🎁 ASD 獎勵：${rewardAsd || 0} ASD\n` +
                 `🎟️ 優惠券：${level.reward_coupon || "無"}\n` +
-                `💎 權益：${level.reward_note || "無"}`
+                `💎 權益：${level.reward_note || "無"}`,
             )
             .setTimestamp(),
         ],
@@ -2490,7 +2543,7 @@ async function saveUserVipRecord(payload, existingVip = null) {
 
     console.error(
       "[VIP] 依 guild_id/user_id 更新累積資料失敗",
-      updateExistingResult.error
+      updateExistingResult.error,
     );
   }
 
@@ -2513,7 +2566,7 @@ async function getLegacyUserVipCandidates(userId) {
   return supabase
     .from("user_vips")
     .select(
-      "id,guild_id,user_id,level_key,level_name,total_spent,total_topup,highest_single_topup,updated_at"
+      "id,guild_id,user_id,level_key,level_name,total_spent,total_topup,highest_single_topup,updated_at",
     )
     .eq("user_id", userId)
     .order("updated_at", { ascending: false });
@@ -2528,7 +2581,7 @@ async function explainUserVipSaveFailure(userId, guildId, error) {
   }
 
   const otherGuildRows = (candidates || []).filter(
-    (row) => row.guild_id !== guildId
+    (row) => row.guild_id !== guildId,
   );
 
   if (otherGuildRows.length) {
@@ -2539,7 +2592,7 @@ async function explainUserVipSaveFailure(userId, guildId, error) {
         guildId,
         otherGuildRows,
         originalError: error,
-      }
+      },
     );
   }
 }
@@ -2547,7 +2600,7 @@ async function checkAndUpgradeVip(
   userId,
   triggerType,
   amount,
-  guildId = process.env.GUILD_ID
+  guildId = process.env.GUILD_ID,
 ) {
   const triggerAmount = Number(amount || 0);
 
@@ -2557,7 +2610,7 @@ async function checkAndUpgradeVip(
 
   const { data: currentVip, error: vipReadError } = await getUserVipRecord(
     userId,
-    guildId
+    guildId,
   );
 
   if (vipReadError) {
@@ -2596,7 +2649,7 @@ async function checkAndUpgradeVip(
   const oldSortOrder = currentVip?.level_key
     ? Number(
         levels.find((level) => level.level_key === currentVip.level_key)
-          ?.sort_order || 0
+          ?.sort_order || 0,
       )
     : 0;
 
@@ -2624,7 +2677,7 @@ async function checkAndUpgradeVip(
         highest_single_topup: newHighestTopup,
         updated_at: new Date().toISOString(),
       },
-      currentVip
+      currentVip,
     );
 
     if (saveError) {
@@ -2650,7 +2703,7 @@ async function checkAndUpgradeVip(
       highest_single_topup: newHighestTopup,
       updated_at: new Date().toISOString(),
     },
-    currentVip
+    currentVip,
   );
 
   if (saveError) {
@@ -2666,7 +2719,7 @@ async function checkAndUpgradeVip(
   const rewardLevels = levels.filter(
     (level) =>
       Number(level.sort_order || 0) > oldSortOrder &&
-      Number(level.sort_order || 0) <= newSortOrder
+      Number(level.sort_order || 0) <= newSortOrder,
   );
 
   for (const level of rewardLevels) {
@@ -2676,7 +2729,7 @@ async function checkAndUpgradeVip(
       triggerType,
       triggerAmount,
       currentVip?.level_key || null,
-      guildId
+      guildId,
     );
   }
 
@@ -2729,7 +2782,7 @@ async function countOrderVipSpentOnce(order, reason = "付款完成") {
   if (!lockedOrder) {
     console.log(
       "[VIP累積消費] 這張訂單已被其他流程計算過",
-      order.order_no || order.id
+      order.order_no || order.id,
     );
 
     return {
@@ -2758,11 +2811,11 @@ async function countOrderVipSpentOnce(order, reason = "付款完成") {
 async function checkVvipMonthlyKeep(
   userId,
   billingMonth = getBillingMonth(),
-  guildId = process.env.GUILD_ID
+  guildId = process.env.GUILD_ID,
 ) {
   const { data: vip, error: vipError } = await getUserVipRecord(
     userId,
-    guildId
+    guildId,
   );
 
   if (vipError) {
@@ -2813,7 +2866,7 @@ async function checkVvipMonthlyKeep(
 
   const monthlySpent = (orders || []).reduce(
     (sum, order) => sum + Number(order.final_price || order.price || 0),
-    0
+    0,
   );
 
   const isPassed = monthlySpent >= required;
@@ -2832,7 +2885,7 @@ async function checkVvipMonthlyKeep(
     },
     {
       onConflict: "guild_id,user_id,billing_month",
-    }
+    },
   );
 
   return {
@@ -2862,7 +2915,7 @@ async function applyVipOrderCashback(order, guildId = process.env.GUILD_ID) {
 
   const { data: vip, error: vipError } = await getUserVipRecord(
     userId,
-    guildId
+    guildId,
   );
 
   if (vipError) {
@@ -2909,7 +2962,7 @@ async function applyVipOrderCashback(order, guildId = process.env.GUILD_ID) {
       finalCoins,
       `${level.level_name}｜訂單 ${
         order.order_no || order.id
-      }｜消費回饋 ${cashback} ASD`
+      }｜消費回饋 ${cashback} ASD`,
     );
   }
 
@@ -2920,7 +2973,7 @@ async function applyVipOrderCashback(order, guildId = process.env.GUILD_ID) {
       "VIP10",
       "VIP10 三陪以上消費獎勵",
       "coupon",
-      guildId
+      guildId,
     );
   }
 
@@ -3041,12 +3094,12 @@ async function generateMonthlyBills() {
 
     const totalAmount = list.reduce(
       (sum, tx) => sum + Number(tx.amount || 0),
-      0
+      0,
     );
 
     const cashbackAmount = list.reduce(
       (sum, tx) => sum + Number(tx.cashback || 0),
-      0
+      0,
     );
 
     const { data: existingBill } = await supabase
@@ -3086,7 +3139,7 @@ async function generateMonthlyBills() {
       })
       .in(
         "id",
-        list.map((tx) => tx.id)
+        list.map((tx) => tx.id),
       );
 
     const detailText = list
@@ -3113,12 +3166,12 @@ async function generateMonthlyBills() {
                 `結帳月份：${billingMonth}\n` +
                   `需繳金額：NT$${totalAmount.toLocaleString("zh-TW")}\n` +
                   `待發回饋：${cashbackAmount.toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )} 星雨幣\n` +
                   `繳款期限：${dueDate}\n\n` +
                   `請於期限前完成繳款，並將付款截圖提供給客服確認。\n\n` +
                   `━━━━━━━━━━━━━━\n` +
-                  `帳單細項：\n${detailText.slice(0, 3000)}`
+                  `帳單細項：\n${detailText.slice(0, 3000)}`,
               )
               .setFooter({
                 text: "星雨月結會員｜逾期可能暫停月結資格",
@@ -3175,7 +3228,7 @@ async function addUserItem(
   itemName,
   rarity = null,
   description = null,
-  itemType = "shop"
+  itemType = "shop",
 ) {
   const { error } = await supabase.from("user_items").insert([
     {
@@ -3242,7 +3295,7 @@ function findCouponFromSelection(items, couponValue) {
 
   if (Number.isInteger(selectedId)) {
     const byId = items.find(
-      (item) => Number(item.id) === selectedId && isCouponInventoryItem(item)
+      (item) => Number(item.id) === selectedId && isCouponInventoryItem(item),
     );
 
     if (byId) return byId;
@@ -3272,7 +3325,7 @@ async function handleUseCouponAutocomplete(interaction) {
   }
 
   const customerId = String(
-    interaction.options.get("客人")?.value || ""
+    interaction.options.get("客人")?.value || "",
   ).trim();
 
   if (!customerId) {
@@ -3453,14 +3506,14 @@ async function safeTransfer(senderId, receiverId, amount) {
     "轉帳支出",
     -amount,
     Number(data?.sender_balance || 0),
-    `💸 轉帳給 <@${receiverId}>`
+    `💸 轉帳給 <@${receiverId}>`,
   );
   await sendWalletLog(
     receiverId,
     "轉帳收入",
     amount,
     Number(data?.receiver_balance || 0),
-    `💰 收到 <@${senderId}> 的轉帳`
+    `💰 收到 <@${senderId}> 的轉帳`,
   );
   return {
     success: true,
@@ -3566,7 +3619,7 @@ async function performGacha(userId, guildId, amount, poolId = null) {
 
     const totalWeight = weightedRewards.reduce(
       (sum, reward) => sum + reward.adjustedWeight,
-      0
+      0,
     );
 
     if (totalWeight <= 0) {
@@ -3628,14 +3681,15 @@ async function performGacha(userId, guildId, amount, poolId = null) {
     });
   }
 
-  const finalCoins = userData.coins - totalPrice + totalRewardCoins;
-
-  const { error } = await supabase.rpc("perform_gacha", {
-    p_user_id: userId,
-    p_cost: totalPrice,
-    p_final_coins: finalCoins,
-    p_rewards: insertItems,
-  });
+  const { data: finalCoins, error } = await supabase.rpc(
+    "perform_gacha_atomic",
+    {
+      p_user_id: userId,
+      p_cost: totalPrice,
+      p_reward_coins: totalRewardCoins,
+      p_rewards: insertItems,
+    },
+  );
 
   if (error) {
     console.error(error);
@@ -3645,7 +3699,7 @@ async function performGacha(userId, guildId, amount, poolId = null) {
   return {
     results,
     totalRewardCoins,
-    finalCoins,
+    finalCoins: Number(finalCoins || 0),
     cost: totalPrice,
   };
 }
@@ -3666,7 +3720,7 @@ async function refreshShop(client) {
         (item, index) =>
           `${index + 1}. ${item.item_name}\n💰 ${item.price} 星雨幣\n📦 ${
             item.description
-          }`
+          }`,
       )
       .join("\n\n");
   }
@@ -3681,7 +3735,7 @@ async function refreshShop(client) {
         `━━━━━━━━━━━━━━\n` +
         `🎟️ 折券｜訂單優惠使用\n` +
         `🎁 特殊道具｜活動使用\n` +
-        `🌈 限定商品｜不定期上架`
+        `🌈 限定商品｜不定期上架`,
     )
     .setThumbnail(client.user.displayAvatarURL())
     .setFooter({
@@ -3700,7 +3754,7 @@ async function refreshShop(client) {
             item.description || "無介紹"
           }`.slice(0, 100),
           value: String(item.id),
-        }))
+        })),
       );
     const row = new ActionRowBuilder().addComponents(menu);
     components.push(row);
@@ -3751,7 +3805,7 @@ async function sendTopupPanel(client) {
       `歡迎來到 ASD 儲值區。\n\n` +
         `點擊下方按鈕後，系統會建立專屬儲值臨時頻道。\n\n` +
         `匯率：1 元台幣 = 1 ASD\n` +
-        `支援付款方式：匯款 / 無卡 / 刷卡 / 美金 / 加密貨幣`
+        `支援付款方式：匯款 / 無卡 / 刷卡 / 美金 / 加密貨幣`,
     )
     .setFooter({
       text: "深夜不關燈｜We Are Still Here",
@@ -3763,7 +3817,7 @@ async function sendTopupPanel(client) {
       .setCustomId("order_start_topup")
       .setLabel("建立儲值單")
       .setEmoji("💳")
-      .setStyle(ButtonStyle.Success)
+      .setStyle(ButtonStyle.Success),
   );
 
   const panel = await getPanelMessage("order_topup", process.env.GUILD_ID);
@@ -3793,7 +3847,7 @@ async function sendTopupPanel(client) {
     "order_topup",
     channel.id,
     newMessage.id,
-    process.env.GUILD_ID
+    process.env.GUILD_ID,
   );
 
   console.log("[TOPUP PANEL] 已建立");
@@ -3821,7 +3875,7 @@ async function sendCheckinPanel(client) {
         `━━━━━━━━━━━━━━\n` +
         `🪙 每日領取星雨幣\n` +
         `🔥 維持你的連續簽到紀錄\n` +
-        `🎉 不定期簽到活動`
+        `🎉 不定期簽到活動`,
     )
     .setThumbnail(client.user.displayAvatarURL())
     .setFooter({
@@ -3896,12 +3950,12 @@ async function sendAtmPanel(client) {
     transferButton,
     consumeButton,
     transferRecordButton,
-    bagButton
+    bagButton,
   );
   const row2 = new ActionRowBuilder().addComponents(
     switchBenefitButton,
     monthlyInfoButton,
-    monthlyPayButton
+    monthlyPayButton,
   );
   const embed = new EmbedBuilder()
     .setColor("#00ffff")
@@ -3915,7 +3969,7 @@ async function sendAtmPanel(client) {
         `💠 消費資訊｜查看累積消費\n` +
         `📜 交易紀錄｜查看最近錢包明細\n` +
         `🔄 切換權益｜每日最多切換 2 次\n` +
-        `🌙 查詢月結｜查看保證金與剩餘額度`
+        `🌙 查詢月結｜查看保證金與剩餘額度`,
     )
     .setThumbnail(client.user.displayAvatarURL())
     .setFooter({
@@ -3968,7 +4022,7 @@ async function sendGachaPanel(client) {
         `━━━━━━━━━━━━━━\n` +
         `🌈 SSR｜超稀有獎勵\n` +
         `⭐ SR｜高級獎勵\n` +
-        `🔹 R｜一般獎勵`
+        `🔹 R｜一般獎勵`,
     )
     .setThumbnail(client.user.displayAvatarURL())
     .setFooter({
@@ -4017,14 +4071,14 @@ async function sendOrderSystem(client) {
         `**儲值區**\n` +
         `💳 儲值 ASD\n\n` +
         `**打賞區**\n` +
-        `💝 打賞陪陪禮物`
+        `💝 打賞陪陪禮物`,
     )
     .setFooter({
       text: "深夜不關燈｜We Are Still Here",
     })
     .setTimestamp()
     .setImage(
-      "https://cdn.discordapp.com/attachments/1501098193276895360/1505274858567762153/ChatGPT_Image_2026517_02_24_37.png?ex=6a0a07f4&is=6a08b674&hm=e3cf59696e54af40365cec86b215036e4ee34bc83ac941016808de3719010617&"
+      "https://cdn.discordapp.com/attachments/1501098193276895360/1505274858567762153/ChatGPT_Image_2026517_02_24_37.png?ex=6a0a07f4&is=6a08b674&hm=e3cf59696e54af40365cec86b215036e4ee34bc83ac941016808de3719010617&",
     );
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -4043,7 +4097,7 @@ async function sendOrderSystem(client) {
       .setCustomId("order_start_delta")
       .setLabel("三角洲行動")
       .setEmoji("🛡️")
-      .setStyle(ButtonStyle.Primary)
+      .setStyle(ButtonStyle.Primary),
   );
 
   const row2 = new ActionRowBuilder().addComponents(
@@ -4057,7 +4111,7 @@ async function sendOrderSystem(client) {
       .setCustomId("order_start_emotion")
       .setLabel("出氣服務")
       .setEmoji("🧸")
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(ButtonStyle.Secondary),
   );
 
   const row3 = new ActionRowBuilder().addComponents(
@@ -4071,7 +4125,7 @@ async function sendOrderSystem(client) {
       .setCustomId("order_start_tip")
       .setLabel("打賞")
       .setEmoji("💝")
-      .setStyle(ButtonStyle.Danger)
+      .setStyle(ButtonStyle.Danger),
   );
 
   const messages = await channel.messages.fetch({
@@ -4082,7 +4136,7 @@ async function sendOrderSystem(client) {
     (msg) =>
       msg.author.id === client.user.id &&
       msg.embeds.length > 0 &&
-      msg.embeds[0].title === "🌙 星雨訂單中心"
+      msg.embeds[0].title === "🌙 星雨訂單中心",
   );
 
   if (oldPanel) {
@@ -4114,7 +4168,7 @@ async function sendPrivateRoomPanel(client) {
     .setTitle("🔐 私人文字房間")
     .setDescription(
       "按下下方按鈕後，系統會建立一個只有你看得到的臨時文字頻道。\n\n" +
-        "進入後你可以自行邀請想加入的人。"
+        "進入後你可以自行邀請想加入的人。",
     )
     .setTimestamp();
 
@@ -4123,7 +4177,7 @@ async function sendPrivateRoomPanel(client) {
       .setCustomId("create_private_room")
       .setLabel("建立私人文字頻道")
       .setEmoji("🔐")
-      .setStyle(ButtonStyle.Primary)
+      .setStyle(ButtonStyle.Primary),
   );
 
   const panel = await getPanelMessage("private_room");
@@ -4167,7 +4221,7 @@ const commands = [
       option
         .setName("玩家")
         .setDescription("管理員可指定要查詢餘額的玩家")
-        .setRequired(false)
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName("隱藏餘額")
@@ -4183,7 +4237,7 @@ const commands = [
     .setName("刪除商品")
     .setDescription("刪除商店商品")
     .addStringOption((option) =>
-      option.setName("名稱").setDescription("商品名稱").setRequired(true)
+      option.setName("名稱").setDescription("商品名稱").setRequired(true),
     ),
 
   // ===== 扭蛋 =====
@@ -4192,54 +4246,54 @@ const commands = [
     .setName("新增卡池")
     .setDescription("新增扭蛋卡池")
     .addStringOption((option) =>
-      option.setName("名稱").setDescription("卡池名稱").setRequired(true)
+      option.setName("名稱").setDescription("卡池名稱").setRequired(true),
     )
     .addIntegerOption((option) =>
-      option.setName("價格").setDescription("抽一次價格").setRequired(true)
+      option.setName("價格").setDescription("抽一次價格").setRequired(true),
     ),
   new SlashCommandBuilder()
     .setName("刪除扭蛋")
     .setDescription("刪除扭蛋卡池")
     .addStringOption((option) =>
-      option.setName("名稱").setDescription("卡池名稱").setRequired(true)
+      option.setName("名稱").setDescription("卡池名稱").setRequired(true),
     ),
   new SlashCommandBuilder()
     .setName("新增獎勵")
     .setDescription("新增卡池獎勵")
     .addIntegerOption((option) =>
-      option.setName("卡池id").setDescription("卡池 ID").setRequired(true)
+      option.setName("卡池id").setDescription("卡池 ID").setRequired(true),
     )
     .addStringOption((option) =>
-      option.setName("名稱").setDescription("獎勵名稱").setRequired(true)
+      option.setName("名稱").setDescription("獎勵名稱").setRequired(true),
     )
     .addStringOption((option) =>
-      option.setName("介紹").setDescription("獎勵介紹").setRequired(true)
+      option.setName("介紹").setDescription("獎勵介紹").setRequired(true),
     )
     .addStringOption((option) =>
-      option.setName("稀有度").setDescription("SSR / SR / R").setRequired(true)
+      option.setName("稀有度").setDescription("SSR / SR / R").setRequired(true),
     )
     .addNumberOption((option) =>
       option
         .setName("機率")
         .setDescription(
-          "權重數值，數字越大越容易抽到，例如：SSR=1、SR=20、R=79"
+          "權重數值，數字越大越容易抽到，例如：SSR=1、SR=20、R=79",
         )
-        .setRequired(true)
+        .setRequired(true),
     )
     .addIntegerOption((option) =>
       option
         .setName("星雨幣")
         .setDescription("中獎時給多少星雨幣")
-        .setRequired(false)
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName("刪除獎勵")
     .setDescription("刪除卡池獎勵")
     .addIntegerOption((option) =>
-      option.setName("卡池id").setDescription("卡池 ID").setRequired(true)
+      option.setName("卡池id").setDescription("卡池 ID").setRequired(true),
     )
     .addStringOption((option) =>
-      option.setName("名稱").setDescription("獎勵名稱").setRequired(true)
+      option.setName("名稱").setDescription("獎勵名稱").setRequired(true),
     ),
 
   new SlashCommandBuilder()
@@ -4255,10 +4309,10 @@ const commands = [
     .setName("發紅包")
     .setDescription("發送星雨幣紅包")
     .addIntegerOption((option) =>
-      option.setName("金額").setDescription("紅包總金額").setRequired(true)
+      option.setName("金額").setDescription("紅包總金額").setRequired(true),
     )
     .addIntegerOption((option) =>
-      option.setName("數量").setDescription("可領取人數").setRequired(true)
+      option.setName("數量").setDescription("可領取人數").setRequired(true),
     )
     .addStringOption((option) =>
       option
@@ -4267,27 +4321,27 @@ const commands = [
         .setRequired(true)
         .addChoices(
           { name: "平均分", value: "average" },
-          { name: "隨機分", value: "random" }
-        )
+          { name: "隨機分", value: "random" },
+        ),
     ),
   new SlashCommandBuilder()
     .setName("發錢")
     .setDescription("給予玩家星雨幣")
     .addUserOption((option) =>
-      option.setName("玩家").setDescription("選擇玩家").setRequired(true)
+      option.setName("玩家").setDescription("選擇玩家").setRequired(true),
     )
     .addIntegerOption((option) =>
-      option.setName("金額").setDescription("輸入金額").setRequired(true)
+      option.setName("金額").setDescription("輸入金額").setRequired(true),
     ),
 
   new SlashCommandBuilder()
     .setName("扣錢")
     .setDescription("扣除玩家星雨幣")
     .addUserOption((option) =>
-      option.setName("玩家").setDescription("選擇玩家").setRequired(true)
+      option.setName("玩家").setDescription("選擇玩家").setRequired(true),
     )
     .addIntegerOption((option) =>
-      option.setName("金額").setDescription("輸入金額").setRequired(true)
+      option.setName("金額").setDescription("輸入金額").setRequired(true),
     ),
   new SlashCommandBuilder()
     .setName("滿意度調查")
@@ -4296,19 +4350,19 @@ const commands = [
       option
         .setName("訂單編號")
         .setDescription("不填時會使用目前頻道最新一筆訂單")
-        .setRequired(false)
+        .setRequired(false),
     )
     .addUserOption((option) =>
       option
         .setName("老闆")
         .setDescription("依老闆尋找最近一筆訂單")
-        .setRequired(false)
+        .setRequired(false),
     )
     .addUserOption((option) =>
       option
         .setName("陪陪")
         .setDescription("依陪陪尋找最近一筆訂單")
-        .setRequired(false)
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName("發送優惠券")
@@ -4317,7 +4371,7 @@ const commands = [
       option
         .setName("玩家")
         .setDescription("選擇要發送優惠券的玩家")
-        .setRequired(true)
+        .setRequired(true),
     )
     .addStringOption((option) =>
       option
@@ -4344,8 +4398,8 @@ const commands = [
           {
             name: "6折折價券",
             value: "6折折價券",
-          }
-        )
+          },
+        ),
     )
     .addIntegerOption((option) =>
       option
@@ -4353,13 +4407,13 @@ const commands = [
         .setDescription("要發送幾張")
         .setRequired(true)
         .setMinValue(1)
-        .setMaxValue(20)
+        .setMaxValue(20),
     )
     .addStringOption((option) =>
       option
         .setName("備註")
         .setDescription("可不填，例如：活動補發、VIP福利、客服補償")
-        .setRequired(false)
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName("使用優惠券")
@@ -4368,14 +4422,14 @@ const commands = [
       option
         .setName("客人")
         .setDescription("選擇要使用優惠券的客人")
-        .setRequired(true)
+        .setRequired(true),
     )
     .addStringOption((option) =>
       option
         .setName("優惠券")
         .setDescription("先選客人，再選擇客人持有的優惠券")
         .setRequired(true)
-        .setAutocomplete(true)
+        .setAutocomplete(true),
     ),
   new SlashCommandBuilder()
     .setName("給與身份組")
@@ -4384,7 +4438,7 @@ const commands = [
       option
         .setName("身份組")
         .setDescription("選擇要發放的身份組")
-        .setRequired(true)
+        .setRequired(true),
     )
     .addStringOption((option) =>
       option
@@ -4403,44 +4457,44 @@ const commands = [
           {
             name: "所有人",
             value: "all",
-          }
-        )
+          },
+        ),
     )
     .addUserOption((option) =>
-      option.setName("成員1").setDescription("要發放的成員").setRequired(false)
+      option.setName("成員1").setDescription("要發放的成員").setRequired(false),
     )
     .addUserOption((option) =>
-      option.setName("成員2").setDescription("多人發放用").setRequired(false)
+      option.setName("成員2").setDescription("多人發放用").setRequired(false),
     )
     .addUserOption((option) =>
-      option.setName("成員3").setDescription("多人發放用").setRequired(false)
+      option.setName("成員3").setDescription("多人發放用").setRequired(false),
     )
     .addUserOption((option) =>
-      option.setName("成員4").setDescription("多人發放用").setRequired(false)
+      option.setName("成員4").setDescription("多人發放用").setRequired(false),
     )
     .addUserOption((option) =>
-      option.setName("成員5").setDescription("多人發放用").setRequired(false)
+      option.setName("成員5").setDescription("多人發放用").setRequired(false),
     )
     .addUserOption((option) =>
-      option.setName("成員6").setDescription("多人發放用").setRequired(false)
+      option.setName("成員6").setDescription("多人發放用").setRequired(false),
     )
     .addUserOption((option) =>
-      option.setName("成員7").setDescription("多人發放用").setRequired(false)
+      option.setName("成員7").setDescription("多人發放用").setRequired(false),
     )
     .addUserOption((option) =>
-      option.setName("成員8").setDescription("多人發放用").setRequired(false)
+      option.setName("成員8").setDescription("多人發放用").setRequired(false),
     )
     .addUserOption((option) =>
-      option.setName("成員9").setDescription("多人發放用").setRequired(false)
+      option.setName("成員9").setDescription("多人發放用").setRequired(false),
     )
     .addUserOption((option) =>
-      option.setName("成員10").setDescription("多人發放用").setRequired(false)
+      option.setName("成員10").setDescription("多人發放用").setRequired(false),
     )
     .addStringOption((option) =>
       option
         .setName("備註")
         .setDescription("可不填，例如：活動身分組、補發、管理員發放")
-        .setRequired(false)
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName("加時")
@@ -4449,28 +4503,28 @@ const commands = [
       option
         .setName("時長")
         .setDescription("例如：30分鐘、1局、續聊1小時")
-        .setRequired(true)
+        .setRequired(true),
     )
     .addIntegerOption((option) =>
-      option.setName("金額").setDescription("加時金額").setRequired(true)
+      option.setName("金額").setDescription("加時金額").setRequired(true),
     )
     .addIntegerOption((option) =>
       option
         .setName("訂單id")
         .setDescription("訂單資料庫 ID，可空白，空白時會用目前頻道尋找")
-        .setRequired(false)
+        .setRequired(false),
     )
     .addStringOption((option) =>
       option
         .setName("訂單編號")
         .setDescription("訂單編號，可空白")
-        .setRequired(false)
+        .setRequired(false),
     )
     .addStringOption((option) =>
       option
         .setName("備註")
         .setDescription("可不填，例如：客人要求延長，陪陪同意")
-        .setRequired(false)
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName("調整累積消費")
@@ -4479,13 +4533,13 @@ const commands = [
       option
         .setName("玩家")
         .setDescription("選擇要調整的會員")
-        .setRequired(true)
+        .setRequired(true),
     )
     .addIntegerOption((option) =>
       option
         .setName("金額")
         .setDescription("要調整的金額，例如 500 或 -500")
-        .setRequired(true)
+        .setRequired(true),
     )
     .addStringOption((option) =>
       option
@@ -4495,14 +4549,14 @@ const commands = [
         .addChoices(
           { name: "增加", value: "add" },
           { name: "扣除", value: "subtract" },
-          { name: "直接設定", value: "set" }
-        )
+          { name: "直接設定", value: "set" },
+        ),
     )
     .addStringOption((option) =>
       option
         .setName("備註")
         .setDescription("例如：補登消費、修正重複累積")
-        .setRequired(false)
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName("查詢累積")
@@ -4511,7 +4565,7 @@ const commands = [
       option
         .setName("玩家")
         .setDescription("要查詢的會員，不填則查詢自己")
-        .setRequired(false)
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName("調整累積儲值")
@@ -4520,13 +4574,13 @@ const commands = [
       option
         .setName("玩家")
         .setDescription("選擇要調整的會員")
-        .setRequired(true)
+        .setRequired(true),
     )
     .addIntegerOption((option) =>
       option
         .setName("金額")
         .setDescription("要調整的儲值金額，例如 500")
-        .setRequired(true)
+        .setRequired(true),
     )
     .addStringOption((option) =>
       option
@@ -4536,26 +4590,26 @@ const commands = [
         .addChoices(
           { name: "增加", value: "add" },
           { name: "扣除", value: "subtract" },
-          { name: "直接設定", value: "set" }
-        )
+          { name: "直接設定", value: "set" },
+        ),
     )
     .addStringOption((option) =>
       option
         .setName("備註")
         .setDescription("例如：補登儲值、修正重複累積")
-        .setRequired(false)
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName("設定月結")
     .setDescription("設定會員月結保證金與額度")
     .addUserOption((option) =>
-      option.setName("玩家").setDescription("選擇會員").setRequired(true)
+      option.setName("玩家").setDescription("選擇會員").setRequired(true),
     )
     .addIntegerOption((option) =>
       option
         .setName("保證金")
         .setDescription("輸入保證金金額，月結額度會等於保證金")
-        .setRequired(true)
+        .setRequired(true),
     ),
   new SlashCommandBuilder()
     .setName("月結餘額扣款")
@@ -4564,56 +4618,56 @@ const commands = [
       option
         .setName("玩家")
         .setDescription("選擇要扣除月結額度的會員")
-        .setRequired(true)
+        .setRequired(true),
     )
     .addIntegerOption((option) =>
       option
         .setName("金額")
         .setDescription("要扣除的月結額度金額")
-        .setRequired(true)
+        .setRequired(true),
     )
     .addStringOption((option) =>
       option
         .setName("備註")
         .setDescription("例如：補登月結消費、人工扣款原因")
-        .setRequired(false)
+        .setRequired(false),
     ),
   new SlashCommandBuilder()
     .setName("標記月結已繳")
     .setDescription("標記會員月結帳單已繳款，並發放回饋")
     .addUserOption((option) =>
-      option.setName("玩家").setDescription("選擇會員").setRequired(true)
+      option.setName("玩家").setDescription("選擇會員").setRequired(true),
     )
     .addStringOption((option) =>
       option
         .setName("月份")
         .setDescription("帳單月份，例如 2026-06")
-        .setRequired(true)
+        .setRequired(true),
     ),
   new SlashCommandBuilder()
     .setName("保證金抵扣")
     .setDescription("從會員保證金抵扣逾期月結帳單")
     .addUserOption((option) =>
-      option.setName("玩家").setDescription("選擇會員").setRequired(true)
+      option.setName("玩家").setDescription("選擇會員").setRequired(true),
     )
     .addStringOption((option) =>
       option
         .setName("月份")
         .setDescription("帳單月份，例如 2026-06")
-        .setRequired(true)
+        .setRequired(true),
     ),
   // ===== 商店 =====
   new SlashCommandBuilder()
     .setName("新增商品")
     .setDescription("新增商店商品")
     .addStringOption((option) =>
-      option.setName("名稱").setDescription("商品名稱").setRequired(true)
+      option.setName("名稱").setDescription("商品名稱").setRequired(true),
     )
     .addIntegerOption((option) =>
-      option.setName("價格").setDescription("商品價格").setRequired(true)
+      option.setName("價格").setDescription("商品價格").setRequired(true),
     )
     .addStringOption((option) =>
-      option.setName("介紹").setDescription("商品介紹").setRequired(true)
+      option.setName("介紹").setDescription("商品介紹").setRequired(true),
     )
     .addStringOption((option) =>
       option
@@ -4622,8 +4676,8 @@ const commands = [
         .setRequired(true)
         .addChoices(
           { name: "一般商品", value: "shop" },
-          { name: "折券", value: "coupon" }
-        )
+          { name: "折券", value: "coupon" },
+        ),
     ),
 ].map((command) => command.toJSON());
 let lastDailySummaryDate = null;
@@ -4686,7 +4740,7 @@ client.once(Events.ClientReady, async () => {
     console.log("🚀 星雨系統啟動中...");
     // ===== 陪玩控制面板 =====
     const playerChannel = await client.channels.fetch(
-      process.env.PLAYER_CONTROL_CHANNEL
+      process.env.PLAYER_CONTROL_CHANNEL,
     );
     await dispatchSystem.sendPlayerPanel(playerChannel);
     // ===== 註冊 Slash Commands =====
@@ -4717,28 +4771,31 @@ client.once(Events.ClientReady, async () => {
     startMonthlyBillScheduler();
     // ===== 秋奈薪資每日報告 =====
     startQiunaiSalaryReportCron(client, supabase);
-    setInterval(async () => {
-      try {
-        const now = new Date().toISOString();
-        const { data: expired } = await supabase
-          .from("monthly_vips")
-          .select("*")
-          .lte("expires_at", now);
-        if (!expired?.length) return;
-        for (const vip of expired) {
-          const guild = client.guilds.cache.first();
-          const member = await guild.members
-            .fetch(vip.user_id)
-            .catch(() => null);
-          if (member) {
-            await member.roles.remove(vip.role_id).catch(() => {});
+    setInterval(
+      async () => {
+        try {
+          const now = new Date().toISOString();
+          const { data: expired } = await supabase
+            .from("monthly_vips")
+            .select("*")
+            .lte("expires_at", now);
+          if (!expired?.length) return;
+          for (const vip of expired) {
+            const guild = client.guilds.cache.first();
+            const member = await guild.members
+              .fetch(vip.user_id)
+              .catch(() => null);
+            if (member) {
+              await member.roles.remove(vip.role_id).catch(() => {});
+            }
+            await supabase.from("monthly_vips").delete().eq("id", vip.id);
           }
-          await supabase.from("monthly_vips").delete().eq("id", vip.id);
+        } catch (err) {
+          console.log("[月卡VIP檢查錯誤]", err);
         }
-      } catch (err) {
-        console.log("[月卡VIP檢查錯誤]", err);
-      }
-    }, 60 * 60 * 1000);
+      },
+      60 * 60 * 1000,
+    );
     setInterval(async () => {
       const tenHoursAgo = Date.now() - 10 * 60 * 60 * 1000;
 
@@ -4768,8 +4825,8 @@ client.once(Events.ClientReady, async () => {
             String(order.assigned_player || "")
               .split(",")
               .map((id) => id.trim())
-              .filter(Boolean)
-          )
+              .filter(Boolean),
+          ),
         );
       const activePlayerIds = collectPlayerIds(activeOrders);
       const recentPlayerIds = collectPlayerIds(recentOrders);
@@ -4952,12 +5009,12 @@ async function createMonthlyTransaction({
 
   const currentMonthCashback = (monthTransactions || []).reduce(
     (sum, tx) => sum + Number(tx.cashback || 0),
-    0
+    0,
   );
 
   const cashback = Math.min(
     rawCashback,
-    Math.max(0, 30000 - currentMonthCashback)
+    Math.max(0, 30000 - currentMonthCashback),
   );
 
   const newUsedAmount = usedAmount + payAmount;
@@ -5033,10 +5090,10 @@ async function sendBankTransferInfo(channel) {
         `戶名：許O星\n\n` +
         `也可以掃描下方 QR Code 付款。\n\n` +
         `匯款完成後，請在此頻道上傳匯款截圖，等待客服確認。\n\n` +
-        `若有其他銀行之需求，請在下方告訴客服。`
+        `若有其他銀行之需求，請在下方告訴客服。`,
     )
     .setImage(
-      "https://cdn.discordapp.com/attachments/1501098193276895360/1524312607320965220/image.png?ex=6a4f4a3d&is=6a4df8bd&hm=85a35d149d4c0bf2a1958f6c8fbc5bedb6b731db7ff0cae74c754b09c0edc2a7&"
+      "https://cdn.discordapp.com/attachments/1501098193276895360/1524312607320965220/image.png?ex=6a4f4a3d&is=6a4df8bd&hm=85a35d149d4c0bf2a1958f6c8fbc5bedb6b731db7ff0cae74c754b09c0edc2a7&",
     )
     .setFooter({
       text: "請確認金額正確後再匯款",
@@ -5049,7 +5106,7 @@ async function sendBankTransferInfo(channel) {
 }
 async function getAvailablePlayerOptions(
   service,
-  guildId = process.env.GUILD_ID
+  guildId = process.env.GUILD_ID,
 ) {
   const players = await listActiveStaff();
 
@@ -5090,7 +5147,7 @@ async function getAvailablePlayerOptions(
           player.real_name ||
           player.discord_name ||
           player.name ||
-          player.discord_id
+          player.discord_id,
       ).slice(0, 100),
       description: formatAvailableTime(player).slice(0, 100),
       value: String(player.discord_id),
@@ -5118,7 +5175,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
         const amountText = interaction.fields.getTextInputValue("amount");
         const payAmount = Number(
-          String(amountText || "").replace(/[^\d]/g, "")
+          String(amountText || "").replace(/[^\d]/g, ""),
         );
         if (!payAmount || payAmount <= 0) {
           return await interaction.editReply({
@@ -5197,9 +5254,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
                   `本次繳費：NT$${payAmount.toLocaleString("zh-TW")}\n` +
                   `繳後剩餘應繳：NT$${Math.max(
                     0,
-                    usedAmount - payAmount
+                    usedAmount - payAmount,
                   ).toLocaleString("zh-TW")}\n` +
-                  `本次回饋：${cashbackAmount.toLocaleString("zh-TW")} ASD`
+                  `本次回饋：${cashbackAmount.toLocaleString("zh-TW")} ASD`,
               )
               .setTimestamp(),
           ],
@@ -5255,7 +5312,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         await interaction.reply({
           content: `✅ 感謝你的評價！你給了 ${"🌟".repeat(
-            rating
+            rating,
           )}（${rating} 星）`,
           flags: 64,
         });
@@ -5268,7 +5325,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 `老闆：<@${customerId}>\n陪陪：<@${staffId}>\n` +
                   `評分：${"🌟".repeat(rating)} ${rating}/5\n心得：${
                     comment || "未填寫"
-                  }`
+                  }`,
               )
               .setTimestamp(),
           ],
@@ -5351,7 +5408,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 `訂單編號：${order.order_no || order.id}\n` +
                   `闆闆：<@${interaction.user.id}>\n` +
                   `評分：${"🌟".repeat(rating)} ${rating}/5\n` +
-                  `心得：${comment || "未填寫"}`
+                  `心得：${comment || "未填寫"}`,
               )
               .setTimestamp(),
           ],
@@ -5361,9 +5418,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId.startsWith("submit_staff_edit_order_")) {
         return await dispatchSystem.handleDispatchInteraction(interaction);
       }
-      const handled = await dispatchSystem.handleDispatchInteraction(
-        interaction
-      );
+      const handled =
+        await dispatchSystem.handleDispatchInteraction(interaction);
 
       if (handled) return;
       await handleModalSubmit(interaction);
@@ -5383,9 +5439,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.deferReply({ flags: 64 }); // 其他指令維持只有自己看得到
         }
       }
-      const handled = await dispatchSystem.handleDispatchInteraction(
-        interaction
-      );
+      const handled =
+        await dispatchSystem.handleDispatchInteraction(interaction);
 
       if (handled) return;
       if (interaction.commandName === "加時") {
@@ -5508,7 +5563,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const ownerId = interaction.customId.replace("private_room_close_", "");
         const isStaff =
           interaction.member.permissions.has(
-            PermissionFlagsBits.Administrator
+            PermissionFlagsBits.Administrator,
           ) || interaction.member.roles.cache.has(process.env.STAFF_ROLE);
         if (interaction.user.id !== ownerId && !isStaff) {
           return interaction.editReply({
@@ -5581,7 +5636,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           : null;
         const isStaff =
           interaction.member.permissions.has(
-            PermissionFlagsBits.Administrator
+            PermissionFlagsBits.Administrator,
           ) || interaction.member.roles.cache.has(process.env.STAFF_ROLE);
         if (interaction.user.id !== ownerId && !isStaff) {
           return interaction.editReply({
@@ -5614,9 +5669,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!interaction.deferred && !interaction.replied) {
         await interaction.deferReply({ flags: 64 });
       }
-      const handled = await dispatchSystem.handleDispatchInteraction(
-        interaction
-      );
+      const handled =
+        await dispatchSystem.handleDispatchInteraction(interaction);
       if (handled) return;
       await handleButtonInteraction(interaction);
       return;
@@ -5667,7 +5721,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ...new Set(
             interaction.values
               .map((id) => String(id || "").trim())
-              .filter(Boolean)
+              .filter(Boolean),
           ),
         ];
         const tipDraftId = `manual_${interaction.user.id}_${Date.now()}`;
@@ -5680,9 +5734,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
           createdBy: interaction.user.id,
           createdAt: Date.now(),
         });
-        setTimeout(() => {
-          pendingTips.delete(tipDraftId);
-        }, 30 * 60 * 1000);
+        setTimeout(
+          () => {
+            pendingTips.delete(tipDraftId);
+          },
+          30 * 60 * 1000,
+        );
 
         const modal = new ModalBuilder()
           .setCustomId(`tip_modal_${tipDraftId}`)
@@ -5708,7 +5765,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         modal.addComponents(
           new ActionRowBuilder().addComponents(itemInput),
           new ActionRowBuilder().addComponents(amountInput),
-          new ActionRowBuilder().addComponents(tipPaymentInput)
+          new ActionRowBuilder().addComponents(tipPaymentInput),
         );
         return interaction.showModal(modal);
       }
@@ -5735,9 +5792,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             flags: 64,
           });
         }
-        const handled = await dispatchSystem.handleDispatchInteraction(
-          interaction
-        );
+        const handled =
+          await dispatchSystem.handleDispatchInteraction(interaction);
         if (handled) return;
       }
       // ===== 其他下拉選單 =====
@@ -5751,9 +5807,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         console.error("[StringSelect defer 失敗]", err);
         return;
       }
-      const handled = await dispatchSystem.handleDispatchInteraction(
-        interaction
-      );
+      const handled =
+        await dispatchSystem.handleDispatchInteraction(interaction);
       if (handled) return;
       await handleStringSelectInteraction(interaction);
       return;
@@ -5772,7 +5827,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         const ownerId = interaction.customId.replace(
           "private_room_invite_",
-          ""
+          "",
         );
         if (interaction.user.id !== ownerId) {
           return interaction.editReply({
@@ -5880,7 +5935,7 @@ async function handleSlashCommand(interaction) {
           .setDescription(
             newHidden
               ? `<@${interaction.user.id}> 的錢包餘額已設為隱藏。\n之後公開查詢時會顯示「已隱藏」。`
-              : `<@${interaction.user.id}> 的錢包餘額已改為公開。`
+              : `<@${interaction.user.id}> 的錢包餘額已改為公開。`,
           )
           .setTimestamp(),
       ],
@@ -5940,7 +5995,7 @@ async function handleSlashCommand(interaction) {
               `🧾 **已使用額度**\n` +
               `NT$${monthlyUsed.toLocaleString("zh-TW")}\n\n` +
               `✅ **剩餘可用額度**\n` +
-              `NT$${monthlyAvailable.toLocaleString("zh-TW")}`
+              `NT$${monthlyAvailable.toLocaleString("zh-TW")}`,
           )
           .setFooter({
             text: "深夜不關燈｜公開餘額查詢",
@@ -5955,14 +6010,14 @@ async function handleSlashCommand(interaction) {
     const totalCount = interaction.options.getInteger("數量");
 
     const distributionMode = normalizeRedPacketMode(
-      interaction.options.getString("分配方式") || "random"
+      interaction.options.getString("分配方式") || "random",
     );
 
     return await createRedPacket(
       interaction,
       totalAmount,
       totalCount,
-      distributionMode
+      distributionMode,
     );
   }
   // 扭蛋列表
@@ -5978,7 +6033,7 @@ async function handleSlashCommand(interaction) {
     const text = data
       .map(
         (g) =>
-          `🆔 ID：${g.id}\n🎰 ${g.pool_name}\n💰 單抽價格：${g.price} 星雨幣`
+          `🆔 ID：${g.id}\n🎰 ${g.pool_name}\n💰 單抽價格：${g.price} 星雨幣`,
       )
       .join("\n\n");
     return interaction.editReply({
@@ -6063,7 +6118,7 @@ async function handleSlashCommand(interaction) {
           .setColor("#FFD700")
           .setTitle("🏆 星雨排名")
           .setDescription(
-            `🥇 排名：第 ${rank} 名\n💰 星雨幣：${userData.coins}`
+            `🥇 排名：第 ${rank} 名\n💰 星雨幣：${userData.coins}`,
           ),
       ],
     });
@@ -6124,7 +6179,7 @@ async function handleSlashCommand(interaction) {
       target.id,
       "topup",
       amount,
-      getGuildId(interaction)
+      getGuildId(interaction),
     );
     return interaction.editReply({
       content: `✅ 已給予 <@${target.id}> ${amount} 星雨幣`,
@@ -6148,8 +6203,8 @@ async function handleSlashCommand(interaction) {
       return replyError(
         interaction,
         `餘額不足，目前餘額 ${currentCoins.toLocaleString(
-          "zh-TW"
-        )} 星雨幣，需要 ${amount.toLocaleString("zh-TW")} 星雨幣`
+          "zh-TW",
+        )} 星雨幣，需要 ${amount.toLocaleString("zh-TW")} 星雨幣`,
       );
     }
     const finalCoins = await changeCoins(target.id, -amount);
@@ -6218,7 +6273,7 @@ async function handleSlashCommand(interaction) {
               .setDescription(
                 `你收到優惠券：**${couponName}**\n` +
                   `數量：${count} 張\n\n` +
-                  `備註：${note}`
+                  `備註：${note}`,
               )
               .setFooter({
                 text: "優惠券可於下單時使用",
@@ -6250,7 +6305,7 @@ async function handleSlashCommand(interaction) {
     }
     const { data: oldVip, error: readError } = await getUserVipRecord(
       target.id,
-      guildId
+      guildId,
     );
     if (readError) {
       console.error("[調整累積消費] 讀取失敗", readError);
@@ -6288,7 +6343,7 @@ async function handleSlashCommand(interaction) {
     };
     const { data: updatedVip, error: saveError } = await saveUserVipRecord(
       payload,
-      oldVip
+      oldVip,
     );
     if (saveError || !updatedVip) {
       console.error("[調整累積消費] 更新失敗", saveError);
@@ -6297,7 +6352,7 @@ async function handleSlashCommand(interaction) {
       }
       return replyError(
         interaction,
-        `更新累積消費失敗：${saveError?.message || "未知錯誤"}`
+        `更新累積消費失敗：${saveError?.message || "未知錯誤"}`,
       );
     }
     try {
@@ -6316,13 +6371,13 @@ async function handleSlashCommand(interaction) {
                 mode === "add"
                   ? "增加"
                   : mode === "subtract"
-                  ? "扣除"
-                  : "直接設定"
+                    ? "扣除"
+                    : "直接設定"
               }\n` +
               `調整金額：NT$${amount.toLocaleString("zh-TW")}\n\n` +
               `原本累積消費：NT$${oldTotalSpent.toLocaleString("zh-TW")}\n` +
               `現在累積消費：NT$${newTotalSpent.toLocaleString("zh-TW")}\n\n` +
-              `備註：${note}`
+              `備註：${note}`,
           )
           .setFooter({
             text: `操作人員：${interaction.user.tag}`,
@@ -6358,7 +6413,7 @@ async function handleSlashCommand(interaction) {
 
     const { data: oldVip, error: readError } = await getUserVipRecord(
       target.id,
-      guildId
+      guildId,
     );
 
     if (readError) {
@@ -6413,7 +6468,7 @@ async function handleSlashCommand(interaction) {
     };
     const { data: updatedVip, error: saveError } = await saveUserVipRecord(
       payload,
-      oldVip
+      oldVip,
     );
     if (saveError || !updatedVip) {
       console.error("[調整累積儲值] 更新失敗", saveError);
@@ -6440,16 +6495,16 @@ async function handleSlashCommand(interaction) {
                 mode === "add"
                   ? "增加"
                   : mode === "subtract"
-                  ? "扣除"
-                  : "直接設定"
+                    ? "扣除"
+                    : "直接設定"
               }\n` +
               `調整金額：NT$${amount.toLocaleString("zh-TW")}\n\n` +
               `原本累積儲值：NT$${oldTotalTopup.toLocaleString("zh-TW")}\n` +
               `現在累積儲值：NT$${newTotalTopup.toLocaleString("zh-TW")}\n` +
               `最高單筆儲值：NT$${newHighestSingleTopup.toLocaleString(
-                "zh-TW"
+                "zh-TW",
               )}\n\n` +
-              `備註：${note}`
+              `備註：${note}`,
           )
           .setFooter({
             text: `操作人員：${interaction.user.tag}`,
@@ -6484,7 +6539,7 @@ async function handleSlashCommand(interaction) {
       },
       {
         onConflict: "user_id",
-      }
+      },
     );
     if (error) {
       console.error("[設定月結失敗]", error);
@@ -6553,8 +6608,8 @@ async function handleSlashCommand(interaction) {
       return replyError(
         interaction,
         `月結可用額度不足，目前可用 NT$${oldAvailableAmount.toLocaleString(
-          "zh-TW"
-        )}`
+          "zh-TW",
+        )}`,
       );
     }
 
@@ -6634,10 +6689,10 @@ async function handleSlashCommand(interaction) {
                 `扣除金額：NT$${amount.toLocaleString("zh-TW")}\n` +
                   `目前已使用：NT$${newUsedAmount.toLocaleString("zh-TW")}\n` +
                   `剩餘可用額度：NT$${newAvailableAmount.toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )}\n\n` +
                   `備註：${note}\n\n` +
-                  `繳費確認後，月結可用額度才會恢復。`
+                  `繳費確認後，月結可用額度才會恢復。`,
               )
               .setTimestamp(),
           ],
@@ -6655,13 +6710,13 @@ async function handleSlashCommand(interaction) {
               `扣除金額：NT$${amount.toLocaleString("zh-TW")}\n` +
               `帳單月份：${billingMonth}\n\n` +
               `已使用額度：NT$${oldUsedAmount.toLocaleString(
-                "zh-TW"
+                "zh-TW",
               )} → NT$${newUsedAmount.toLocaleString("zh-TW")}\n` +
               `剩餘可用額度：NT$${oldAvailableAmount.toLocaleString(
-                "zh-TW"
+                "zh-TW",
               )} → NT$${newAvailableAmount.toLocaleString("zh-TW")}\n\n` +
               `備註：${note}\n` +
-              `這筆額度會等到月結繳費確認後才恢復。`
+              `這筆額度會等到月結繳費確認後才恢復。`,
           )
           .setFooter({
             text: `操作人員：${interaction.user.tag}`,
@@ -6676,7 +6731,7 @@ async function handleSlashCommand(interaction) {
 
     const { data: vipData, error: vipError } = await getUserVipRecord(
       target.id,
-      guildId
+      guildId,
     );
 
     if (vipError) {
@@ -6706,7 +6761,7 @@ async function handleSlashCommand(interaction) {
               `🏦 **最高單筆儲值**\n` +
               `NT$${highestSingleTopup.toLocaleString("zh-TW")}\n\n` +
               `🌙 **目前 VIP 等級**\n` +
-              `${vipName}`
+              `${vipName}`,
           )
           .setFooter({
             text: `查詢人：${interaction.user.tag}`,
@@ -6745,7 +6800,7 @@ async function handleSlashCommand(interaction) {
     if (bill.status === "deducted") {
       return replyError(
         interaction,
-        "這張帳單已經由保證金抵扣，不能再標記已繳"
+        "這張帳單已經由保證金抵扣，不能再標記已繳",
       );
     }
     const { data: account, error: accountError } = await supabase
@@ -6804,7 +6859,7 @@ async function handleSlashCommand(interaction) {
         "月結回饋",
         cashbackAmount,
         finalCoins,
-        `🌙 ${billingMonth} 月結帳單已繳清，發放 3% 回饋`
+        `🌙 ${billingMonth} 月結帳單已繳清，發放 3% 回饋`,
       );
     }
     const targetUser = await client.users.fetch(target.id).catch(() => null);
@@ -6819,9 +6874,9 @@ async function handleSlashCommand(interaction) {
                 `結帳月份：${billingMonth}\n` +
                   `已繳金額：NT$${totalAmount.toLocaleString("zh-TW")}\n` +
                   `發放回饋：${cashbackAmount.toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )} 星雨幣\n\n` +
-                  `你的月結可用額度已恢復。`
+                  `你的月結可用額度已恢復。`,
               )
               .setTimestamp(),
           ],
@@ -6883,8 +6938,8 @@ async function handleSlashCommand(interaction) {
       return replyError(
         interaction,
         `保證金不足，帳單 NT$${totalAmount.toLocaleString(
-          "zh-TW"
-        )}，目前保證金 NT$${oldGuarantee.toLocaleString("zh-TW")}`
+          "zh-TW",
+        )}，目前保證金 NT$${oldGuarantee.toLocaleString("zh-TW")}`,
       );
     }
     const newGuarantee = oldGuarantee - totalAmount;
@@ -6949,9 +7004,9 @@ async function handleSlashCommand(interaction) {
                   `原保證金：NT$${oldGuarantee.toLocaleString("zh-TW")}\n` +
                   `剩餘保證金：NT$${newGuarantee.toLocaleString("zh-TW")}\n` +
                   `剩餘月結額度：NT$${newMonthlyLimit.toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )}\n\n` +
-                  `你的月結資格已暫停，如需恢復請聯繫客服。`
+                  `你的月結資格已暫停，如需恢復請聯繫客服。`,
               )
               .setTimestamp(),
           ],
@@ -6963,10 +7018,10 @@ async function handleSlashCommand(interaction) {
         `✅ 已從 <@${target.id}> 保證金抵扣 ${billingMonth} 月結帳單\n` +
         `抵扣金額：NT$${totalAmount.toLocaleString("zh-TW")}\n` +
         `保證金：NT$${oldGuarantee.toLocaleString(
-          "zh-TW"
+          "zh-TW",
         )} → NT$${newGuarantee.toLocaleString("zh-TW")}\n` +
         `已使用額度：NT$${oldUsedAmount.toLocaleString(
-          "zh-TW"
+          "zh-TW",
         )} → NT$${newUsedAmount.toLocaleString("zh-TW")}\n` +
         `月結狀態：已暫停`,
     });
@@ -7056,7 +7111,7 @@ async function handleSlashCommand(interaction) {
     }
     // 一般商品
     const normalItems = items.filter(
-      (item) => !item.rarity && item.item_type !== "coupon"
+      (item) => !item.rarity && item.item_type !== "coupon",
     );
     const couponItems = items.filter((item) => item.item_type === "coupon");
     if (normalItems.length > 0) {
@@ -7136,153 +7191,24 @@ async function createRedPacketShares(packetId, shares) {
 }
 
 async function claimPreparedRedPacket(packetId, userId) {
-  return await withRedPacketLock(packetId, async () => {
-    const { data: packet, error: packetError } = await supabase
-      .from("red_packets")
-      .select("*")
-      .eq("id", packetId)
-      .maybeSingle();
+  const { data, error } = await supabase.rpc(
+    "claim_prepared_red_packet_atomic",
+    { p_packet_id: packetId, p_user_id: userId },
+  );
 
-    if (packetError) {
-      console.error("[讀取紅包失敗]", packetError);
-      throw new Error("讀取紅包失敗");
-    }
+  if (error) {
+    console.error("[預分配紅包原子領取失敗]", error);
+    throw new Error(error.message || "搶紅包失敗");
+  }
 
-    if (!packet) {
-      return {
-        success: false,
-        message: "找不到這包紅包",
-        claim_amount: 0,
-        new_balance: 0,
-        left_amount: 0,
-        left_count: 0,
-      };
-    }
-
-    const { data: existingClaim, error: existingError } = await supabase
-      .from("red_packet_claims")
-      .select("id")
-      .eq("packet_id", packetId)
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (existingError) {
-      console.error("[檢查紅包領取紀錄失敗]", existingError);
-      throw new Error("檢查紅包領取紀錄失敗");
-    }
-
-    if (existingClaim) {
-      return {
-        success: false,
-        message: "你已經搶過這包紅包了",
-        claim_amount: 0,
-        new_balance: 0,
-        left_amount: Number(packet.remaining_amount || 0),
-        left_count: Number(packet.remaining_count || 0),
-      };
-    }
-
-    if (
-      packet.status !== "active" ||
-      Number(packet.remaining_amount || 0) <= 0 ||
-      Number(packet.remaining_count || 0) <= 0
-    ) {
-      return {
-        success: false,
-        message: "紅包已被搶完",
-        claim_amount: 0,
-        new_balance: 0,
-        left_amount: 0,
-        left_count: 0,
-      };
-    }
-
-    const pendingPrefix = getPendingRedPacketPrefix(packetId);
-    const { data: pendingShare, error: pendingError } = await supabase
-      .from("red_packet_claims")
-      .select("*")
-      .eq("packet_id", packetId)
-      .like("user_id", `${pendingPrefix}%`)
-      .order("id", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (pendingError) {
-      console.error("[讀取紅包份額失敗]", pendingError);
-      throw new Error("讀取紅包份額失敗");
-    }
-
-    if (!pendingShare) return null;
-
-    const claimAmount = Number(pendingShare.amount || 0);
-    const { data: updatedClaim, error: updateClaimError } = await supabase
-      .from("red_packet_claims")
-      .update({
-        user_id: userId,
-      })
-      .eq("id", pendingShare.id)
-      .like("user_id", `${pendingPrefix}%`)
-      .select("*")
-      .maybeSingle();
-
-    if (updateClaimError || !updatedClaim) {
-      console.error("[更新紅包領取紀錄失敗]", updateClaimError);
-      throw new Error("更新紅包領取紀錄失敗");
-    }
-
-    let newBalance = 0;
-
-    try {
-      newBalance = await changeCoins(userId, claimAmount);
-      await sendWalletLog(
-        userId,
-        "搶紅包",
-        claimAmount,
-        newBalance,
-        `🧧 搶到紅包 ${packet.packet_no || packetId}`
-      );
-    } catch (error) {
-      await supabase
-        .from("red_packet_claims")
-        .update({
-          user_id: pendingShare.user_id,
-        })
-        .eq("id", pendingShare.id);
-
-      throw error;
-    }
-
-    const leftAmount = Math.max(
-      0,
-      Number(packet.remaining_amount || 0) - claimAmount
-    );
-    const leftCount = Math.max(0, Number(packet.remaining_count || 0) - 1);
-
-    await supabase
-      .from("red_packets")
-      .update({
-        remaining_amount: leftAmount,
-        remaining_count: leftCount,
-        status: leftAmount <= 0 || leftCount <= 0 ? "finished" : "active",
-      })
-      .eq("id", packetId);
-
-    return {
-      success: true,
-      message: "success",
-      claim_amount: claimAmount,
-      new_balance: newBalance,
-      left_amount: leftAmount,
-      left_count: leftCount,
-    };
-  });
+  return data;
 }
 
 async function createRedPacket(
   interaction,
   totalAmount,
   totalCount,
-  mode = "random"
+  mode = "random",
 ) {
   if (!Number.isInteger(totalAmount) || totalAmount <= 0) {
     return interaction.editReply({
@@ -7325,8 +7251,8 @@ async function createRedPacket(
     -totalAmount,
     finalCoins,
     `🧧 發出紅包，共 ${totalAmount} 星雨幣 / ${totalCount} 份｜${getRedPacketModeLabel(
-      distributionMode
-    )}`
+      distributionMode,
+    )}`,
   );
 
   const packetNo = `RP-${Date.now()}-${
@@ -7335,7 +7261,7 @@ async function createRedPacket(
   const shares = buildRedPacketShares(
     totalAmount,
     totalCount,
-    distributionMode
+    distributionMode,
   );
 
   const { data: packet, error } = await supabase
@@ -7391,7 +7317,7 @@ async function createRedPacket(
         `💰 總金額：${totalAmount} 星雨幣\n` +
         `👥 數量：${totalCount} 份\n\n` +
         `🎲 分配：${getRedPacketModeLabel(distributionMode)}\n\n` +
-        `快點下方按鈕搶紅包！`
+        `快點下方按鈕搶紅包！`,
     )
     .setFooter({
       text: `紅包編號：${packetNo}`,
@@ -7403,7 +7329,7 @@ async function createRedPacket(
       .setCustomId(`claim_red_packet_${packet.id}`)
       .setLabel("搶紅包")
       .setEmoji("🧧")
-      .setStyle(ButtonStyle.Danger)
+      .setStyle(ButtonStyle.Danger),
   );
 
   const msg = await interaction.channel.send({
@@ -7438,7 +7364,7 @@ async function claimRedPacket(interaction) {
   try {
     result = await claimPreparedRedPacket(
       Number(packetId),
-      interaction.user.id
+      interaction.user.id,
     );
   } catch (error) {
     console.error("[預分配搶紅包失敗]", error);
@@ -7488,7 +7414,7 @@ async function claimRedPacket(interaction) {
     const disabledRow = new ActionRowBuilder().addComponents(
       ButtonBuilder.from(interaction.message.components[0].components[0])
         .setDisabled(true)
-        .setLabel("已搶完")
+        .setLabel("已搶完"),
     );
 
     await interaction.message
@@ -7502,13 +7428,13 @@ async function claimRedPacket(interaction) {
   return interaction.editReply({
     content:
       `🧧 恭喜你搶到 ${Number(result.claim_amount || 0).toLocaleString(
-        "zh-TW"
+        "zh-TW",
       )} 星雨幣！\n` +
       `💰 目前餘額：${Number(result.new_balance || 0).toLocaleString(
-        "zh-TW"
+        "zh-TW",
       )} 星雨幣\n` +
       `📦 紅包剩餘：${Number(result.left_amount || 0).toLocaleString(
-        "zh-TW"
+        "zh-TW",
       )} 星雨幣 / ${Number(result.left_count || 0).toLocaleString("zh-TW")} 份`,
   });
 }
@@ -7572,7 +7498,7 @@ async function createPrivateRoom(interaction) {
         .setColor("#66ccff")
         .setTitle("🔐 私人文字房間")
         .setDescription(
-          "這個頻道目前只有你看得到。\n\n" + "你可以用下方選單邀請其他人進來。"
+          "這個頻道目前只有你看得到。\n\n" + "你可以用下方選單邀請其他人進來。",
         )
         .setTimestamp(),
     ],
@@ -7667,7 +7593,8 @@ async function getOrCreateMonthlyPayableBill(userId) {
 async function markMonthlyBillPaidByBillId({
   billId,
   paidBy,
-  method = "客服確認",
+  method,
+  deductWallet = false,
 }) {
   const { data: bill, error: billError } = await supabase
     .from("member_monthly_bills")
@@ -7676,73 +7603,38 @@ async function markMonthlyBillPaidByBillId({
     .maybeSingle();
 
   if (billError || !bill) {
-    console.error("[月結繳費] 找不到帳單", billError);
     throw new Error("找不到月結帳單");
   }
 
-  if (bill.status === "paid") {
-    throw new Error("這張帳單已經是已繳狀態");
+  const { data, error } = await supabase.rpc("settle_monthly_bill_atomic", {
+    p_bill_id: bill.id,
+    p_paid_by: paidBy || null,
+    p_method: method,
+    p_deduct_wallet: deductWallet,
+  });
+
+  if (error) {
+    console.error("[月結繳費] 原子結清失敗", error);
+    throw new Error(error.message || "月結帳單結清失敗");
   }
 
-  if (bill.status === "deducted") {
-    throw new Error("這張帳單已由保證金抵扣，不能再標記已繳");
+  const totalAmount = Number(data?.total_amount || 0);
+  const cashbackAmount = Number(data?.cashback_amount || 0);
+  const oldUsedAmount = Number(data?.old_used_amount || 0);
+  const newUsedAmount = Number(data?.new_used_amount || 0);
+  const finalCoins = Number(data?.final_balance || 0);
+  const monthlyWalletPayment = deductWallet || isWalletPayment(method);
+
+  if (deductWallet) {
+    await sendWalletLog(
+      bill.user_id,
+      "月結繳費",
+      -totalAmount,
+      finalCoins - cashbackAmount,
+      `🌙 ${bill.billing_month} 月結帳單繳費`,
+      false,
+    );
   }
-
-  const { data: account, error: accountError } = await supabase
-    .from("member_monthly_accounts")
-    .select("*")
-    .eq("user_id", bill.user_id)
-    .maybeSingle();
-
-  if (accountError || !account) {
-    console.error("[月結繳費] 找不到月結帳戶", accountError);
-    throw new Error("找不到會員月結帳戶");
-  }
-
-  const totalAmount = Number(bill.total_amount || 0);
-
-  const cashbackAmount = Number(bill.cashback_amount || 0);
-
-  const oldUsedAmount = Number(account.used_amount || 0);
-
-  const newUsedAmount = Math.max(0, oldUsedAmount - totalAmount);
-
-  const { error: updateBillError } = await supabase
-    .from("member_monthly_bills")
-    .update({
-      status: "paid",
-      paid_at: new Date().toISOString(),
-    })
-    .eq("id", bill.id);
-
-  if (updateBillError) {
-    console.error("[月結繳費] 更新帳單失敗", updateBillError);
-    throw new Error("更新帳單失敗");
-  }
-
-  const { error: updateAccountError } = await supabase
-    .from("member_monthly_accounts")
-    .update({
-      used_amount: newUsedAmount,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("user_id", bill.user_id);
-
-  if (updateAccountError) {
-    console.error("[月結繳費] 更新額度失敗", updateAccountError);
-    throw new Error("帳單已標記，但更新額度失敗");
-  }
-
-  await supabase
-    .from("member_monthly_transactions")
-    .update({
-      status: "paid",
-    })
-    .eq("user_id", bill.user_id)
-    .eq("billing_month", bill.billing_month)
-    .in("status", ["billed", "unbilled"]);
-
-  const monthlyWalletPayment = isWalletPayment(method);
 
   await recordAccountingLedger({
     entry_type: "monthly_payment",
@@ -7761,19 +7653,17 @@ async function markMonthlyBillPaidByBillId({
   });
 
   if (cashbackAmount > 0) {
-    const finalCoins = await changeCoins(bill.user_id, cashbackAmount);
-
     await sendWalletLog(
       bill.user_id,
       "月結回饋",
       cashbackAmount,
       finalCoins,
-      `🌙 ${bill.billing_month} 月結帳單已繳清，發放 3% 回饋`
+      `🌙 ${bill.billing_month} 月結帳單已繳清，發放 3% 回饋`,
+      false,
     );
   }
 
   const targetUser = await client.users.fetch(bill.user_id).catch(() => null);
-
   if (targetUser) {
     await targetUser
       .send({
@@ -7786,7 +7676,7 @@ async function markMonthlyBillPaidByBillId({
                 `已繳金額：NT$${totalAmount.toLocaleString("zh-TW")}\n` +
                 `付款方式：${method}\n` +
                 `發放回饋：${cashbackAmount.toLocaleString("zh-TW")} ASD\n\n` +
-                `你的月結可用額度已恢復。`
+                "你的月結可用額度已恢復。",
             )
             .setTimestamp(),
         ],
@@ -7795,11 +7685,12 @@ async function markMonthlyBillPaidByBillId({
   }
 
   return {
-    bill,
+    bill: { ...bill, status: "paid", paid_at: new Date().toISOString() },
     totalAmount,
     cashbackAmount,
     oldUsedAmount,
     newUsedAmount,
+    finalCoins,
     paidBy,
     method,
   };
@@ -7812,58 +7703,17 @@ async function payMonthlyBillByWallet(interaction, billId) {
     .eq("id", billId)
     .maybeSingle();
 
-  if (billError || !bill) {
-    throw new Error("找不到月結帳單");
-  }
-
+  if (billError || !bill) throw new Error("找不到月結帳單");
   if (bill.user_id !== interaction.user.id) {
     throw new Error("只有帳單本人可以繳費");
   }
 
-  if (bill.status === "paid") {
-    throw new Error("這張帳單已經繳清");
-  }
-
-  if (bill.status === "deducted") {
-    throw new Error("這張帳單已由保證金抵扣");
-  }
-
-  const amount = Number(bill.total_amount || 0);
-
-  if (!amount || amount <= 0) {
-    throw new Error("帳單金額錯誤");
-  }
-
-  const userData = await getUser(interaction.user.id);
-
-  const currentCoins = Number(userData.coins || 0);
-
-  if (currentCoins < amount) {
-    throw new Error(
-      `ASD 餘額不足，目前餘額 ${currentCoins} ASD，需要 ${amount} ASD`
-    );
-  }
-
-  const finalCoins = await changeCoins(interaction.user.id, -amount);
-
-  await sendWalletLog(
-    interaction.user.id,
-    "月結繳費",
-    -amount,
-    finalCoins,
-    `🌙 ${bill.billing_month} 月結帳單繳費`
-  );
-
-  const result = await markMonthlyBillPaidByBillId({
+  return await markMonthlyBillPaidByBillId({
     billId: bill.id,
     paidBy: interaction.user.id,
     method: "儲值卡 / 錢包",
+    deductWallet: true,
   });
-
-  return {
-    ...result,
-    finalCoins,
-  };
 }
 
 async function createMonthlyBillPaymentChannel(interaction, bill) {
@@ -7877,7 +7727,7 @@ async function createMonthlyBillPaymentChannel(interaction, bill) {
   const parentId = await resolveTicketParentId(
     interaction.guild,
     process.env.ORDER_CATEGORY,
-    "訂單區"
+    "訂單區",
   );
 
   const payChannel = await interaction.guild.channels.create({
@@ -7957,7 +7807,7 @@ async function createMonthlyBillPaymentChannel(interaction, bill) {
       .setCustomId("owner_cancel_ticket")
       .setLabel("我按錯了，關閉頻道")
       .setEmoji("🗑️")
-      .setStyle(ButtonStyle.Danger)
+      .setStyle(ButtonStyle.Danger),
   );
 
   await payChannel.send({
@@ -7971,12 +7821,12 @@ async function createMonthlyBillPaymentChannel(interaction, bill) {
             `會員：<@${bill.user_id}>\n` +
             `結帳月份：${bill.billing_month}\n` +
             `帳單金額：NT$${Number(bill.total_amount || 0).toLocaleString(
-              "zh-TW"
+              "zh-TW",
             )}\n` +
             `待發回饋：${Number(bill.cashback_amount || 0).toLocaleString(
-              "zh-TW"
+              "zh-TW",
             )} ASD\n` +
-            `帳單狀態：${bill.status || "unpaid"}`
+            `帳單狀態：${bill.status || "unpaid"}`,
         )
         .setTimestamp(),
     ],
@@ -8002,7 +7852,7 @@ async function handleButtonInteraction(interaction) {
     }
     const modal = new ModalBuilder()
       .setCustomId(
-        `submit_manual_review_${rating}_${customerId}_${staffId}_${surveyId}`
+        `submit_manual_review_${rating}_${customerId}_${staffId}_${surveyId}`,
       )
       .setTitle("填寫滿意度調查");
     const commentInput = new TextInputBuilder()
@@ -8085,7 +7935,7 @@ async function handleButtonInteraction(interaction) {
         "每日簽到",
         reward,
         finalCoins,
-        "☔ 每日簽到獎勵"
+        "☔ 每日簽到獎勵",
       );
 
       await updateCheckin(interaction.user.id, today);
@@ -8163,17 +8013,17 @@ async function handleButtonInteraction(interaction) {
                 `已使用儲值卡 / 錢包完成月結繳費。\n\n` +
                   `結帳月份：${result.bill.billing_month}\n` +
                   `繳費金額：NT$${result.totalAmount.toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )}\n` +
                   `扣款後餘額：${result.finalCoins.toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )} ASD\n` +
                   `發放回饋：${result.cashbackAmount.toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )} ASD\n` +
                   `已使用額度：NT$${result.oldUsedAmount.toLocaleString(
-                    "zh-TW"
-                  )} → NT$${result.newUsedAmount.toLocaleString("zh-TW")}`
+                    "zh-TW",
+                  )} → NT$${result.newUsedAmount.toLocaleString("zh-TW")}`,
               )
               .setTimestamp(),
           ],
@@ -8218,15 +8068,15 @@ async function handleButtonInteraction(interaction) {
                 `會員：<@${result.bill.user_id}>\n` +
                   `結帳月份：${result.bill.billing_month}\n` +
                   `繳款金額：NT$${result.totalAmount.toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )}\n` +
                   `發放回饋：${result.cashbackAmount.toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )} ASD\n` +
                   `已使用額度：NT$${result.oldUsedAmount.toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )} → NT$${result.newUsedAmount.toLocaleString("zh-TW")}\n\n` +
-                  `客服：<@${interaction.user.id}>`
+                  `客服：<@${interaction.user.id}>`,
               )
               .setTimestamp(),
           ],
@@ -8239,7 +8089,7 @@ async function handleButtonInteraction(interaction) {
           new ButtonBuilder()
             .setCustomId("delete_order_now")
             .setLabel("🗑️ 關閉頻道")
-            .setStyle(ButtonStyle.Danger)
+            .setStyle(ButtonStyle.Danger),
         );
         await interaction.channel.send({
           content: `<@&${process.env.STAFF_ROLE}> 月結繳費已完成，請選擇是否儲存紀錄或關閉頻道。`,
@@ -8260,7 +8110,7 @@ async function handleButtonInteraction(interaction) {
       const guildId = getGuildId(interaction);
       const { data: vipData, error: vipError } = await getUserVipRecord(
         interaction.user.id,
-        guildId
+        guildId,
       );
       if (vipError) {
         console.error("[ATM 消費資訊] 查詢 VIP 累積資料失敗", vipError);
@@ -8302,7 +8152,7 @@ async function handleButtonInteraction(interaction) {
       }
       const monthSpent = (monthSpendLogs || [])
         .filter((log) =>
-          ["訂單扣款", "商店購買", "打賞消費", "加時扣款"].includes(log.type)
+          ["訂單扣款", "商店購買", "打賞消費", "加時扣款"].includes(log.type),
         )
         .reduce((sum, log) => sum + Math.abs(Number(log.amount || 0)), 0);
       const embed = new EmbedBuilder()
@@ -8314,14 +8164,14 @@ async function handleButtonInteraction(interaction) {
             `${Number(userData.coins || 0).toLocaleString("zh-TW")} ASD\n\n` +
             `**累積消費金額**\n` +
             `${Number(vipData?.total_spent || 0).toLocaleString(
-              "zh-TW"
+              "zh-TW",
             )} 元\n\n` +
             `**月累積消費金額**\n` +
             `${Number(monthSpent || 0).toLocaleString("zh-TW")} ASD\n\n` +
             `**累積儲值金額**\n` +
             `${Number(totalTopup || 0).toLocaleString("zh-TW")} ASD\n\n` +
             `**本月累積儲值金額**\n` +
-            `${Number(monthTopup || 0).toLocaleString("zh-TW")} ASD`
+            `${Number(monthTopup || 0).toLocaleString("zh-TW")} ASD`,
         );
       return await interaction.editReply({
         embeds: [embed],
@@ -8436,7 +8286,7 @@ async function handleButtonInteraction(interaction) {
               .setTitle("🌙 星雨月結會員")
               .setDescription(
                 `你目前尚未開通月結會員。\n\n` +
-                  `如需開通，請聯繫客服設定保證金與月結額度。`
+                  `如需開通，請聯繫客服設定保證金與月結額度。`,
               ),
           ],
         });
@@ -8475,11 +8325,11 @@ async function handleButtonInteraction(interaction) {
                 name: "剩餘可用",
                 value: `NT$${availableAmount.toLocaleString("zh-TW")}`,
                 inline: true,
-              }
+              },
             )
             .setDescription(
               `每月 25 日結帳，繳款期限為次月 16 日。\n` +
-                `月結額度僅限平台指定服務使用，不可提領、不可轉讓、不可兌現。`
+                `月結額度僅限平台指定服務使用，不可提領、不可轉讓、不可兌現。`,
             )
             .setTimestamp(),
         ],
@@ -8551,14 +8401,14 @@ async function handleButtonInteraction(interaction) {
         (item) =>
           item.item_type === "coupon" ||
           String(item.item_name || "").includes("折券") ||
-          String(item.item_name || "").includes("優惠券")
+          String(item.item_name || "").includes("優惠券"),
       );
       const normalItems = groupedItems.filter(
         (item) =>
           !item.rarity &&
           item.item_type !== "coupon" &&
           !String(item.item_name || "").includes("折券") &&
-          !String(item.item_name || "").includes("優惠券")
+          !String(item.item_name || "").includes("優惠券"),
       );
       if (couponItems.length > 0) {
         text += `\n🎟️ 優惠券\n`;
@@ -8629,7 +8479,7 @@ async function handleButtonInteraction(interaction) {
         "聊天掉落",
         reward,
         finalCoins,
-        "☔ 領取聊天掉落獎勵"
+        "☔ 領取聊天掉落獎勵",
       );
 
       await interaction.message
@@ -8651,7 +8501,7 @@ async function handleButtonInteraction(interaction) {
           interaction.user.id,
           interaction.guild.id,
           1,
-          poolId
+          poolId,
         );
         const item = result.results[0];
         await sendWalletLog(
@@ -8659,7 +8509,7 @@ async function handleButtonInteraction(interaction) {
           "單抽",
           -result.cost + result.totalRewardCoins,
           result.finalCoins,
-          `🎰 單抽完成`
+          `🎰 單抽完成`,
         );
         return await interaction.editReply({
           embeds: [
@@ -8671,7 +8521,7 @@ async function handleButtonInteraction(interaction) {
                   `📦 ${item.name}\n\n` +
                   `${item.description || "無介紹"}` +
                   `💰 代幣變動：${-result.cost + result.totalRewardCoins}\n` +
-                  `💳 目前餘額：${result.finalCoins}`
+                  `💳 目前餘額：${result.finalCoins}`,
               ),
           ],
         });
@@ -8690,7 +8540,7 @@ async function handleButtonInteraction(interaction) {
           interaction.user.id,
           interaction.guild.id,
           10,
-          poolId
+          poolId,
         );
         const text = result.results
           .slice(0, 10)
@@ -8701,7 +8551,7 @@ async function handleButtonInteraction(interaction) {
           "十抽",
           -result.cost + result.totalRewardCoins,
           result.finalCoins,
-          `🎰 十抽完成`
+          `🎰 十抽完成`,
         );
         return await interaction.editReply({
           embeds: [
@@ -8713,7 +8563,7 @@ async function handleButtonInteraction(interaction) {
                   text +
                   `\n\n💰 代幣變動：${-result.cost + result.totalRewardCoins}` +
                   `\n💳 目前餘額：${result.finalCoins}`
-                ).slice(0, 3800)
+                ).slice(0, 3800),
               ),
           ],
         });
@@ -8742,7 +8592,7 @@ async function handleButtonInteraction(interaction) {
             label: pool.pool_name.slice(0, 100),
             description: `單抽價格：${pool.price} 星雨幣`,
             value: String(pool.id),
-          }))
+          })),
         );
       const row = new ActionRowBuilder().addComponents(menu);
       await sendGachaPanel(client);
@@ -8755,7 +8605,7 @@ async function handleButtonInteraction(interaction) {
     if (customId === "use_coupon" || customId.startsWith("use_coupon_")) {
       const channelOwnerId =
         interaction.channel.permissionOverwrites.cache.find(
-          (p) => p.type === 1 && p.allow.has(PermissionFlagsBits.ViewChannel)
+          (p) => p.type === 1 && p.allow.has(PermissionFlagsBits.ViewChannel),
         )?.id;
       if (interaction.user.id !== channelOwnerId) {
         return await interaction.editReply({
@@ -8763,7 +8613,8 @@ async function handleButtonInteraction(interaction) {
         });
       }
       const coupons = (await getUserItems(interaction.user.id)).filter(
-        (item) => item.item_type === "coupon" || item.item_name.includes("折券")
+        (item) =>
+          item.item_type === "coupon" || item.item_name.includes("折券"),
       );
       if (coupons.length === 0) {
         return await interaction.editReply({
@@ -8778,7 +8629,7 @@ async function handleButtonInteraction(interaction) {
             label: c.item_name.slice(0, 100),
             description: c.description?.slice(0, 100) || "使用這張優惠券",
             value: String(c.id),
-          }))
+          })),
         );
       const row = new ActionRowBuilder().addComponents(menu);
       return await interaction.editReply({
@@ -8790,7 +8641,7 @@ async function handleButtonInteraction(interaction) {
     if (customId === "skip_coupon") {
       const channelOwnerId =
         interaction.channel.permissionOverwrites.cache.find(
-          (p) => p.type === 1 && p.allow.has(PermissionFlagsBits.ViewChannel)
+          (p) => p.type === 1 && p.allow.has(PermissionFlagsBits.ViewChannel),
         )?.id;
       if (interaction.user.id !== channelOwnerId) {
         return await interaction.editReply({
@@ -8876,7 +8727,7 @@ async function handleButtonInteraction(interaction) {
           "打賞消費",
           -totalAmount,
           finalCoins,
-          `💝 打賞給 ${selectedStaffText}｜${item}`
+          `💝 打賞給 ${selectedStaffText}｜${item}`,
         );
         deductText = `已從 <@${tipperId}> 餘額扣除 ${totalAmount} 星雨幣`;
       }
@@ -8918,7 +8769,7 @@ async function handleButtonInteraction(interaction) {
             name: "扣款狀態",
             value: deductText,
             inline: false,
-          }
+          },
         )
         .setTimestamp();
       const components = [];
@@ -8933,7 +8784,7 @@ async function handleButtonInteraction(interaction) {
           .setStyle(ButtonStyle.Danger);
         const row = new ActionRowBuilder().addComponents(
           confirmTipButton,
-          cancelTipButton
+          cancelTipButton,
         );
         components.push(row);
       }
@@ -9034,24 +8885,27 @@ async function handleButtonInteraction(interaction) {
         });
       }
 
-      const userData = await getUser(tipperId);
-      const currentCoins = Number(userData.coins || 0);
-      if (currentCoins < totalAmount) {
+      let payment;
+      try {
+        payment = await payTipWithWalletAtomic({
+          operationKey: `${getGuildId(interaction)}:wallet-tip:${tipId}`,
+          guildId: getGuildId(interaction),
+          tipperId,
+          staffIds: selectedStaffIds,
+          item,
+          amount: Number(amount),
+          channelId: interaction.channel.id,
+        });
+      } catch (error) {
+        console.error("[儲值卡打賞交易失敗]", error);
         return await interaction.editReply({
-          content:
-            `❌ ASD 餘額不足。\n` +
-            `目前餘額：${currentCoins} ASD\n` +
-            `需要金額：${totalAmount} ASD`,
+          content: `❌ 儲值卡打賞失敗：${error.message || error}`,
         });
       }
-      const finalCoins = await changeCoins(tipperId, -totalAmount);
-      await sendWalletLog(
-        tipperId,
-        "打賞消費",
-        -totalAmount,
-        finalCoins,
-        `💝 打賞給 ${selectedStaffText}｜${item}`
-      );
+      const finalCoins = Number(payment.balance);
+      for (const order of payment.orders || []) {
+        await countOrderVipSpentOnce(order, "儲值卡打賞付款完成");
+      }
       await interaction.channel.send({
         embeds: [
           new EmbedBuilder()
@@ -9087,39 +8941,20 @@ async function handleButtonInteraction(interaction) {
                 name: "扣款後餘額",
                 value: `${finalCoins} ASD`,
                 inline: true,
-              }
+              },
             )
             .setTimestamp(),
         ],
       });
-      try {
-        await saveTipToPlayOrdersForStaff({
-          guildId: getGuildId(interaction),
-          tipperId,
-          staffIds: selectedStaffIds,
-          item,
-          amount: Number(amount),
-          channelId: interaction.channel.id,
-          paid: true,
-          countReason: "儲值卡打賞付款完成",
-        });
-        await interaction.channel.send({
-          content:
-            `✅ 儲值卡打賞已完成，並已寫入薪資網\n` +
-            `打賞人：<@${tipperId}>\n` +
-            `受賞陪陪：${selectedStaffText}\n` +
-            `品項：${item}\n` +
-            `每位金額：NT$${amount}\n` +
-            `總金額：NT$${totalAmount}`,
-        });
-      } catch (error) {
-        console.error("[儲值卡打賞寫入薪資網失敗]", error);
-        await interaction.channel.send({
-          content:
-            `⚠️ 儲值卡已扣款，但寫入薪資網失敗。\n` +
-            `錯誤：${error.message || error}`,
-        });
-      }
+      await interaction.channel.send({
+        content:
+          `✅ 儲值卡打賞已完成，並已寫入薪資網\n` +
+          `打賞人：<@${tipperId}>\n` +
+          `受賞陪陪：${selectedStaffText}\n` +
+          `品項：${item}\n` +
+          `每位金額：NT$${amount}\n` +
+          `總金額：NT$${totalAmount}`,
+      });
       await sendTipCloseButtons(interaction.channel);
       pendingTips.delete(tipId);
       return await interaction.editReply({
@@ -9200,7 +9035,7 @@ async function handleButtonInteraction(interaction) {
         .setTitle("✅ 打賞已付款");
 
       const fields = oldEmbed.fields.filter(
-        (field) => field.name !== "扣款狀態" && field.name !== "打賞狀態"
+        (field) => field.name !== "扣款狀態" && field.name !== "打賞狀態",
       );
 
       embed.setFields(fields);
@@ -9279,7 +9114,7 @@ async function handleButtonInteraction(interaction) {
         .setTitle("❌ 打賞已取消");
 
       const fields = oldEmbed.fields.filter(
-        (field) => field.name !== "扣款狀態" && field.name !== "打賞狀態"
+        (field) => field.name !== "扣款狀態" && field.name !== "打賞狀態",
       );
 
       embed.setFields(fields);
@@ -9331,7 +9166,7 @@ async function handleButtonInteraction(interaction) {
         interaction.member.roles.cache.has(process.env.STAFF_ROLE) ||
         (process.env.CUSTOMER_SERVICE_ROLE_ID &&
           interaction.member.roles.cache.has(
-            process.env.CUSTOMER_SERVICE_ROLE_ID
+            process.env.CUSTOMER_SERVICE_ROLE_ID,
           ));
       if (!isCustomer && !isStaff) {
         return await interaction.editReply({
@@ -9354,7 +9189,7 @@ async function handleButtonInteraction(interaction) {
         .setStyle(ButtonStyle.Danger);
       const row = new ActionRowBuilder().addComponents(
         saveButton,
-        deleteButton
+        deleteButton,
       );
       await interaction.channel.send({
         content: `<@&${process.env.STAFF_ROLE}> 客人已確認關閉訂單，請選擇是否儲存紀錄。`,
@@ -9391,7 +9226,7 @@ async function handleButtonInteraction(interaction) {
         interaction.member.roles.cache.has(process.env.STAFF_ROLE) ||
         (process.env.CUSTOMER_SERVICE_ROLE_ID &&
           interaction.member.roles.cache.has(
-            process.env.CUSTOMER_SERVICE_ROLE_ID
+            process.env.CUSTOMER_SERVICE_ROLE_ID,
           ));
       if (!isCustomer && !isStaff) {
         return await interaction.editReply({
@@ -9428,7 +9263,7 @@ async function handleButtonInteraction(interaction) {
         .setStyle(ButtonStyle.Danger);
       const row = new ActionRowBuilder().addComponents(
         saveButton,
-        deleteButton
+        deleteButton,
       );
       return await interaction.editReply({
         content: "💰 是否儲存儲值紀錄？",
@@ -9533,7 +9368,7 @@ async function handleButtonInteraction(interaction) {
                   }\n` +
                   `服務：${order.service || order.order_item || "未填寫"}\n` +
                   `商品金額：NT$${totalPrice.toLocaleString("zh-TW")}\n` +
-                  `每位分攤金額：NT$${splitAmount.toLocaleString("zh-TW")}`
+                  `每位分攤金額：NT$${splitAmount.toLocaleString("zh-TW")}`,
               )
               .setTimestamp(),
           ],
@@ -9550,7 +9385,7 @@ async function handleButtonInteraction(interaction) {
           .setStyle(ButtonStyle.Secondary);
         const row = new ActionRowBuilder().addComponents(
           confirmCloseButton,
-          cancelCloseButton
+          cancelCloseButton,
         );
         let closeTargetId = null;
         // 如果是陪玩訂單，從 play_orders 找客人
@@ -9573,7 +9408,7 @@ async function handleButtonInteraction(interaction) {
                 p.id !== process.env.STAFF_ROLE &&
                 p.id !== client.user.id &&
                 !interaction.guild.roles.cache.has(p.id) &&
-                p.allow.has(PermissionFlagsBits.ViewChannel)
+                p.allow.has(PermissionFlagsBits.ViewChannel),
             );
           closeTargetId = ownerOverwrite?.id || null;
         }
@@ -9621,7 +9456,7 @@ async function handleButtonInteraction(interaction) {
         });
 
         const sorted = [...messages.values()].sort(
-          (a, b) => a.createdTimestamp - b.createdTimestamp
+          (a, b) => a.createdTimestamp - b.createdTimestamp,
         );
 
         let html = `
@@ -9707,6 +9542,26 @@ ${content || "(無內容)"}
         });
       }
     }
+
+    console.warn("[未處理按鈕]", {
+      customId,
+      userId: interaction.user.id,
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+    });
+
+    const expiredMessage = {
+      content: "❌ 這個按鈕已過期或版本已更新，請重新開啟最新面板。",
+      flags: 64,
+    };
+
+    if (interaction.deferred) {
+      return await interaction.editReply({ content: expiredMessage.content });
+    }
+    if (interaction.replied) {
+      return await interaction.followUp(expiredMessage);
+    }
+    return await interaction.reply(expiredMessage);
   } catch (error) {
     console.error("[按鈕錯誤]", error);
 
@@ -9762,7 +9617,7 @@ async function handleStringSelectInteraction(interaction) {
           new ButtonBuilder()
             .setCustomId(`monthly_bill_wallet_cancel_${bill.id}`)
             .setLabel("取消")
-            .setStyle(ButtonStyle.Secondary)
+            .setStyle(ButtonStyle.Secondary),
         );
         return interaction.editReply({
           embeds: [
@@ -9772,12 +9627,12 @@ async function handleStringSelectInteraction(interaction) {
               .setDescription(
                 `結帳月份：${bill.billing_month}\n` +
                   `扣款金額：NT$${Number(bill.total_amount || 0).toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )}\n` +
                   `待發回饋：${Number(bill.cashback_amount || 0).toLocaleString(
-                    "zh-TW"
+                    "zh-TW",
                   )} ASD\n\n` +
-                  `確認後會直接扣除你的 ASD 餘額，並恢復月結額度。`
+                  `確認後會直接扣除你的 ASD 餘額，並恢復月結額度。`,
               )
               .setTimestamp(),
           ],
@@ -9787,7 +9642,7 @@ async function handleStringSelectInteraction(interaction) {
       if (value === "manual") {
         const payChannel = await createMonthlyBillPaymentChannel(
           interaction,
-          bill
+          bill,
         );
         return interaction.editReply({
           content:
@@ -9825,10 +9680,10 @@ async function handleStringSelectInteraction(interaction) {
               `會員：<@${bill.user_id}>\n` +
                 `結帳月份：${bill.billing_month}\n` +
                 `帳單金額：NT$${Number(bill.total_amount || 0).toLocaleString(
-                  "zh-TW"
+                  "zh-TW",
                 )}\n` +
                 `付款方式：${paymentMethod}\n\n` +
-                `請完成付款後，在此頻道上傳付款明細 / 截圖，等待客服確認。`
+                `請完成付款後，在此頻道上傳付款明細 / 截圖，等待客服確認。`,
             )
             .setTimestamp(),
         ],
@@ -9851,7 +9706,7 @@ async function handleStringSelectInteraction(interaction) {
               .setDescription(
                 `<@${bill.user_id}> 你選擇了：${paymentMethod}\n\n` +
                   `請等待客服提供錢包地址。\n` +
-                  `付款完成後請上傳轉帳明細，等待客服確認。`
+                  `付款完成後請上傳轉帳明細，等待客服確認。`,
               )
               .setTimestamp(),
           ],
@@ -9865,7 +9720,7 @@ async function handleStringSelectInteraction(interaction) {
         new ButtonBuilder()
           .setCustomId("delete_order_now")
           .setLabel("🗑️ 關閉頻道")
-          .setStyle(ButtonStyle.Danger)
+          .setStyle(ButtonStyle.Danger),
       );
       await interaction.channel.send({
         content: `<@&${process.env.STAFF_ROLE}> 請確認付款明細無誤後，按下「客服確認已繳費」。`,
@@ -9927,7 +9782,7 @@ async function handleStringSelectInteraction(interaction) {
         },
         {
           onConflict: "user_id",
-        }
+        },
       );
       if (error) {
         console.error("[切換權益] 儲存失敗", error);
@@ -9960,7 +9815,7 @@ async function handleStringSelectInteraction(interaction) {
         const parentId = await resolveTicketParentId(
           interaction.guild,
           process.env.ORDER_CATEGORY,
-          "訂單區"
+          "訂單區",
         );
         const orderChannel = await interaction.guild.channels.create({
           name: channelName,
@@ -10012,19 +9867,19 @@ async function handleStringSelectInteraction(interaction) {
             .setStyle(ButtonStyle.Danger);
           const row2 = new ActionRowBuilder().addComponents(
             completeButton,
-            cancelButton
+            cancelButton,
           );
           const embed = new EmbedBuilder()
             .setColor("#ff66cc")
             .setTitle("🛒 訂單建立成功")
             .setDescription(
               "請依照上方選單一步一步完成需求填寫。\n" +
-                "填寫完成後，客服會協助報價。"
+                "填寫完成後，客服會協助報價。",
             );
           try {
             await dispatchSystem.startNewOrderFlow(
               orderChannel,
-              interaction.user
+              interaction.user,
             );
           } catch (err) {
             console.error("[新下單流程錯誤]", err);
@@ -10042,12 +9897,15 @@ async function handleStringSelectInteraction(interaction) {
             tipperId: interaction.user.id,
             channelId: orderChannel.id,
           });
-          setTimeout(() => {
-            const currentTip = pendingTips.get(tipId);
-            if (currentTip?.keepForPayment) return;
+          setTimeout(
+            () => {
+              const currentTip = pendingTips.get(tipId);
+              if (currentTip?.keepForPayment) return;
 
-            pendingTips.delete(tipId);
-          }, 30 * 60 * 1000);
+              pendingTips.delete(tipId);
+            },
+            30 * 60 * 1000,
+          );
           await sendTipGiftSelect(orderChannel, tipId);
           return await interaction.editReply({
             content:
@@ -10071,7 +9929,7 @@ async function handleStringSelectInteraction(interaction) {
               .setCustomId("owner_cancel_ticket")
               .setLabel("我按錯了，關閉頻道")
               .setEmoji("🗑️")
-              .setStyle(ButtonStyle.Danger)
+              .setStyle(ButtonStyle.Danger),
           );
           await orderChannel.send({
             content: `<@&${process.env.STAFF_ROLE}> ${interaction.user}`,
@@ -10113,35 +9971,23 @@ async function handleStringSelectInteraction(interaction) {
             content: "❌ 商品不存在",
           });
         }
-        const userData = await getUser(interaction.user.id);
-        if (userData.coins < item.price) {
-          return await interaction.editReply({
-            content: "❌ 星雨幣不足",
-          });
-        }
-        const itemType = item.item_type === "coupon" ? "coupon" : "shop";
-        await addUserItem(
-          interaction.user.id,
-          item.item_name,
-          null,
-          item.description,
-          itemType
+        const { data: purchase, error: purchaseError } = await supabase.rpc(
+          "purchase_shop_item_atomic",
+          { p_user_id: interaction.user.id, p_item_id: item.id },
         );
-        const finalCoins = await changeCoins(interaction.user.id, -item.price);
-        await supabase
-          .from("users")
-          .update({
-            total_spent: (userData.total_spent || 0) + item.price,
-            month_spent: (userData.month_spent || 0) + item.price,
-          })
-          .eq("user_id", interaction.user.id);
+        if (purchaseError) {
+          throw new Error(purchaseError.message || "購買失敗");
+        }
+        const itemType = purchase.item_type;
+        const finalCoins = Number(purchase.balance || 0);
         await giveMonthlyVip(interaction, interaction.user.id, item.item_name);
         await sendWalletLog(
           interaction.user.id,
           "商店購買",
           -item.price,
           finalCoins,
-          `🛒 購買商品：${item.item_name}`
+          `🛒 購買商品：${item.item_name}`,
+          false,
         );
         await refreshShop(client);
         return await interaction.editReply({
@@ -10179,7 +10025,7 @@ async function handleStringSelectInteraction(interaction) {
             (r) =>
               `${getRarityEmoji(r.rarity)} ${r.rarity}｜${
                 r.reward_name
-              }｜機率 ${r.chance}`
+              }｜機率 ${r.chance}`,
           )
           .join("\n");
       }
@@ -10198,7 +10044,7 @@ async function handleStringSelectInteraction(interaction) {
             .setColor("#ff66cc")
             .setTitle(`🎰 ${pool.pool_name}`)
             .setDescription(
-              `💰 單抽價格：${pool.price} 星雨幣\n\n${text}`.slice(0, 3800)
+              `💰 單抽價格：${pool.price} 星雨幣\n\n${text}`.slice(0, 3800),
             ),
         ],
         components: [row],
@@ -10210,13 +10056,13 @@ async function handleStringSelectInteraction(interaction) {
         const itemId = Number(interaction.values[0]);
         const orderChannelId = interaction.customId.replace(
           "coupon_select_",
-          ""
+          "",
         );
         const items = await getUserItems(interaction.user.id);
         const coupon = items.find(
           (item) =>
             item.id === itemId &&
-            (item.item_type === "coupon" || item.item_name.includes("折券"))
+            (item.item_type === "coupon" || item.item_name.includes("折券")),
         );
         if (!coupon) {
           return await interaction.editReply({
@@ -10480,7 +10326,7 @@ async function handleModalSubmit(interaction) {
         .setStyle(ButtonStyle.Danger);
       const row = new ActionRowBuilder().addComponents(
         confirmButton,
-        cancelButton
+        cancelButton,
       );
       const totalAmount = getTipTotalAmount(amount, selectedStaffIds);
       return interaction.reply({
@@ -10597,9 +10443,12 @@ client.on("messageCreate", async (message) => {
   // ===== 開始冷卻 =====
   dropCooldown.set(channelId, true);
 
-  setTimeout(() => {
-    dropCooldown.delete(channelId);
-  }, 8 * 60 * 1000);
+  setTimeout(
+    () => {
+      dropCooldown.delete(channelId);
+    },
+    8 * 60 * 1000,
+  );
 });
 // ===== Login =====
 client.login(process.env.TOKEN);
