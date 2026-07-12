@@ -1,6 +1,10 @@
 require("dotenv").config();
 const fs = require("fs");
-const { createPrefixCommandHandler } = require("./utils/prefixCommands");
+const {
+  buildCommandHelp,
+  createPrefixCommandHandler,
+  sortCommandDefinitions,
+} = require("./utils/prefixCommands");
 const {
   startQiunaiSalaryReportCron,
   sendQiunaiDailySalaryReports,
@@ -4212,7 +4216,10 @@ async function sendPrivateRoomPanel(client) {
 }
 // ===== 指令定義 =====
 
-const commands = [
+const commands = sortCommandDefinitions([
+  new SlashCommandBuilder()
+    .setName("指令")
+    .setDescription("查看分類後的指令清單"),
   new SlashCommandBuilder().setName("ping").setDescription("測試機器人"),
   new SlashCommandBuilder()
     .setName("我的排名")
@@ -4682,7 +4689,7 @@ const commands = [
           { name: "折券", value: "coupon" },
         ),
     ),
-].map((command) => command.toJSON());
+].map((command) => command.toJSON()));
 let lastDailySummaryDate = null;
 
 function startDailySummaryScheduler() {
@@ -5922,6 +5929,9 @@ function isAdminOrStaff(interaction) {
   );
 }
 async function handleSlashCommand(interaction) {
+  if (interaction.commandName === "指令") {
+    return interaction.editReply({ content: buildCommandHelp(commands) });
+  }
   // ping
   if (interaction.commandName === "ping") {
     return interaction.editReply("Pong!");
