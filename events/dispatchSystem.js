@@ -10,10 +10,12 @@ const {
   TextInputStyle,
   StringSelectMenuBuilder,
 } = require("discord.js");
+const { createWorkReportSystem } = require("./workReportSystem");
 
 let supabase;
 let client;
 let paymentHelpers = {};
+let workReportSystem;
 
 const pendingNewOrders = new Map();
 const pendingTopups = new Map();
@@ -885,6 +887,16 @@ function setup(supabaseInstance, clientInstance, helpers = {}) {
   supabase = supabaseInstance;
   client = clientInstance;
   paymentHelpers = helpers;
+  workReportSystem = createWorkReportSystem({
+    supabase,
+    client,
+    appKey: "qiunai",
+    guildId: process.env.GUILD_ID || "1206138511535898654",
+    manualChannelId: "1525872402003923075",
+    staffTable: "qiunai_staff",
+    staffRoleId: process.env.STAFF_ROLE,
+    salaryTable: "qiunai_salary_orders",
+  });
 }
 function getStaffGuildId() {
   return process.env.STAFF_GUILD_ID || process.env.GUILD_ID;
@@ -6979,6 +6991,14 @@ async function acceptPlayOrder(interaction) {
       });
     }
 
+    if (isFull) {
+      try {
+        await workReportSystem.sendForAcceptedOrder(updated, assignedPlayerIds);
+      } catch (error) {
+        console.error("[工時申報] 發送填單面板失敗", error);
+      }
+    }
+
     const orderChannel = await client.channels.fetch(order.channel_id);
 
     if (!orderChannel) {
@@ -9941,6 +9961,9 @@ async function handleServiceDurationSelect(interaction) {
   });
 }
 async function handleDispatchInteraction(interaction) {
+  if (workReportSystem && (await workReportSystem.handleInteraction(interaction))) {
+    return true;
+  }
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === "上班") {
       await playerOnline(interaction);
@@ -10375,4 +10398,5 @@ module.exports = {
   openDispatchPlayerMenu,
   submitDispatchPlayers,
   handleSavedOrderEnd,
+  sendWorkReportPanel: () => workReportSystem?.sendManualPanel(),
 };
