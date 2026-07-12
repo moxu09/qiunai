@@ -895,6 +895,7 @@ function setup(supabaseInstance, clientInstance, helpers = {}) {
     manualChannelId: "1525872402003923075",
     staffTable: "qiunai_staff",
     staffRoleId: process.env.STAFF_ROLE,
+    customerServiceRoleId: process.env.CUSTOMER_SERVICE_ROLE_ID,
     salaryTable: "qiunai_salary_orders",
   });
 }
