@@ -894,8 +894,12 @@ function setup(supabaseInstance, clientInstance, helpers = {}) {
     guildId: process.env.GUILD_ID || "1206138511535898654",
     manualChannelId: "1525872402003923075",
     staffTable: "qiunai_staff",
-    staffRoleId: process.env.STAFF_ROLE,
-    customerServiceRoleId: process.env.CUSTOMER_SERVICE_ROLE_ID,
+    staffRoleId:
+      process.env.STAFF_ROLE ||
+      process.env.STAFF_ROLE_ID ||
+      "1210642900355125288",
+    customerServiceRoleId:
+      process.env.CUSTOMER_SERVICE_ROLE_ID || "1210642900355125288",
     salaryTable: "qiunai_salary_orders",
   });
 }
