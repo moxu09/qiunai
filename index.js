@@ -5942,10 +5942,21 @@ async function replySuccess(interaction, message) {
     .catch(() => {});
 }
 function isAdminOrStaff(interaction) {
+  const roleIds = [
+    process.env.STAFF_ROLE,
+    process.env.STAFF_ROLE_ID,
+    process.env.CUSTOMER_SERVICE_ROLE_ID,
+    "1210642900355125288",
+    "1513203868895412305",
+    ...(String(process.env.STAFF_ROLE_IDS || "").match(/\d{17,20}/g) || []),
+    ...(String(process.env.CUSTOMER_SERVICE_ROLE_IDS || "").match(
+      /\d{17,20}/g,
+    ) || []),
+  ].filter(Boolean);
   return (
     interaction.guild.ownerId === interaction.user.id ||
     interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
-    interaction.member.roles.cache.has(process.env.STAFF_ROLE)
+    roleIds.some((roleId) => interaction.member.roles.cache.has(roleId))
   );
 }
 async function handleSlashCommand(interaction) {

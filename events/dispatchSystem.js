@@ -899,7 +899,14 @@ function setup(supabaseInstance, clientInstance, helpers = {}) {
       process.env.STAFF_ROLE_ID ||
       "1210642900355125288",
     customerServiceRoleId:
-      process.env.CUSTOMER_SERVICE_ROLE_ID || "1210642900355125288",
+      [
+        process.env.CUSTOMER_SERVICE_ROLE_ID,
+        process.env.CUSTOMER_SERVICE_ROLE_IDS,
+        "1210642900355125288",
+        "1513203868895412305",
+      ]
+        .filter(Boolean)
+        .join(","),
     salaryTable: "qiunai_salary_orders",
   });
 }

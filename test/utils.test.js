@@ -69,6 +69,13 @@ test("work report permissions accept cached and raw Discord roles", () => {
     true,
   );
   assert.equal(
+    isStaffInteraction(
+      { ...base, member: { roles: ["1513203868895412305"] } },
+      `${roleId},1513203868895412305`,
+    ),
+    true,
+  );
+  assert.equal(
     isStaffInteraction({ ...base, member: { roles: [] } }, roleId),
     false,
   );
