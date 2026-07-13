@@ -11,6 +11,7 @@ const {
   StringSelectMenuBuilder,
 } = require("discord.js");
 const { createWorkReportSystem } = require("./workReportSystem");
+const { ORDER_FLOW_TTL_MS } = require("../utils/orderFlow");
 
 let supabase;
 let client;
@@ -495,7 +496,7 @@ async function handleGameOrderSelect(interaction) {
 
     setTimeout(() => {
       pendingPanelOrders.delete(flowId);
-    }, 15 * 60 * 1000);
+    }, ORDER_FLOW_TTL_MS);
 
     const modeLabel = findOptionLabel("lol", value);
 
@@ -541,7 +542,7 @@ async function handleGameOrderSelect(interaction) {
       gameLabel,
     });
 
-    setTimeout(() => pendingPanelOrders.delete(flowId), 15 * 60 * 1000);
+    setTimeout(() => pendingPanelOrders.delete(flowId), ORDER_FLOW_TTL_MS);
 
     const options =
       value === "honor_of_kings"
@@ -2155,7 +2156,7 @@ async function createServiceTicket(interaction, serviceType, initial = {}) {
 
   setTimeout(() => {
     pendingServiceOrders.delete(flowId);
-  }, 60 * 60 * 1000);
+  }, ORDER_FLOW_TTL_MS);
 
   if (initial.fromPanel) {
     await channel.send({
@@ -2841,7 +2842,7 @@ async function openPlayOrderModal(interaction) {
 
   setTimeout(() => {
     pendingNewOrders.delete(flowId);
-  }, 30 * 60 * 1000);
+  }, ORDER_FLOW_TTL_MS);
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`new_order_game_${flowId}`)
@@ -6076,7 +6077,7 @@ async function startNewOrderFlow(channel, user) {
 
   setTimeout(() => {
     pendingNewOrders.delete(flowId);
-  }, 30 * 60 * 1000);
+  }, ORDER_FLOW_TTL_MS);
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`new_order_game_${flowId}`)
