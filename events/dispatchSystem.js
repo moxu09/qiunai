@@ -6522,7 +6522,11 @@ async function confirmTopup(interaction) {
     });
   }
 
-  if (!paymentHelpers.sendWalletLog || !paymentHelpers.recordMembershipActivity) {
+  if (
+    !paymentHelpers.sendWalletLog ||
+    !paymentHelpers.recordMembershipActivity ||
+    !paymentHelpers.checkAndUpgradeVip
+  ) {
     return interaction.editReply({
       content:
         "❌ 儲值函式尚未完整接入，請確認會員累積與錢包紀錄設定",
@@ -6572,6 +6576,12 @@ async function confirmTopup(interaction) {
     sourceKey: `dispatch-topup:${interaction.message?.id || interaction.id}:${userId}`,
     note: `客服 <@${interaction.user.id}> 確認儲值`,
   });
+  await paymentHelpers.checkAndUpgradeVip(
+    userId,
+    "topup",
+    amount,
+    interaction.guildId,
+  );
 
   await paymentHelpers.recordAccountingLedger?.({
     entry_type: "customer_topup",
