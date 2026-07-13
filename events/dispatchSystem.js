@@ -10,7 +10,10 @@ const {
   TextInputStyle,
   StringSelectMenuBuilder,
 } = require("discord.js");
-const { createWorkReportSystem } = require("./workReportSystem");
+const {
+  createWorkReportSystem,
+  isStaffInteraction,
+} = require("./workReportSystem");
 const { ORDER_FLOW_TTL_MS } = require("../utils/orderFlow");
 
 let supabase;
@@ -21,6 +24,23 @@ let workReportSystem;
 const pendingNewOrders = new Map();
 const pendingTopups = new Map();
 const pendingServiceOrders = new Map();
+
+function canCustomerOrStaffSubmit(interaction, customerId) {
+  return (
+    interaction.user.id === String(customerId || "") ||
+    isStaffInteraction(
+      interaction,
+      process.env.STAFF_ROLE,
+      process.env.STAFF_ROLE_ID,
+      process.env.STAFF_ROLE_IDS,
+      process.env.CUSTOMER_SERVICE_ROLE_ID,
+      process.env.CUSTOMER_SERVICE_ROLE_IDS,
+      "1210642900355125288",
+      "1513203868895412305",
+      "1502010574781943989",
+    )
+  );
+}
 
 function createFlowId(userId) {
   return `${userId}_${Date.now()}`;
@@ -905,6 +925,7 @@ function setup(supabaseInstance, clientInstance, helpers = {}) {
         process.env.CUSTOMER_SERVICE_ROLE_IDS,
         "1210642900355125288",
         "1513203868895412305",
+        "1502010574781943989",
       ]
         .filter(Boolean)
         .join(","),
@@ -3658,9 +3679,9 @@ async function handleNewOrderBack(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個按鈕。",
+      content: "❌ 只有下單者、客服或管理員可以送出訂單。",
       flags: 64,
     });
   }
@@ -3991,9 +4012,9 @@ async function handleNewOrderNoNote(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.editReply({
-      content: "❌ 只有下單者可以操作這個按鈕。",
+      content: "❌ 只有下單者、客服或管理員可以送出訂單。",
       components: [],
     });
   }
@@ -4015,9 +4036,9 @@ async function submitNewOrderNote(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個表單。",
+      content: "❌ 只有下單者、客服或管理員可以送出訂單。",
       flags: 64,
     });
   }
@@ -5147,9 +5168,9 @@ async function handleCustomerConfirmOrder(interaction) {
     });
   }
 
-  if (order.customer_id !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, order.customer_id)) {
     return interaction.editReply({
-      content: "❌ 只有下單的闆闆可以確認訂單",
+      content: "❌ 只有下單的闆闆、客服或管理員可以確認訂單",
     });
   }
 
@@ -8015,6 +8036,12 @@ async function finishServiceNeed(interaction) {
   if (!pending) {
     return interaction.editReply({
       content: "❌ 這筆訂單流程已過期。",
+    });
+  }
+
+  if (!canCustomerOrStaffSubmit(interaction, pending.customerId)) {
+    return interaction.editReply({
+      content: "❌ 只有下單的闆闆、客服或管理員可以送出訂單。",
     });
   }
 
