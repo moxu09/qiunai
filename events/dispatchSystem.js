@@ -23,6 +23,7 @@ let workReportSystem;
 
 const pendingNewOrders = new Map();
 const pendingTopups = new Map();
+const processingTopups = new Set();
 const pendingServiceOrders = new Map();
 
 function canCustomerOrStaffSubmit(interaction, customerId) {
@@ -6533,6 +6534,27 @@ async function confirmTopup(interaction) {
     });
   }
 
+  const topupKey = interaction.message?.id || interaction.customId;
+  if (processingTopups.has(topupKey)) {
+    return interaction.editReply({
+      content: "這筆儲值已由客服確認，系統正在處理中。",
+    });
+  }
+  processingTopups.add(topupKey);
+  await interaction.message
+    ?.edit({
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("close_ticket")
+            .setLabel("關閉單子")
+            .setEmoji("🗑️")
+            .setStyle(ButtonStyle.Danger),
+        ),
+      ],
+    })
+    .catch(() => {});
+
   const { data: userData, error: userError } = await supabase
     .from("users")
     .select("*")
@@ -10468,4 +10490,6 @@ module.exports = {
   submitDispatchPlayers,
   handleSavedOrderEnd,
   sendWorkReportPanel: () => workReportSystem?.sendManualPanel(),
+  sendTipWorkReports: (orders, payload) =>
+    workReportSystem?.sendForCompletedTipOrders(orders, payload),
 };

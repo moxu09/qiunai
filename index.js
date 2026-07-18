@@ -291,6 +291,17 @@ async function saveTipToPlayOrdersForStaff({
 
   return orders;
 }
+async function sendTipWorkReportsSafely(orders, { tipperId, item, amount }) {
+  try {
+    await dispatchSystem.sendTipWorkReports(orders, {
+      customerId: tipperId,
+      serviceName: item,
+      amount: Number(amount),
+    });
+  } catch (error) {
+    console.error("[打賞報單] 發送個人報單失敗", error);
+  }
+}
 function getTipStaffSelectionContent(tipData = {}) {
   const staffIds = getTipStaffIds(tipData);
 
@@ -5468,6 +5479,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         interaction.customId.startsWith("manual_work_cancel_") ||
         interaction.customId.startsWith("work_report_start_") ||
         interaction.customId.startsWith("work_report_end_") ||
+        interaction.customId.startsWith("work_report_add_") ||
         interaction.customId.startsWith("work_report_edit_") ||
         interaction.customId.startsWith("work_report_save_") ||
         interaction.customId.startsWith("work_report_close_")
@@ -8920,7 +8932,7 @@ async function handleButtonInteraction(interaction) {
       }
       if (isWalletPayment) {
         try {
-          await saveTipToPlayOrdersForStaff({
+          const tipOrders = await saveTipToPlayOrdersForStaff({
             guildId: getGuildId(interaction),
             tipperId,
             staffIds: selectedStaffIds,
@@ -8929,6 +8941,11 @@ async function handleButtonInteraction(interaction) {
             channelId: interaction.channel.id,
             paid: true,
             countReason: "儲值卡打賞付款完成",
+          });
+          await sendTipWorkReportsSafely(tipOrders, {
+            tipperId,
+            item,
+            amount,
           });
           await interaction.channel.send({
             content:
@@ -9022,6 +9039,11 @@ async function handleButtonInteraction(interaction) {
       for (const order of payment.orders || []) {
         await countOrderVipSpentOnce(order, "儲值卡打賞付款完成");
       }
+      await sendTipWorkReportsSafely(payment.orders || [], {
+        tipperId,
+        item,
+        amount,
+      });
       await interaction.channel.send({
         embeds: [
           new EmbedBuilder()
@@ -9174,7 +9196,7 @@ async function handleButtonInteraction(interaction) {
       });
       // ===== 寫入薪資網 / play_orders =====
       try {
-        await saveTipToPlayOrdersForStaff({
+        const tipOrders = await saveTipToPlayOrdersForStaff({
           guildId: getGuildId(interaction),
           tipperId,
           staffIds,
@@ -9183,6 +9205,11 @@ async function handleButtonInteraction(interaction) {
           channelId: interaction.channel.id,
           paid: true,
           countReason: "客服確認打賞付款完成",
+        });
+        await sendTipWorkReportsSafely(tipOrders, {
+          tipperId,
+          item,
+          amount,
         });
         await interaction.channel.send({
           content:
