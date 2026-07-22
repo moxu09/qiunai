@@ -2653,8 +2653,12 @@ async function checkAndUpgradeVip(
   amount,
   guildId = process.env.GUILD_ID,
   notificationChannelId = null,
+  absoluteTotal = null,
 ) {
   const triggerAmount = Number(amount || 0);
+  const normalizedAbsoluteTotal = Number(absoluteTotal);
+  const useAbsoluteTotal =
+    absoluteTotal !== null && Number.isFinite(normalizedAbsoluteTotal);
 
   if (!userId || !guildId) {
     return null;
@@ -2677,13 +2681,21 @@ async function checkAndUpgradeVip(
   const oldHighestTopup = Number(currentVip?.highest_single_topup || 0);
 
   const newTotalSpent =
-    triggerType === "spend" ? oldTotalSpent + triggerAmount : oldTotalSpent;
+    triggerType === "spend"
+      ? useAbsoluteTotal
+        ? Math.max(0, normalizedAbsoluteTotal)
+        : oldTotalSpent + triggerAmount
+      : oldTotalSpent;
 
   const newTotalTopup =
-    triggerType === "topup" ? oldTotalTopup + triggerAmount : oldTotalTopup;
+    triggerType === "topup"
+      ? useAbsoluteTotal
+        ? Math.max(0, normalizedAbsoluteTotal)
+        : oldTotalTopup + triggerAmount
+      : oldTotalTopup;
 
   const newHighestTopup =
-    triggerType === "topup"
+    triggerType === "topup" && !useAbsoluteTotal
       ? Math.max(oldHighestTopup, triggerAmount)
       : oldHighestTopup;
 
@@ -6447,6 +6459,18 @@ async function handleSlashCommand(interaction) {
         sourceKey: `staff-adjust:${interaction.id}`,
         note: `${note}｜操作人員 ${interaction.user.tag}`,
       });
+      const guildId = getGuildId(interaction);
+      if (!guildId) {
+        throw new Error("找不到群組 ID，無法同步 VIP 累積資料");
+      }
+      await checkAndUpgradeVip(
+        target.id,
+        isTopup ? "topup" : "spend",
+        result.newTotal - result.oldTotal,
+        guildId,
+        interaction.channelId,
+        result.newTotal,
+      );
       return interaction.editReply({
         embeds: [
           new EmbedBuilder()
