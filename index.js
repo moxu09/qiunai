@@ -2437,11 +2437,13 @@ async function grantVipLevelReward(
   triggerAmount,
   oldLevelKey = null,
   guildId = process.env.GUILD_ID,
+  notificationChannelId = null,
 ) {
   const rewardAsd = Number(level.reward_asd || 0);
+  let finalCoins = null;
 
   if (rewardAsd > 0) {
-    const finalCoins = await changeCoins(userId, rewardAsd);
+    finalCoins = await changeCoins(userId, rewardAsd);
 
     await sendWalletLog(
       userId,
@@ -2481,22 +2483,61 @@ async function grantVipLevelReward(
   });
 
   const user = await client.users.fetch(userId).catch(() => null);
+  const upgradeEmbed = new EmbedBuilder()
+    .setColor("#ffd700")
+    .setTitle("✨ VIP 等級提升")
+    .setDescription(`恭喜 <@${userId}> 升級為 **${level.level_name}**！`)
+    .addFields(
+      {
+        name: "🎁 ASD 回饋",
+        value: `${rewardAsd.toLocaleString("zh-TW")} ASD`,
+        inline: true,
+      },
+      {
+        name: "🎟️ 優惠券",
+        value: level.reward_coupon || "無",
+        inline: true,
+      },
+      {
+        name: "💎 權益",
+        value: level.reward_note || "無",
+        inline: false,
+      },
+    )
+    .setTimestamp();
+
+  if (finalCoins !== null) {
+    upgradeEmbed.addFields({
+      name: "💳 回饋後餘額",
+      value: `${Number(finalCoins).toLocaleString("zh-TW")} ASD`,
+      inline: true,
+    });
+  }
+
+  const broadcastChannelId =
+    notificationChannelId || process.env.VIP_UPGRADE_CHANNEL_ID;
+
+  if (broadcastChannelId) {
+    const broadcastChannel = await client.channels
+      .fetch(broadcastChannelId)
+      .catch(() => null);
+
+    if (broadcastChannel?.isTextBased()) {
+      await broadcastChannel
+        .send({
+          content: `<@${userId}>`,
+          embeds: [upgradeEmbed],
+        })
+        .catch((error) => {
+          console.error("[VIP] 升級播報發送失敗", error);
+        });
+    }
+  }
 
   if (user) {
     await user
       .send({
-        embeds: [
-          new EmbedBuilder()
-            .setColor("#ffd700")
-            .setTitle("✨ VIP 等級提升")
-            .setDescription(
-              `恭喜你升級為 **${level.level_name}**！\n\n` +
-                `🎁 ASD 獎勵：${rewardAsd || 0} ASD\n` +
-                `🎟️ 優惠券：${level.reward_coupon || "無"}\n` +
-                `💎 權益：${level.reward_note || "無"}`,
-            )
-            .setTimestamp(),
-        ],
+        embeds: [upgradeEmbed],
       })
       .catch(() => {});
   }
@@ -2611,6 +2652,7 @@ async function checkAndUpgradeVip(
   triggerType,
   amount,
   guildId = process.env.GUILD_ID,
+  notificationChannelId = null,
 ) {
   const triggerAmount = Number(amount || 0);
 
@@ -2740,6 +2782,7 @@ async function checkAndUpgradeVip(
       triggerAmount,
       currentVip?.level_key || null,
       guildId,
+      notificationChannelId,
     );
   }
 
@@ -2810,7 +2853,13 @@ async function countOrderVipSpentOnce(order, reason = "付款完成") {
     sourceKey: `order:${lockedOrder.id}`,
     note: reason,
   });
-  await checkAndUpgradeVip(userId, "spend", amount, guildId);
+  await checkAndUpgradeVip(
+    userId,
+    "spend",
+    amount,
+    guildId,
+    lockedOrder.channel_id || order.channel_id || null,
+  );
   await applyVipOrderBenefits(lockedOrder, guildId);
 
   console.log("[VIP累積消費] 已計入", {
@@ -6271,6 +6320,7 @@ async function handleSlashCommand(interaction) {
       "topup",
       amount,
       getGuildId(interaction),
+      interaction.channelId,
     );
     return interaction.editReply({
       content: `✅ 已給予 <@${target.id}> ${amount} 星雨幣`,
@@ -6490,7 +6540,13 @@ async function handleSlashCommand(interaction) {
       );
     }
     try {
-      await checkAndUpgradeVip(target.id, "spend", 0, guildId);
+      await checkAndUpgradeVip(
+        target.id,
+        "spend",
+        0,
+        guildId,
+        interaction.channelId,
+      );
     } catch (vipError) {
       console.error("[調整累積消費] VIP 重新檢查失敗", vipError);
     }
@@ -6613,7 +6669,13 @@ async function handleSlashCommand(interaction) {
     }
     // 重新檢查 VIP 升級：失敗不要擋掉累積儲值調整
     try {
-      await checkAndUpgradeVip(target.id, "topup", 0, guildId);
+      await checkAndUpgradeVip(
+        target.id,
+        "topup",
+        0,
+        guildId,
+        interaction.channelId,
+      );
     } catch (vipError) {
       console.error("[調整累積儲值] VIP 重新檢查失敗", vipError);
     }

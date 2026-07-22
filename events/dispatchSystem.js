@@ -6603,6 +6603,7 @@ async function confirmTopup(interaction) {
     "topup",
     amount,
     interaction.guildId,
+    interaction.channelId,
   );
 
   await paymentHelpers.recordAccountingLedger?.({
