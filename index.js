@@ -23,6 +23,7 @@ const { ORDER_FLOW_TTL_MS } = require("./utils/orderFlow");
 const {
   isCouponInventoryItem,
   parseVipCouponReward,
+  qualifiesForVipLevel,
 } = require("./utils/vipRewards");
 const {
   buildRedPacketShares,
@@ -2722,11 +2723,12 @@ async function checkAndUpgradeVip(
 
     const topupRequired = Number(level.single_topup_required || 0);
 
-    return (
-      newTotalSpent >= spendRequired ||
-      newTotalTopup >= topupRequired ||
-      newHighestTopup >= topupRequired
-    );
+    return qualifiesForVipLevel({
+      totalSpent: newTotalSpent,
+      highestSingleTopup: newHighestTopup,
+      totalSpendRequired: spendRequired,
+      singleTopupRequired: topupRequired,
+    });
   });
 
   if (!availableLevels.length) {
@@ -6665,10 +6667,7 @@ async function handleSlashCommand(interaction) {
 
     const oldHighestSingleTopup = Number(oldVip?.highest_single_topup || 0);
 
-    const newHighestSingleTopup =
-      mode === "add"
-        ? Math.max(oldHighestSingleTopup, amount)
-        : oldHighestSingleTopup;
+    const newHighestSingleTopup = oldHighestSingleTopup;
 
     const payload = {
       guild_id: guildId,
