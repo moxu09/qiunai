@@ -1,0 +1,7 @@
+node_modules
+coverage
+test
+*.log
+*.tmp
+*.save
+data.json

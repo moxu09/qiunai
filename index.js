@@ -1,5 +1,7 @@
 require("dotenv").config();
-const fs = require("fs");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
 const {
   buildCommandHelp,
   createPrefixCommandHandler,
@@ -9,17 +11,25 @@ const {
   startQiunaiSalaryReportCron,
   sendQiunaiDailySalaryReports,
 } = require("./events/qiunaiSalaryReport");
-process.on("uncaughtException", (err) => {
-  console.error("[Uncaught Exception]", err);
-});
-process.on("unhandledRejection", (err) => {
-  console.error("[Unhandled Rejection]", err);
-});
+const {
+  createHealthServer,
+  createHealthState,
+  createNonOverlappingTask,
+  createTtlSet,
+  installProcessHandlers,
+  runStartupTask,
+  scheduleMapExpiry,
+  validateEnvironment,
+} = require("./utils/runtime");
 const { createClient } = require("@supabase/supabase-js");
 const { createAccountingLedger } = require("./utils/accounting");
 const { createAllianceMembership } = require("./utils/allianceMembership");
 const { parseAllowedServices } = require("./utils/services");
 const { ORDER_FLOW_TTL_MS } = require("./utils/orderFlow");
+const {
+  parseChatDropReward,
+  shouldCreateChatDrop,
+} = require("./utils/randomEvents");
 const {
   isCouponInventoryItem,
   parseVipCouponReward,
@@ -60,6 +70,13 @@ const {
   ChannelType,
 } = require("discord.js");
 // ===== 初始化 =====
+validateEnvironment(process.env, [
+  "TOKEN",
+  "SUPABASE_URL",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "GUILD_ID",
+]);
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -81,6 +98,13 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
+});
+const runtimeHealth = createHealthState("rainbot-qiunai");
+const runtimeServer = createHealthServer(runtimeHealth);
+const shutdownRuntime = installProcessHandlers({
+  client,
+  server: runtimeServer,
+  healthState: runtimeHealth,
 });
 
 function getCategoryIds(value) {
@@ -250,12 +274,30 @@ const transferCooldown = new Map();
 const ORDER_CHANNEL = process.env.ORDER_CHANNEL;
 const STAFF_ROLE = process.env.STAFF_ROLE;
 // ===== 全域狀態 =====
-const claimedDrops = new Set();
+const claimedDrops = createTtlSet(24 * 60 * 60 * 1000, 100000);
 const dropCooldown = new Map();
-const orderPayments = new Map();
 const pendingTips = new Map();
-const pendingTopups = new Map();
 const pendingChannelDeletes = new Map();
+const handledInteractionIds = createTtlSet(15 * 60 * 1000);
+const TIP_HARD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function setPendingTip(tipId, tipData) {
+  const shouldScheduleExpiry = !pendingTips.has(tipId);
+  pendingTips.set(tipId, tipData);
+  if (shouldScheduleExpiry) {
+    scheduleMapExpiry(pendingTips, tipId, tipData, TIP_HARD_TTL_MS);
+  }
+  return tipData;
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
 
 function getTipGiftByKey(key) {
   return findTipGiftByKey(TIP_GIFTS, key);
@@ -337,7 +379,7 @@ async function sendTipStaffSelectionStatus(channel, tipId, tipData) {
   });
 
   tipData.staffSelectionMessageId = message.id;
-  pendingTips.set(tipId, tipData);
+  setPendingTip(tipId, tipData);
 }
 async function updateTipStaffSelectionStatus(channel, tipId, tipData) {
   const payload = {
@@ -646,7 +688,7 @@ async function sendTipGiftSelect(channel, tipId) {
 async function startTipFlowInChannel(channel, user) {
   const tipId = `${user.id}_${Date.now()}`;
 
-  pendingTips.set(tipId, {
+  setPendingTip(tipId, {
     createdBy: user.id,
     tipperId: user.id,
     channelId: channel.id,
@@ -699,7 +741,7 @@ async function handleTipGiftSelect(interaction) {
 
   tipData.item = gift.name;
   tipData.amount = gift.price;
-  pendingTips.set(tipId, tipData);
+  setPendingTip(tipId, tipData);
 
   const players = await listActiveStaff();
 
@@ -801,7 +843,7 @@ async function handleTipStaffSelect(interaction) {
 
   tipData.selectedStaffId = selectedStaffIds[0];
   tipData.selectedStaffIds = selectedStaffIds;
-  pendingTips.set(tipId, tipData);
+  setPendingTip(tipId, tipData);
 
   await updateTipStaffSelectionStatus(interaction.channel, tipId, tipData);
 
@@ -839,7 +881,7 @@ async function handleTipStaffDone(interaction) {
   const selectedStaffText = formatTipStaffMentions(selectedStaffIds);
 
   tipData.staffSelectionCompleted = true;
-  pendingTips.set(tipId, tipData);
+  setPendingTip(tipId, tipData);
 
   await interaction.message
     .edit({
@@ -883,7 +925,7 @@ async function handleTipStaffClear(interaction) {
 
   tipData.selectedStaffId = null;
   tipData.selectedStaffIds = [];
-  pendingTips.set(tipId, tipData);
+  setPendingTip(tipId, tipData);
 
   await updateTipStaffSelectionStatus(interaction.channel, tipId, tipData);
 
@@ -929,7 +971,7 @@ async function handleTipPaymentSelect(interaction) {
   }
 
   tipData.paymentMethod = paymentMethod;
-  pendingTips.set(tipId, tipData);
+  setPendingTip(tipId, tipData);
 
   const walletPayment =
     paymentMethod.includes("儲值卡") ||
@@ -938,7 +980,7 @@ async function handleTipPaymentSelect(interaction) {
     paymentMethod.includes("餘額");
 
   tipData.keepForPayment = !walletPayment;
-  pendingTips.set(tipId, tipData);
+  setPendingTip(tipId, tipData);
 
   if (walletPayment) {
     const row = new ActionRowBuilder().addComponents(
@@ -1915,7 +1957,7 @@ async function getUser(userId) {
     .from("users")
     .select("*")
     .eq("user_id", userId)
-    .single();
+    .maybeSingle();
 
   if (error && error.code !== "PGRST116") {
     console.error("[DB] 讀取玩家資料失敗:", error);
@@ -1926,31 +1968,26 @@ async function getUser(userId) {
       .from("users")
       .insert([{ user_id: userId, coins: 0 }]);
 
-    if (insertError) {
+    if (insertError && insertError.code !== "23505") {
       console.error("[DB] 建立玩家失敗:", insertError);
+      throw new Error("無法建立玩家資料");
     }
 
-    return { user_id: userId, coins: 0, last_checkin: null };
+    const { data: currentUser, error: readError } = await supabase
+      .from("users")
+      .select("*")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (readError || !currentUser) {
+      console.error("[DB] 建立後重新讀取玩家失敗:", readError);
+      throw new Error("無法讀取玩家資料");
+    }
+
+    return currentUser;
   }
 
   return data;
-}
-
-// 更新金額
-async function updateCoins(userId, coins) {
-  if (coins < 0) {
-    throw new Error("金額不能為負數");
-  }
-
-  const { error } = await supabase
-    .from("users")
-    .update({ coins })
-    .eq("user_id", userId);
-
-  if (error) {
-    console.error("[DB] 更新金額失敗:", error);
-    throw new Error("無法更新金額");
-  }
 }
 async function changeCoins(userId, amount) {
   const { data, error } = await supabase.rpc("change_user_coins", {
@@ -4734,7 +4771,7 @@ const commands = sortCommandDefinitions([
 let lastDailySummaryDate = null;
 
 function startDailySummaryScheduler() {
-  const runCheck = async () => {
+  const runCheck = createNonOverlappingTask("每日陪玩總結", async () => {
     try {
       const now = new Date();
       const taiwanNow = new Date(now.getTime() + 8 * 60 * 60 * 1000);
@@ -4749,13 +4786,13 @@ function startDailySummaryScheduler() {
     } catch (err) {
       console.log("[每日陪玩總結排程錯誤]", err);
     }
-  };
+  });
   setInterval(runCheck, 60 * 1000);
 }
 let lastMonthlyBillDate = null;
 
 function startMonthlyBillScheduler() {
-  const runCheck = async () => {
+  const runCheck = createNonOverlappingTask("月結帳單產生", async () => {
     try {
       const taiwanNow = getTaiwanNow();
 
@@ -4782,7 +4819,7 @@ function startMonthlyBillScheduler() {
     } catch (err) {
       console.log("[月結帳單排程錯誤]", err);
     }
-  };
+  });
 
   setInterval(runCheck, 60 * 1000);
 }
@@ -4819,45 +4856,64 @@ async function processLegacyVipBackfillQueue() {
   }
 }
 client.once(Events.ClientReady, async () => {
-  try {
-    console.log("🚀 星雨系統啟動中...");
-    // ===== 陪玩控制面板 =====
+  console.log("🚀 星雨系統啟動中...");
+
+  await runStartupTask("陪玩控制面板", async () => {
     const playerChannel = await client.channels.fetch(
       process.env.PLAYER_CONTROL_CHANNEL,
     );
     await dispatchSystem.sendPlayerPanel(playerChannel);
-    // ===== 註冊 Slash Commands =====
+  }, runtimeHealth);
+
+  await runStartupTask("Slash Commands 註冊", async () => {
     const rest = new REST({
       version: "10",
     }).setToken(process.env.TOKEN);
     await rest.put(Routes.applicationCommands(client.user.id), {
       body: commands,
     });
-    console.log("✅ Slash Commands 已註冊");
-    // ===== 初始化系統 =====
+  }, runtimeHealth);
+
+  await runStartupTask("分區下單面板", async () => {
     await dispatchSystem.sendGameOrderPanels();
+  }, runtimeHealth);
+  await runStartupTask("報單面板", async () => {
     await dispatchSystem.sendWorkReportPanel();
-    console.log("✅ 分區下單系統已載入");
+  }, runtimeHealth);
+  await runStartupTask("商店面板", async () => {
     await refreshShop(client);
-    console.log("✅ 商店系統已載入");
+  }, runtimeHealth);
+  await runStartupTask("儲值面板", async () => {
     await sendTopupPanel(client);
-    console.log("✅ 儲值系統已載入");
+  }, runtimeHealth);
+  await runStartupTask("ATM 面板", async () => {
     await sendAtmPanel(client);
-    console.log("✅ ATM 系統已載入");
+  }, runtimeHealth);
+  await runStartupTask("簽到面板", async () => {
     await sendCheckinPanel(client);
-    console.log("✅ 簽到系統已載入");
+  }, runtimeHealth);
+  await runStartupTask("扭蛋面板", async () => {
     await sendGachaPanel(client);
-    console.log("✅ 扭蛋系統已載入");
+  }, runtimeHealth);
+  await runStartupTask("私人房間面板", async () => {
     await sendPrivateRoomPanel(client);
-    console.log("✅ 私人房間系統已載入");
-    console.log("🌧️ 星雨機器人已成功上線");
+  }, runtimeHealth);
+  await runStartupTask("舊 VIP 回填", async () => {
     await processLegacyVipBackfillQueue();
+  }, runtimeHealth);
+
+  await runStartupTask("每日陪玩總結排程", async () => {
     startDailySummaryScheduler();
+  }, runtimeHealth);
+  await runStartupTask("月結帳單排程", async () => {
     startMonthlyBillScheduler();
-    // ===== 秋奈薪資每日報告 =====
+  }, runtimeHealth);
+  await runStartupTask("秋奈薪資每日報告排程", async () => {
     startQiunaiSalaryReportCron(client, supabase);
-    setInterval(
-      async () => {
+  }, runtimeHealth);
+
+  setInterval(
+    createNonOverlappingTask("月卡 VIP 到期清理", async () => {
         try {
           const now = new Date().toISOString();
           const { data: expired } = await supabase
@@ -4878,10 +4934,11 @@ client.once(Events.ClientReady, async () => {
         } catch (err) {
           console.log("[月卡VIP檢查錯誤]", err);
         }
-      },
-      60 * 60 * 1000,
-    );
-    setInterval(async () => {
+    }),
+    60 * 60 * 1000,
+  );
+  setInterval(
+    createNonOverlappingTask("員工狀態清理", async () => {
       const tenHoursAgo = Date.now() - 10 * 60 * 60 * 1000;
 
       const { data: players, error } = await supabase
@@ -4946,10 +5003,12 @@ client.once(Events.ClientReady, async () => {
               .in("discord_id", offlineIds)
           : null,
       ]);
-    }, 60 * 1000);
-  } catch (error) {
-    console.error("[BOT] Ready 事件出錯:", error);
-  }
+    }),
+    60 * 1000,
+  );
+
+  runtimeHealth.markReady();
+  console.log("🌧️ 星雨機器人已完成啟動");
 });
 async function getStaffOptionsFromRole(guild) {
   const staffRoleId = process.env.STAFF_ROLE_ID;
@@ -5240,6 +5299,11 @@ async function getAvailablePlayerOptions(
 }
 // ===== Interaction Handler =====
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (!handledInteractionIds.add(interaction.id)) {
+    console.warn(`[INTERACTION] 已略過重複事件 ${interaction.id}`);
+    return;
+  }
+
   try {
     // ===== Autocomplete =====
     if (interaction.isAutocomplete()) {
@@ -5822,7 +5886,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         ];
         const tipDraftId = `manual_${interaction.user.id}_${Date.now()}`;
 
-        pendingTips.set(tipDraftId, {
+        setPendingTip(tipDraftId, {
           channelId: interaction.channel.id,
           guildId: interaction.guild.id,
           selectedStaffId: selectedStaffIds[0],
@@ -8667,23 +8731,27 @@ async function handleButtonInteraction(interaction) {
     }
     // ===== 掉落領取 =====
     if (customId.startsWith("claim_")) {
-      const reward = parseInt(customId.split("_")[1]);
+      const reward = parseChatDropReward(customId);
 
-      if (claimedDrops.has(interaction.message.id)) {
+      if (reward === null) {
+        return await interaction.editReply({
+          content: "❌ 無效的掉落獎勵",
+        });
+      }
+
+      if (!claimedDrops.add(interaction.message.id)) {
         return await interaction.editReply({
           content: "❌ 已經被領取了",
         });
       }
 
-      claimedDrops.add(interaction.message.id);
-
-      setTimeout(() => {
+      let finalCoins;
+      try {
+        finalCoins = await changeCoins(interaction.user.id, reward);
+      } catch (error) {
         claimedDrops.delete(interaction.message.id);
-      }, 60000);
-
-      const userData = await getUser(interaction.user.id);
-
-      const finalCoins = await changeCoins(interaction.user.id, reward);
+        throw error;
+      }
 
       await sendWalletLog(
         interaction.user.id,
@@ -9684,6 +9752,7 @@ async function handleButtonInteraction(interaction) {
           content: "❌ 只有客服或管理員可以儲存紀錄",
         });
       }
+      let tempDirectory = null;
       try {
         const messages = await interaction.channel.messages.fetch({
           limit: 100,
@@ -9716,13 +9785,11 @@ body{
 `;
 
         for (const msg of sorted) {
-          const content = (msg.content || "(無內容)")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;");
+          const content = escapeHtml(msg.content || "(無內容)");
 
           html += `
 <div class="message">
-<b>${msg.author.tag}</b><br>
+<b>${escapeHtml(msg.author.tag)}</b><br>
 ${content || "(無內容)"}
 </div>
 `;
@@ -9730,9 +9797,12 @@ ${content || "(無內容)"}
 
         html += "</body></html>";
 
+        tempDirectory = await fs.mkdtemp(
+          path.join(os.tmpdir(), "qiunai-order-log-"),
+        );
         const fileName = `order-${interaction.channel.id}-${Date.now()}.html`;
-
-        fs.writeFileSync(`./${fileName}`, html);
+        const filePath = path.join(tempDirectory, fileName);
+        await fs.writeFile(filePath, html, "utf8");
 
         const isTopup = interaction.channel.name.includes("儲值-");
 
@@ -9750,10 +9820,8 @@ ${content || "(無內容)"}
 
         await logChannel.send({
           content: `📁 ${interaction.channel.name} 訂單紀錄`,
-          files: [`./${fileName}`],
+          files: [filePath],
         });
-
-        fs.unlinkSync(`./${fileName}`);
 
         await interaction.editReply({
           content: "✅ 已儲存紀錄\n10 秒後刪除頻道",
@@ -9774,6 +9842,13 @@ ${content || "(無內容)"}
         return await interaction.editReply({
           content: "❌ 儲存失敗",
         });
+      } finally {
+        if (tempDirectory) {
+          await fs.rm(tempDirectory, { recursive: true, force: true }).catch(
+            (cleanupError) =>
+              console.error("[清除暫存訂單紀錄失敗]", cleanupError),
+          );
+        }
       }
     }
 
@@ -10147,7 +10222,7 @@ async function handleStringSelectInteraction(interaction) {
         }
         if (value === "tip") {
           const tipId = `${interaction.user.id}_${Date.now()}`;
-          pendingTips.set(tipId, {
+          setPendingTip(tipId, {
             createdBy: interaction.user.id,
             tipperId: interaction.user.id,
             channelId: orderChannel.id,
@@ -10561,7 +10636,7 @@ async function handleModalSubmit(interaction) {
         });
       }
       const tipConfirmId = `${Date.now()}_${interaction.user.id}`;
-      pendingTips.set(tipConfirmId, {
+      setPendingTip(tipConfirmId, {
         channelId: interaction.channel.id,
         guildId: interaction.guild.id,
         tipperId,
@@ -10688,11 +10763,10 @@ client.on("messageCreate", async (message) => {
   }
   const channelId = message.channel.id;
   if (dropCooldown.has(channelId)) return;
-  const random = Math.floor(Math.random() * 100);
   // 訊息少於 5 字不掉落
   if (message.content.replace(/\s/g, "").length < 5) return;
   // 0.5% 掉落機率
-  if (random >= 0.5) return;
+  if (!shouldCreateChatDrop()) return;
   const reward = Math.floor(Math.random() * 20) + 1;
   const button = new ButtonBuilder()
     .setCustomId(`claim_${reward}`)
@@ -10718,4 +10792,8 @@ client.on("messageCreate", async (message) => {
   );
 });
 // ===== Login =====
-client.login(process.env.TOKEN);
+client.login(process.env.TOKEN).catch((error) => {
+  console.error("[BOT] Discord 登入失敗", error);
+  runtimeHealth.addFailure("Discord 登入", error);
+  void shutdownRuntime("Discord 登入失敗", 1);
+});

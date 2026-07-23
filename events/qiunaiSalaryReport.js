@@ -380,6 +380,8 @@ function startQiunaiSalaryReportCron(client, supabase) {
     },
     {
       timezone,
+      noOverlap: true,
+      name: "qiunai-daily-salary-report",
     }
   );
 
