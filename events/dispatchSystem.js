@@ -70,6 +70,7 @@ function getServiceName(serviceType) {
 }
 
 const CATEGORY_CHANNEL_LIMIT = 50;
+const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 
 function getCategoryIds(value) {
   return String(value || "")
@@ -1943,7 +1944,7 @@ async function createTopupTicket(interaction) {
   const guild = interaction.guild;
   const parentId = await resolveTicketParentId(
     guild,
-    process.env.ORDER_CATEGORY,
+    ORDER_TICKET_CATEGORY_ID,
     "訂單區"
   );
 
@@ -2095,7 +2096,7 @@ async function createServiceTicket(interaction, serviceType, initial = {}) {
   const flowId = createFlowId(interaction.user.id);
   const parentId = await resolveTicketParentId(
     guild,
-    process.env.ORDER_CATEGORY,
+    ORDER_TICKET_CATEGORY_ID,
     "訂單區"
   );
 

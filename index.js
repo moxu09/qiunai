@@ -95,6 +95,7 @@ const allianceMembership = createAllianceMembership(
 const STAFF_TABLE = "qiunai_staff";
 const CURRENT_GUILD_ID = null;
 const CATEGORY_CHANNEL_LIMIT = 50;
+const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -10145,7 +10146,9 @@ async function handleStringSelectInteraction(interaction) {
         const channelName = `${channelPrefix}-${safeName}-${ticketNumber}`;
         const parentId = await resolveTicketParentId(
           interaction.guild,
-          process.env.ORDER_CATEGORY,
+          value === "tip"
+            ? process.env.ORDER_CATEGORY
+            : ORDER_TICKET_CATEGORY_ID,
           "訂單區",
         );
         const orderChannel = await interaction.guild.channels.create({
