@@ -1,6 +1,6 @@
 module.exports = {
   brandName: "秋奈電競",
-  panelChannelId: "1530927944594227260",
+  panelChannelId: "1525790871432204340",
   reviewChannelId: "1525790900062523513",
   archiveChannelId: "1530899091243143218",
   workGuildInvite: "https://discord.gg/NAcWFBRREW",
