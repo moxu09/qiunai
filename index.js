@@ -7999,7 +7999,7 @@ async function createMonthlyBillPaymentChannel(interaction, bill) {
   const channelName = `月結繳費-${safeName}-${ticketNumber}`;
   const parentId = await resolveTicketParentId(
     interaction.guild,
-    process.env.ORDER_CATEGORY,
+    ORDER_TICKET_CATEGORY_ID,
     "訂單區",
   );
 
@@ -10146,9 +10146,7 @@ async function handleStringSelectInteraction(interaction) {
         const channelName = `${channelPrefix}-${safeName}-${ticketNumber}`;
         const parentId = await resolveTicketParentId(
           interaction.guild,
-          value === "tip"
-            ? process.env.ORDER_CATEGORY
-            : ORDER_TICKET_CATEGORY_ID,
+          ORDER_TICKET_CATEGORY_ID,
           "訂單區",
         );
         const orderChannel = await interaction.guild.channels.create({

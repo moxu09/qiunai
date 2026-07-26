@@ -2019,7 +2019,7 @@ async function createTipTicket(interaction) {
   const guild = interaction.guild;
   const parentId = await resolveTicketParentId(
     guild,
-    process.env.ORDER_CATEGORY,
+    ORDER_TICKET_CATEGORY_ID,
     "訂單區"
   );
 
