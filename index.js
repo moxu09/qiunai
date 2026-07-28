@@ -27,6 +27,9 @@ const { runStartupGroup } = require("./runtime/startupOrchestrator");
 const { createClient } = require("@supabase/supabase-js");
 const { createAccountingLedger } = require("./utils/accounting");
 const { createAllianceMembership } = require("./utils/allianceMembership");
+const {
+  createDeviceAuditReviewerSync,
+} = require("./utils/deviceAuditReviewers");
 const { parseAllowedServices } = require("./utils/services");
 const { ORDER_FLOW_TTL_MS } = require("./utils/orderFlow");
 const {
@@ -126,6 +129,13 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
+});
+const deviceAuditReviewerSync = createDeviceAuditReviewerSync({
+  client,
+  supabase,
+  organization: "qiunai",
+  roleId:
+    process.env.DEVICE_AUDIT_REVIEWER_ROLE_ID || "1513626379437211900",
 });
 const employmentSystem = createEmploymentSystem(client, employmentConfig);
 const runtimeHealth = createHealthState("rainbot-qiunai");
@@ -6041,6 +6051,10 @@ client.once(Events.ClientReady, async () => {
       { name: "扭蛋面板", run: () => sendGachaPanel(client) },
       { name: "私人房間面板", run: () => sendPrivateRoomPanel(client) },
       { name: "入職申請面板", run: () => employmentSystem.sendPanel() },
+      {
+        name: "電腦稽核審核員權限",
+        run: () => deviceAuditReviewerSync.syncAll(),
+      },
       { name: "舊 VIP 回填", run: processLegacyVipBackfillQueue },
     ],
     { concurrency: 3, healthState: runtimeHealth },
