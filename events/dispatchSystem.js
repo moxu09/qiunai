@@ -15,6 +15,7 @@ const {
   isStaffInteraction,
 } = require("./workReportSystem");
 const { ORDER_FLOW_TTL_MS } = require("../utils/orderFlow");
+const path = require("node:path");
 
 let supabase;
 let client;
@@ -157,6 +158,7 @@ async function resolveTicketParentId(
   return newCategory.id;
 }
 const pendingPanelOrders = new Map();
+const PANEL_ASSET_DIR = path.join(__dirname, "..", "assets", "panels");
 
 const GAME_ORDER_PANELS = [
   {
@@ -184,6 +186,7 @@ const GAME_ORDER_PANELS = [
   {
     envKey: "DELTA_ORDER_CHANNEL",
     panelName: "delta",
+    imageFile: "delta-pricing.png",
     title: "🛡️ 三角洲行動下單區",
     description: "請選擇你要下單的三角洲行動項目。",
     customId: "game_order_select_delta",
@@ -200,6 +203,7 @@ const GAME_ORDER_PANELS = [
   {
     envKey: "APEX_ORDER_CHANNEL",
     panelName: "apex",
+    imageFile: "apex-pricing.png",
     title: "🔺 Apex 下單區",
     description: "請選擇你要下單的 Apex 項目。",
     customId: "game_order_select_apex",
@@ -217,6 +221,7 @@ const GAME_ORDER_PANELS = [
   {
     envKey: "LOL_ORDER_CHANNEL",
     panelName: "lol",
+    imageFile: "lol-pricing.png",
     title: "🧙 英雄聯盟下單區",
     description: "請先選擇英雄聯盟項目，下一步再選大神 / 技術 / 娛樂。",
     customId: "game_order_select_lol",
@@ -436,6 +441,18 @@ async function upsertGameOrderPanel(panel) {
       text: "深夜不關燈｜We Are Still Here",
     })
     .setTimestamp();
+  const files = panel.imageFile
+    ? [
+        {
+          attachment: path.join(PANEL_ASSET_DIR, panel.imageFile),
+          name: panel.imageFile,
+        },
+      ]
+    : [];
+
+  if (panel.imageFile) {
+    embed.setImage(`attachment://${panel.imageFile}`);
+  }
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(panel.customId)
@@ -467,6 +484,7 @@ async function upsertGameOrderPanel(panel) {
     await oldPanel.edit({
       embeds: [embed],
       components: [row],
+      ...(files.length ? { attachments: [], files } : {}),
     });
     console.log(`[下單分區] 已更新：${panel.title}`);
     return;
@@ -475,6 +493,7 @@ async function upsertGameOrderPanel(panel) {
   await channel.send({
     embeds: [embed],
     components: [row],
+    ...(files.length ? { files } : {}),
   });
 
   console.log(`[下單分區] 已建立：${panel.title}`);

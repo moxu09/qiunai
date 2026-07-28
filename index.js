@@ -116,6 +116,14 @@ const shutdownRuntime = installProcessHandlers({
   server: runtimeServer,
   healthState: runtimeHealth,
 });
+const PANEL_ASSET_DIR = path.join(__dirname, "assets", "panels");
+
+function getPanelAsset(filename) {
+  return {
+    attachment: path.join(PANEL_ASSET_DIR, filename),
+    name: filename,
+  };
+}
 
 function getCategoryIds(value) {
   return String(value || "")
@@ -4005,6 +4013,7 @@ async function sendCheckinPanel(client) {
         `🎉 不定期簽到活動`,
     )
     .setThumbnail(client.user.displayAvatarURL())
+    .setImage("attachment://daily-checkin.png")
     .setFooter({
       text: "星雨簽到系統｜每天記得來簽到 ✨",
     })
@@ -4018,6 +4027,8 @@ async function sendCheckinPanel(client) {
       await msg.edit({
         embeds: [embed],
         components: [row],
+        attachments: [],
+        files: [getPanelAsset("daily-checkin.png")],
       });
 
       console.log("[CHECKIN] 已更新");
@@ -4030,6 +4041,7 @@ async function sendCheckinPanel(client) {
   const newMsg = await channel.send({
     embeds: [embed],
     components: [row],
+    files: [getPanelAsset("daily-checkin.png")],
   });
 
   await savePanelMessage("checkin", channel.id, newMsg.id);
@@ -4099,6 +4111,7 @@ async function sendAtmPanel(client) {
         `🌙 查詢月結｜查看保證金與剩餘額度`,
     )
     .setThumbnail(client.user.displayAvatarURL())
+    .setImage("attachment://star-rain-atm.png")
     .setFooter({
       text: "星雨銀行｜交易請確認對象與金額",
     })
@@ -4112,6 +4125,8 @@ async function sendAtmPanel(client) {
       await msg.edit({
         embeds: [embed],
         components: [row, row2],
+        attachments: [],
+        files: [getPanelAsset("star-rain-atm.png")],
       });
 
       console.log("[ATM] 已更新");
@@ -4124,6 +4139,7 @@ async function sendAtmPanel(client) {
   const newMsg = await channel.send({
     embeds: [embed],
     components: [row, row2],
+    files: [getPanelAsset("star-rain-atm.png")],
   });
 
   await savePanelMessage("atm", channel.id, newMsg.id);
@@ -4152,6 +4168,7 @@ async function sendGachaPanel(client) {
         `🔹 R｜一般獎勵`,
     )
     .setThumbnail(client.user.displayAvatarURL())
+    .setImage("attachment://gacha-hall.png")
     .setFooter({
       text: "星雨系統｜祝你抽到大獎 ✨",
     })
@@ -4165,6 +4182,8 @@ async function sendGachaPanel(client) {
       await msg.edit({
         embeds: [embed],
         components: [row],
+        attachments: [],
+        files: [getPanelAsset("gacha-hall.png")],
       });
 
       console.log("[GACHA] 已更新");
@@ -4177,6 +4196,7 @@ async function sendGachaPanel(client) {
   const newMsg = await channel.send({
     embeds: [embed],
     components: [row],
+    files: [getPanelAsset("gacha-hall.png")],
   });
 
   await savePanelMessage("gacha", channel.id, newMsg.id);
