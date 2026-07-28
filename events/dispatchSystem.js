@@ -521,7 +521,7 @@ async function sendTipOrderPanel() {
     .setTitle("💝 打賞下單區")
     .setDescription(
       `想支持喜歡的陪陪嗎？請點擊下方按鈕建立專屬打賞頻道。\n\n` +
-        `建立後可選擇打賞禮物、受賞陪陪及付款方式。`,
+        `可建立一般打賞單或冠名單，完成後選擇陪陪及付款方式。`,
     )
     .setFooter({ text: "秋奈電競｜打賞系統" })
     .setTimestamp();
@@ -531,6 +531,11 @@ async function sendTipOrderPanel() {
       .setLabel("建立打賞單")
       .setEmoji("💝")
       .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId("order_start_crown")
+      .setLabel("建立冠名單")
+      .setEmoji("👑")
+      .setStyle(ButtonStyle.Primary),
   );
   const messages = await channel.messages.fetch({ limit: 20 });
   const oldPanel = messages.find(
@@ -2073,7 +2078,7 @@ async function createTopupTicket(interaction) {
     content: `✅ 已建立儲值頻道：<#${channel.id}>`,
   });
 }
-async function createTipTicket(interaction) {
+async function createTipTicket(interaction, mode = "tip") {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({
       flags: 64,
@@ -2088,7 +2093,7 @@ async function createTipTicket(interaction) {
   );
 
   const channel = await guild.channels.create({
-    name: `打賞-${interaction.user.username}`.slice(0, 90),
+    name: `${mode === "crown" ? "冠名" : "打賞"}-${interaction.user.username}`.slice(0, 90),
     type: ChannelType.GuildText,
     parent: parentId,
     topic: `owner:${interaction.user.id}`,
@@ -2124,8 +2129,12 @@ async function createTipTicket(interaction) {
     embeds: [
       new EmbedBuilder()
         .setColor("#ff99cc")
-        .setTitle("💝 打賞頻道")
-        .setDescription("請依照下方選單選擇打賞禮物。"),
+        .setTitle(mode === "crown" ? "👑 冠名單頻道" : "💝 打賞頻道")
+        .setDescription(
+          mode === "crown"
+            ? "請依照下方選單選擇冠名方案。"
+            : "請依照下方選單選擇打賞禮物。",
+        ),
     ],
     components: [
       new ActionRowBuilder().addComponents(
@@ -2138,10 +2147,14 @@ async function createTipTicket(interaction) {
     ],
   });
 
-  if (!paymentHelpers.startTipFlowInChannel) {
-    await channel.send("❌ 打賞流程尚未接入 startTipFlowInChannel。");
+  const startFlow =
+    mode === "crown"
+      ? paymentHelpers.startCrownFlowInChannel
+      : paymentHelpers.startTipFlowInChannel;
+  if (!startFlow) {
+    await channel.send("❌ 打賞／冠名流程尚未接入。");
   } else {
-    await paymentHelpers.startTipFlowInChannel(channel, interaction.user);
+    await startFlow(channel, interaction.user);
   }
 
   return interaction.editReply({
@@ -10185,6 +10198,10 @@ async function handleDispatchInteraction(interaction) {
 
     if (interaction.customId === "order_start_tip") {
       await createTipTicket(interaction);
+      return true;
+    }
+    if (interaction.customId === "order_start_crown") {
+      await createTipTicket(interaction, "crown");
       return true;
     }
     if (interaction.customId.startsWith("valorant_type_")) {
