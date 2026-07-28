@@ -1403,17 +1403,8 @@ async function handleCrownSuffixChoice(interaction) {
   if (wantsSuffix) {
     const modal = new ModalBuilder()
       .setCustomId(`crown_suffix_modal_${tipId}`)
-      .setTitle("填寫雙方尾綴");
+      .setTitle("填寫陪陪尾綴");
     modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("customer_suffix")
-          .setLabel("闆闆尾綴")
-          .setPlaceholder("請填寫要加在闆闆暱稱後方的文字")
-          .setStyle(TextInputStyle.Short)
-          .setMaxLength(20)
-          .setRequired(true),
-      ),
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
           .setCustomId("staff_suffix")
@@ -1427,10 +1418,9 @@ async function handleCrownSuffixChoice(interaction) {
     return interaction.showModal(modal);
   }
   tipData.changeSuffixes = false;
-  tipData.customerSuffix = null;
   tipData.staffSuffix = null;
   setPendingTip(tipId, tipData);
-  await interaction.update({ content: "✅ 已選擇不修改雙方尾綴", components: [] });
+  await interaction.update({ content: "✅ 已選擇不修改陪陪尾綴", components: [] });
   return interaction.followUp({
     content: await continueCrownOrder(interaction.channel, tipId, tipData),
     flags: 64,
@@ -1445,7 +1435,6 @@ async function handleCrownSuffixModal(interaction) {
     return interaction.editReply({ content: "❌ 冠名單已失效或你不是建立者。" });
   }
   tipData.changeSuffixes = true;
-  tipData.customerSuffix = interaction.fields.getTextInputValue("customer_suffix").trim();
   tipData.staffSuffix = interaction.fields.getTextInputValue("staff_suffix").trim();
   setPendingTip(tipId, tipData);
   if (tipData.suffixMessageId) {
@@ -1454,7 +1443,7 @@ async function handleCrownSuffixModal(interaction) {
       .catch(() => null);
     if (suffixMessage) {
       await suffixMessage
-        .edit({ content: "✅ 已填寫雙方尾綴", components: [] })
+        .edit({ content: "✅ 已填寫陪陪尾綴", components: [] })
         .catch(() => {});
     }
   }
@@ -1652,7 +1641,7 @@ async function handleTipStaffDone(interaction) {
     const suffixRow = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`crown_suffix_yes_${tipId}`)
-        .setLabel("修改雙方尾綴")
+        .setLabel("修改陪陪尾綴")
         .setStyle(ButtonStyle.Primary),
       new ButtonBuilder()
         .setCustomId(`crown_suffix_no_${tipId}`)
@@ -1661,13 +1650,13 @@ async function handleTipStaffDone(interaction) {
     );
     const suffixMessage = await interaction.channel.send({
       content:
-        "是否要修改闆闆與陪陪雙方的暱稱尾綴？\n" +
+        "是否要修改陪陪的暱稱尾綴？\n" +
         "此處會記錄在冠名單內，付款後由客服依冠名時長執行。",
       components: [suffixRow],
     });
     tipData.suffixMessageId = suffixMessage.id;
     setPendingTip(tipId, tipData);
-    return interaction.editReply({ content: "✅ 已選擇冠名陪陪，請設定雙方尾綴。" });
+    return interaction.editReply({ content: "✅ 已選擇冠名陪陪，請設定陪陪尾綴。" });
   }
 
   if (tipData.customPriceRequired) {

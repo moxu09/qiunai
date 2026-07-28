@@ -228,10 +228,9 @@ test("crown packages keep gifted hours separate from crown duration", () => {
       giftedHours: 6,
       durationHours: 12,
       changeSuffixes: true,
-      customerSuffix: "♡小奈",
       staffSuffix: "♡闆闆",
     }),
-    "冠名單｜半日冠｜贈送還單 6hrs｜冠名時長 12hrs｜雙方尾綴：闆闆「♡小奈」／陪陪「♡闆闆」",
+    "冠名單｜半日冠｜贈送還單 6hrs｜冠名時長 12hrs｜陪陪尾綴：「♡闆闆」",
   );
 });
 

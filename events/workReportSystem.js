@@ -363,7 +363,7 @@ function createWorkReportSystem({
             `<@${staffId}> 👑 冠名時間已到！\n` +
             `冠名品項：${order.order_item || order.service || "冠名單"}\n` +
             `到期時間：${formatTaipeiDateTime(endAt)}\n` +
-            "請依冠名單內容處理雙方尾綴，並與客服確認後續。",
+            "請依冠名單內容處理陪陪尾綴，並與客服確認後續。",
           allowedMentions: { users: [staffId] },
         });
         meta.crownReminderSent = true;

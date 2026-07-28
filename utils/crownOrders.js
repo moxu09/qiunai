@@ -4,8 +4,8 @@ function getCrownPackageByKey(packages, key) {
 
 function buildCrownOrderItem(data) {
   const suffixText = data.changeSuffixes
-    ? `｜雙方尾綴：闆闆「${data.customerSuffix}」／陪陪「${data.staffSuffix}」`
-    : "｜雙方尾綴：不修改";
+    ? `｜陪陪尾綴：「${data.staffSuffix}」`
+    : "｜陪陪尾綴：不修改";
   return (
     `冠名單｜${data.crownName}` +
     `｜贈送還單 ${data.giftedHours}hrs` +
