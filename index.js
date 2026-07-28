@@ -60,6 +60,10 @@ const {
   getTipTotalAmount,
 } = require("./utils/tips");
 const {
+  formatReviewCustomer,
+  shouldPublishReview,
+} = require("./utils/reviews");
+const {
   Client,
   GatewayIntentBits,
   Events,
@@ -100,6 +104,7 @@ const STAFF_TABLE = "qiunai_staff";
 const CURRENT_GUILD_ID = null;
 const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
+const REVIEW_SHOWCASE_CHANNEL_ID = "1206157728532271185";
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -1974,6 +1979,61 @@ async function finalizeReviewPrompt(interaction, customerId, anonymous) {
       ? "匿名評價"
       : message.content;
   await message.edit({ content, embeds, components: [] }).catch(() => {});
+}
+
+async function publishPositiveReview({
+  rating,
+  customerId,
+  staffIds,
+  comment,
+  anonymous,
+  orderNo,
+}) {
+  if (!shouldPublishReview(rating)) return false;
+
+  const reviewChannel = await client.channels
+    .fetch(REVIEW_SHOWCASE_CHANNEL_ID)
+    .catch((error) => {
+      console.error("[好評頻道讀取失敗]", error);
+      return null;
+    });
+  if (
+    !reviewChannel?.isTextBased() ||
+    typeof reviewChannel.send !== "function"
+  ) {
+    console.error(
+      `[好評頻道不可用] ${REVIEW_SHOWCASE_CHANNEL_ID}`,
+    );
+    return false;
+  }
+
+  const normalizedStaffIds = [...new Set(staffIds.map(String).filter(Boolean))];
+  try {
+    await reviewChannel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor("#57F287")
+          .setTitle("💙 客人好評")
+          .setDescription(
+            `闆闆：${formatReviewCustomer(customerId, anonymous)}\n` +
+              `陪陪：${
+                normalizedStaffIds.length
+                  ? normalizedStaffIds.map((id) => `<@${id}>`).join("、")
+                  : "未指定"
+              }\n` +
+              `評分：${"🌟".repeat(rating)} ${rating}/5\n` +
+              `心得：${comment || "未填寫"}`,
+          )
+          .setFooter({ text: `訂單編號：${orderNo}` })
+          .setTimestamp(),
+      ],
+      allowedMentions: { parse: [] },
+    });
+    return true;
+  } catch (error) {
+    console.error("[好評發送失敗]", error);
+    return false;
+  }
 }
 
 async function sendOrderReviewPanel(channel, order, assignedPlayers = []) {
@@ -5833,6 +5893,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .setTimestamp(),
           ],
         });
+        await publishPositiveReview({
+          rating,
+          customerId,
+          staffIds: [staffId],
+          comment,
+          anonymous,
+          orderNo: `MANUAL-${surveyId}`,
+        });
         return;
       }
       if (
@@ -5921,6 +5989,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
               )
               .setTimestamp(),
           ],
+        });
+        await publishPositiveReview({
+          rating,
+          customerId: interaction.user.id,
+          staffIds: assignedPlayers,
+          comment,
+          anonymous,
+          orderNo: order.order_no || order.id,
         });
         return;
       }
