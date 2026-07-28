@@ -72,6 +72,7 @@ function getServiceName(serviceType) {
 
 const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
+const TIP_ORDER_PANEL_CHANNEL_ID = "1531515179559551047";
 
 function getCategoryIds(value) {
   return String(value || "")
@@ -277,7 +278,6 @@ const GAME_ORDER_PANELS = [
       },
       { label: "語音聊天", value: "voice_chat", description: "語音聊天" },
       { label: "點歌服務", value: "song", description: "點歌服務" },
-      { label: "打賞", value: "tip", description: "建立打賞頻道" },
       { label: "自訂輸入", value: "custom", description: "其他項目｜自訂需求" },
       {
         label: "儲值星雨幣",
@@ -504,6 +504,49 @@ async function sendGameOrderPanels() {
   for (const panel of GAME_ORDER_PANELS) {
     await upsertGameOrderPanel(panel);
   }
+}
+
+async function sendTipOrderPanel() {
+  const channel = await client.channels
+    .fetch(TIP_ORDER_PANEL_CHANNEL_ID)
+    .catch(() => null);
+
+  if (!channel) {
+    throw new Error(`找不到打賞下單頻道：${TIP_ORDER_PANEL_CHANNEL_ID}`);
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor("#ff99cc")
+    .setTitle("💝 打賞下單區")
+    .setDescription(
+      `想支持喜歡的陪陪嗎？請點擊下方按鈕建立專屬打賞頻道。\n\n` +
+        `建立後可選擇打賞禮物、受賞陪陪及付款方式。`,
+    )
+    .setFooter({ text: "秋奈電競｜打賞系統" })
+    .setTimestamp();
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("order_start_tip")
+      .setLabel("建立打賞單")
+      .setEmoji("💝")
+      .setStyle(ButtonStyle.Danger),
+  );
+  const messages = await channel.messages.fetch({ limit: 20 });
+  const oldPanel = messages.find(
+    (message) =>
+      message.author.id === client.user.id &&
+      message.embeds[0]?.title === "💝 打賞下單區",
+  );
+
+  if (oldPanel) {
+    await oldPanel.edit({ embeds: [embed], components: [row] });
+    console.log("[TIP PANEL] 已更新");
+    return oldPanel;
+  }
+
+  const message = await channel.send({ embeds: [embed], components: [row] });
+  console.log("[TIP PANEL] 已建立");
+  return message;
 }
 
 async function handleGameOrderSelect(interaction) {
@@ -10500,6 +10543,7 @@ module.exports = {
   handleDispatchInteraction,
   sendPlayerPanel,
   sendGameOrderPanels,
+  sendTipOrderPanel,
   startNewOrderFlow,
   sendDailyPlayerSummary,
   submitTopupForm,

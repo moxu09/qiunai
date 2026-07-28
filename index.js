@@ -4216,9 +4216,7 @@ async function sendOrderSystem(client) {
         `**下單區**\n` +
         `🎯 特戰英豪｜🎮 Steam｜🛡️ 三角洲｜💬 陪聊｜🧸 出氣包\n\n` +
         `**儲值區**\n` +
-        `💳 儲值 ASD\n\n` +
-        `**打賞區**\n` +
-        `💝 打賞陪陪禮物`,
+        `💳 儲值 ASD`,
     )
     .setFooter({
       text: "深夜不關燈｜We Are Still Here",
@@ -4267,12 +4265,6 @@ async function sendOrderSystem(client) {
       .setLabel("儲值")
       .setEmoji("💳")
       .setStyle(ButtonStyle.Success),
-
-    new ButtonBuilder()
-      .setCustomId("order_start_tip")
-      .setLabel("打賞")
-      .setEmoji("💝")
-      .setStyle(ButtonStyle.Danger),
   );
 
   const messages = await channel.messages.fetch({
@@ -4947,6 +4939,7 @@ client.once(Events.ClientReady, async () => {
           }),
       },
       { name: "分區下單面板", run: () => dispatchSystem.sendGameOrderPanels() },
+      { name: "打賞下單面板", run: () => dispatchSystem.sendTipOrderPanel() },
       { name: "報單面板", run: () => dispatchSystem.sendWorkReportPanel() },
       { name: "商店面板", run: () => refreshShop(client) },
       { name: "儲值面板", run: () => sendTopupPanel(client) },
