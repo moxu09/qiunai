@@ -165,6 +165,7 @@ const GAME_ORDER_PANELS = [
   {
     envKey: "VALORANT_ORDER_CHANNEL",
     panelName: "valorant",
+    imageFile: "valorant-pricing.png",
     title: "🎯 特戰英豪下單區",
     description: "請選擇你要下單的特戰英豪項目。",
     customId: "game_order_select_valorant",
