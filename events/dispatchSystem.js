@@ -239,6 +239,7 @@ const GAME_ORDER_PANELS = [
   {
     envKey: "STEAM_ORDER_CHANNEL",
     panelName: "steam",
+    imageFile: "steam-pricing.png",
     title: "🎮 Steam 下單區",
     description: "請選擇你要下單的 Steam 遊戲類型。",
     customId: "game_order_select_steam",
