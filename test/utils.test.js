@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const gifts = require("../config/tipGifts");
+const tipBroadcasts = require("../config/tipBroadcasts");
 const crownPackages = require("../config/crownPackages");
 const {
   buildCrownOrderItem,
@@ -20,6 +21,9 @@ const {
   getTipStaffIds,
   getTipTotalAmount,
 } = require("../utils/tips");
+const {
+  buildTipBroadcastContent,
+} = require("../utils/tipBroadcasts");
 const {
   buildRedPacketShares,
   normalizeRedPacketMode,
@@ -54,6 +58,53 @@ test("冠名品項可解析時長並計算到期時間", () => {
     calculateCrownEndAt("2026-07-28T12:00:00.000Z", 12).toISOString(),
     "2026-07-29T00:00:00.000Z",
   );
+});
+
+test("秋奈固定打賞商品都有播報圖片與專屬文案", () => {
+  const fixedGifts = gifts.filter((gift) => !gift.customPrice);
+  assert.equal(fixedGifts.length, 19);
+  assert.equal(Object.keys(tipBroadcasts).length, fixedGifts.length);
+
+  for (const gift of fixedGifts) {
+    const broadcast = tipBroadcasts[gift.key];
+    assert.ok(broadcast, `${gift.name} 缺少播報設定`);
+    assert.ok(broadcast.description, `${gift.name} 缺少播報文案`);
+    assert.ok(
+      fs.existsSync(
+        path.join(
+          __dirname,
+          "..",
+          "assets",
+          "tip-gifts",
+          broadcast.imageFile,
+        ),
+      ),
+      `${gift.name} 缺少播報圖片`,
+    );
+  }
+});
+
+test("打賞播報可依老闆選擇顯示帳號或匿名", () => {
+  const common = {
+    description: "商品介紹",
+    giftName: "草莓聖代",
+    staffIds: ["259579586453569536", "797833875653001238"],
+    tipperId: "430903870135336962",
+  };
+  const publicContent = buildTipBroadcastContent({
+    ...common,
+    anonymous: false,
+  });
+  assert.match(publicContent, /<@430903870135336962>/);
+  assert.match(publicContent, /<@259579586453569536>/);
+  assert.match(publicContent, /<@797833875653001238>/);
+
+  const anonymousContent = buildTipBroadcastContent({
+    ...common,
+    anonymous: true,
+  });
+  assert.match(anonymousContent, /匿名闆闆/);
+  assert.doesNotMatch(anonymousContent, /<@430903870135336962>/);
 });
 const { ORDER_FLOW_TTL_MS } = require("../utils/orderFlow");
 const {

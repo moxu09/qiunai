@@ -49,6 +49,7 @@ const {
   normalizeRedPacketMode,
 } = require("./utils/redPackets");
 const TIP_GIFTS = require("./config/tipGifts");
+const TIP_BROADCASTS = require("./config/tipBroadcasts");
 const CROWN_PACKAGES = require("./config/crownPackages");
 const employmentConfig = require("./config/employment");
 const {
@@ -68,6 +69,9 @@ const {
   formatReviewCustomer,
   shouldPublishReview,
 } = require("./utils/reviews");
+const {
+  buildTipBroadcastContent,
+} = require("./utils/tipBroadcasts");
 const {
   Client,
   GatewayIntentBits,
@@ -110,6 +114,7 @@ const CURRENT_GUILD_ID = null;
 const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 const REVIEW_SHOWCASE_CHANNEL_ID = "1206157728532271185";
+const TIP_BROADCAST_CHANNEL_ID = "1210250269292761099";
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -374,6 +379,60 @@ async function sendTipWorkReportsSafely(orders, { tipperId, item, amount }) {
     console.error("[打賞報單] 發送個人報單失敗", error);
   }
 }
+function getTipBroadcastEntry(item) {
+  const gift = TIP_GIFTS.find((candidate) => candidate.name === item);
+  const broadcast = gift ? TIP_BROADCASTS[gift.key] : null;
+  return gift && broadcast ? { gift, broadcast } : null;
+}
+async function sendTipBroadcastSafely(tipData) {
+  if (!tipData?.broadcastEnabled || tipData.crownOrder) return;
+
+  const entry = getTipBroadcastEntry(tipData.item);
+  const staffIds = getTipStaffIds(tipData);
+  if (!entry || !staffIds.length) return;
+
+  try {
+    const channel = await client.channels
+      .fetch(TIP_BROADCAST_CHANNEL_ID)
+      .catch(() => null);
+    if (!channel?.isTextBased()) {
+      throw new Error(`找不到打賞播報頻道 ${TIP_BROADCAST_CHANNEL_ID}`);
+    }
+    const imagePath = path.join(
+      __dirname,
+      "assets",
+      "tip-gifts",
+      entry.broadcast.imageFile,
+    );
+    const mentionIds = tipData.broadcastAnonymous
+      ? staffIds
+      : [tipData.tipperId, ...staffIds];
+    await channel.send({
+      content: buildTipBroadcastContent({
+        anonymous: Boolean(tipData.broadcastAnonymous),
+        description: entry.broadcast.description,
+        emoji: entry.broadcast.emoji,
+        giftName: entry.gift.name,
+        staffIds,
+        tipperId: tipData.tipperId,
+      }),
+      files: [
+        {
+          attachment: imagePath,
+          name: entry.broadcast.imageFile,
+        },
+      ],
+      allowedMentions: { users: [...new Set(mentionIds)] },
+    });
+    await channel.send({
+      content:
+        "**感謝老闆對秋奈陪玩及陪陪的喜愛 <:I_cn_b02:1221687963621265451>**",
+      allowedMentions: { parse: [] },
+    });
+  } catch (error) {
+    console.error("[打賞公開播報失敗]", error);
+  }
+}
 function getTipStaffSelectionContent(tipData = {}) {
   const staffIds = getTipStaffIds(tipData);
 
@@ -477,6 +536,139 @@ async function sendTipPaymentSelectPrompt(channel, tipId, selectedStaffText) {
   await channel.send({
     content: `✅ 已選擇受賞陪陪：${selectedStaffText}\n\n` + `請選擇付款方式：`,
     components: [row],
+  });
+}
+async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
+  if (!getTipBroadcastEntry(tipData.item)) {
+    tipData.broadcastEnabled = false;
+    tipData.broadcastPreferenceCompleted = true;
+    setPendingTip(tipId, tipData);
+    return sendTipPaymentSelectPrompt(
+      channel,
+      tipId,
+      formatTipStaffMentions(getTipStaffIds(tipData)),
+    );
+  }
+
+  await channel.send({
+    content: `<@${tipData.tipperId}> 是否需要將這次打賞播報到秋奈公開打賞頻道？`,
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`tip_broadcast_yes_${tipId}`)
+          .setLabel("需要播報")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`tip_broadcast_no_${tipId}`)
+          .setLabel("不需要播報")
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+    allowedMentions: { users: [tipData.tipperId] },
+  });
+}
+async function handleTipBroadcastChoice(interaction) {
+  const wantsBroadcast = interaction.customId.startsWith("tip_broadcast_yes_");
+  const tipId = interaction.customId.replace(
+    wantsBroadcast ? "tip_broadcast_yes_" : "tip_broadcast_no_",
+    "",
+  );
+  const tipData = pendingTips.get(tipId);
+  if (!tipData) {
+    return interaction.editReply({
+      content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
+    });
+  }
+  if (interaction.user.id !== tipData.createdBy) {
+    return interaction.editReply({
+      content: "❌ 只有建立這筆打賞的人可以選擇播報方式。",
+    });
+  }
+
+  await interaction.message
+    .edit({
+      content: wantsBroadcast
+        ? "✅ 已選擇需要公開播報，請繼續選擇是否匿名。"
+        : "✅ 已選擇不公開播報。",
+      components: [],
+    })
+    .catch(() => {});
+
+  if (!wantsBroadcast) {
+    tipData.broadcastEnabled = false;
+    tipData.broadcastAnonymous = false;
+    tipData.broadcastPreferenceCompleted = true;
+    setPendingTip(tipId, tipData);
+    await sendTipPaymentSelectPrompt(
+      interaction.channel,
+      tipId,
+      formatTipStaffMentions(getTipStaffIds(tipData)),
+    );
+    return interaction.editReply({
+      content: "✅ 不會公開播報，請繼續選擇付款方式。",
+    });
+  }
+
+  await interaction.channel.send({
+    content: `<@${tipData.tipperId}> 播報時是否要隱藏你的 Discord 帳號？`,
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`tip_broadcast_anonymous_${tipId}`)
+          .setLabel("匿名播報")
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId(`tip_broadcast_public_${tipId}`)
+          .setLabel("公開我的帳號")
+          .setStyle(ButtonStyle.Success),
+      ),
+    ],
+    allowedMentions: { users: [tipData.tipperId] },
+  });
+  return interaction.editReply({
+    content: "請選擇播報時是否匿名。",
+  });
+}
+async function handleTipBroadcastPrivacy(interaction) {
+  const anonymous = interaction.customId.startsWith(
+    "tip_broadcast_anonymous_",
+  );
+  const tipId = interaction.customId.replace(
+    anonymous ? "tip_broadcast_anonymous_" : "tip_broadcast_public_",
+    "",
+  );
+  const tipData = pendingTips.get(tipId);
+  if (!tipData) {
+    return interaction.editReply({
+      content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
+    });
+  }
+  if (interaction.user.id !== tipData.createdBy) {
+    return interaction.editReply({
+      content: "❌ 只有建立這筆打賞的人可以選擇播報方式。",
+    });
+  }
+
+  tipData.broadcastEnabled = true;
+  tipData.broadcastAnonymous = anonymous;
+  tipData.broadcastPreferenceCompleted = true;
+  setPendingTip(tipId, tipData);
+  await interaction.message
+    .edit({
+      content: anonymous
+        ? "✅ 付款完成後會以「匿名闆闆」公開播報。"
+        : `✅ 付款完成後會以 <@${tipData.tipperId}> 公開播報。`,
+      components: [],
+      allowedMentions: anonymous ? { parse: [] } : { users: [tipData.tipperId] },
+    })
+    .catch(() => {});
+  await sendTipPaymentSelectPrompt(
+    interaction.channel,
+    tipId,
+    formatTipStaffMentions(getTipStaffIds(tipData)),
+  );
+  return interaction.editReply({
+    content: `✅ 已選擇${anonymous ? "匿名" : "公開帳號"}播報，請繼續選擇付款方式。`,
   });
 }
 function buildBulkDeleteChannelSelect(deleteId) {
@@ -1400,11 +1592,19 @@ async function handleTipCustomPriceModal(interaction) {
     }
   }
 
-  await sendTipPaymentSelectPrompt(
-    interaction.channel,
-    tipId,
-    formatTipStaffMentions(getTipStaffIds(tipData)),
-  );
+  if (tipData.crownOrder) {
+    await sendTipPaymentSelectPrompt(
+      interaction.channel,
+      tipId,
+      formatTipStaffMentions(getTipStaffIds(tipData)),
+    );
+  } else {
+    await sendTipBroadcastPreferencePrompt(
+      interaction.channel,
+      tipId,
+      tipData,
+    );
+  }
   return interaction.editReply({
     content:
       `✅ ${tipData.crownOrder ? "自定冠" : "客製打賞"}金額已設定為 ${amount.toLocaleString("zh-TW")} ASD\n` +
@@ -1477,14 +1677,14 @@ async function handleTipStaffDone(interaction) {
     });
   }
 
-  await sendTipPaymentSelectPrompt(
+  await sendTipBroadcastPreferencePrompt(
     interaction.channel,
     tipId,
-    selectedStaffText,
+    tipData,
   );
 
   return interaction.editReply({
-    content: "✅ 已進入付款方式選擇",
+    content: "✅ 已選擇受賞陪陪，請設定是否公開播報",
   });
 }
 
@@ -6391,6 +6591,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
       if (
+        customId.startsWith("tip_broadcast_yes_") ||
+        customId.startsWith("tip_broadcast_no_") ||
+        customId.startsWith("tip_broadcast_anonymous_") ||
+        customId.startsWith("tip_broadcast_public_")
+      ) {
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.deferReply({ flags: 64 });
+        }
+        if (
+          customId.startsWith("tip_broadcast_yes_") ||
+          customId.startsWith("tip_broadcast_no_")
+        ) {
+          return await handleTipBroadcastChoice(interaction);
+        }
+        return await handleTipBroadcastPrivacy(interaction);
+      }
+      if (
         customId.startsWith("tip_staff_done_") ||
         customId.startsWith("tip_staff_clear_")
       ) {
@@ -10048,6 +10265,7 @@ async function handleButtonInteraction(interaction) {
           `每位金額：NT$${amount}\n` +
           `總金額：NT$${totalAmount}`,
       });
+      await sendTipBroadcastSafely(tipData);
       await sendTipCloseButtons(interaction.channel);
       pendingTips.delete(tipId);
       return await interaction.editReply({
@@ -10182,6 +10400,9 @@ async function handleButtonInteraction(interaction) {
             `請管理員查看 Railway Logs。\n` +
             `錯誤：${error.message || error}`,
         });
+      }
+      if (flowTipData) {
+        await sendTipBroadcastSafely(flowTipData);
       }
       if (flowTipId) {
         pendingTips.delete(flowTipId);
