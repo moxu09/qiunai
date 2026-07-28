@@ -18,11 +18,13 @@ const gifts = [
   ["tip_580_beef_noodles", "台灣牛肉麵", 580],
   ["tip_888_playful_girl", "俏皮少女", 888],
   ["tip_16888", "明燈三千", 16888],
+  ["tip_custom", "客製打賞", 0, "價格由客服填寫", true],
 ];
 
-module.exports = gifts.map(([key, name, price]) => ({
+module.exports = gifts.map(([key, name, price, description, customPrice]) => ({
   key,
   name,
   price,
-  description: `${price} ASD`,
+  description: description || `${price} ASD`,
+  customPrice: Boolean(customPrice),
 }));
