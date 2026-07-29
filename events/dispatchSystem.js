@@ -223,7 +223,7 @@ const GAME_ORDER_PANELS = [
   {
     envKey: "LOL_ORDER_CHANNEL",
     panelName: "lol",
-    imageFile: "lol-pricing.png",
+    imageFiles: ["lol-pricing.png", "aram-pricing.png", "tft-pricing.png"],
     title: "🧙 英雄聯盟下單區",
     description: "請先選擇英雄聯盟項目，下一步再選大神 / 技術 / 娛樂。",
     customId: "game_order_select_lol",
@@ -443,18 +443,25 @@ async function upsertGameOrderPanel(panel) {
       text: "深夜不關燈｜We Are Still Here",
     })
     .setTimestamp();
-  const files = panel.imageFile
-    ? [
-        {
-          attachment: path.join(PANEL_ASSET_DIR, panel.imageFile),
-          name: panel.imageFile,
-        },
-      ]
-    : [];
+  const imageFiles = Array.isArray(panel.imageFiles)
+    ? panel.imageFiles
+    : panel.imageFile
+      ? [panel.imageFile]
+      : [];
+  const files = imageFiles.map((imageFile) => ({
+    attachment: path.join(PANEL_ASSET_DIR, imageFile),
+    name: imageFile,
+  }));
 
-  if (panel.imageFile) {
-    embed.setImage(`attachment://${panel.imageFile}`);
+  if (imageFiles[0]) {
+    embed.setImage(`attachment://${imageFiles[0]}`);
   }
+  const imageEmbeds = imageFiles.slice(1).map((imageFile) =>
+    new EmbedBuilder()
+      .setColor("#cdb4db")
+      .setImage(`attachment://${imageFile}`)
+  );
+  const embeds = [embed, ...imageEmbeds];
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(panel.customId)
@@ -484,7 +491,7 @@ async function upsertGameOrderPanel(panel) {
 
   if (oldPanel) {
     await oldPanel.edit({
-      embeds: [embed],
+      embeds,
       components: [row],
       ...(files.length ? { attachments: [], files } : {}),
     });
@@ -493,7 +500,7 @@ async function upsertGameOrderPanel(panel) {
   }
 
   await channel.send({
-    embeds: [embed],
+    embeds,
     components: [row],
     ...(files.length ? { files } : {}),
   });
