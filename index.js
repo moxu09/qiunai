@@ -66,6 +66,7 @@ const {
   getTipGiftSelections,
   getTipStaffIds,
   getTipTotalAmount,
+  hasSelfTip,
   parseTipQuantityList,
 } = require("./utils/tips");
 const {
@@ -393,6 +394,9 @@ async function saveTipAllocations({
   channelId,
   countReason = null,
 }) {
+  if (hasSelfTip(tipperId, allocations.map((allocation) => allocation.staffId))) {
+    throw new Error("不能打賞自己");
+  }
   const orders = [];
   for (const allocation of allocations) {
     const tipOrder = await saveTipToPlayOrders({
@@ -421,6 +425,9 @@ async function saveTipToPlayOrdersForStaff({
   paid = true,
   countReason = null,
 }) {
+  if (hasSelfTip(tipperId, staffIds)) {
+    throw new Error("不能打賞自己");
+  }
   const orders = [];
 
   for (const staffId of staffIds) {
@@ -1097,6 +1104,11 @@ async function handleCrownPackageSelect(interaction) {
   const seen = new Set();
   const options = (players || [])
     .filter((player) => player.is_active !== false && player.discord_id)
+    .filter(
+      (player) =>
+        String(player.discord_id).trim() !==
+        String(tipData.tipperId || tipData.createdBy || "").trim(),
+    )
     .filter((player) => {
       const id = String(player.discord_id).trim();
       if (!id || seen.has(id)) return false;
@@ -1188,6 +1200,11 @@ async function handleTipGiftSelect(interaction) {
   const seenPlayerIds = new Set();
   const playerOptions = (players || [])
     .filter((player) => player.discord_id)
+    .filter(
+      (player) =>
+        String(player.discord_id).trim() !==
+        String(tipData.tipperId || tipData.createdBy || "").trim(),
+    )
     .filter((player) => {
       const id = String(player.discord_id).trim();
       if (!id) return false;
@@ -1282,6 +1299,13 @@ async function handleTipStaffSelect(interaction) {
       interaction.values.map((id) => String(id || "").trim()).filter(Boolean),
     ),
   ];
+  if (
+    hasSelfTip(tipData.tipperId || tipData.createdBy, incomingStaffIds)
+  ) {
+    return interaction.editReply({
+      content: "❌ 不能打賞自己，請選擇其他陪陪。",
+    });
+  }
   const selectedStaffIds = tipData.crownOrder
     ? incomingStaffIds.slice(0, 1)
     : [...new Set([...getTipStaffIds(tipData), ...incomingStaffIds])];
@@ -1378,6 +1402,11 @@ async function handleTipStaffSearchModal(interaction) {
   const seenIds = new Set();
   const matches = (await listActiveStaff())
     .filter((staff) => staff.is_active !== false && staff.discord_id)
+    .filter(
+      (staff) =>
+        String(staff.discord_id).trim() !==
+        String(tipData.tipperId || tipData.createdBy || "").trim(),
+    )
     .filter((staff) => {
       const id = String(staff.discord_id).trim();
       if (!id || seenIds.has(id)) return false;
@@ -1880,6 +1909,12 @@ async function handleTipStaffDone(interaction) {
 
   const selectedStaffIds = getTipStaffIds(tipData);
 
+  if (hasSelfTip(tipData.tipperId || tipData.createdBy, selectedStaffIds)) {
+    return interaction.editReply({
+      content: "❌ 不能打賞自己，請選擇其他陪陪。",
+    });
+  }
+
   if (!selectedStaffIds.length) {
     return interaction.editReply({
       content: "❌ 請至少先選擇一位受賞陪陪。",
@@ -1987,6 +2022,11 @@ async function handleTipPaymentSelect(interaction) {
 
   const { tipperId, item, amount } = tipData;
   const selectedStaffIds = getTipStaffIds(tipData);
+  if (hasSelfTip(tipperId, selectedStaffIds)) {
+    return interaction.editReply({
+      content: "❌ 不能打賞自己，請選擇其他陪陪。",
+    });
+  }
   const selectedStaffText = formatTipStaffMentions(selectedStaffIds);
   const allocations = refreshTipTotals(tipData);
   const totalAmount = allocations.reduce(
@@ -2557,6 +2597,9 @@ async function payTipWithWalletAtomic({
   amount,
   channelId,
 }) {
+  if (hasSelfTip(tipperId, staffIds)) {
+    throw new Error("不能打賞自己");
+  }
   const finishedAt = new Date().toISOString();
   const staff = await Promise.all(
     staffIds.map(async (staffId) => {
@@ -2602,6 +2645,9 @@ async function payTipAllocationsWithWalletAtomic({
   allocations,
   channelId,
 }) {
+  if (hasSelfTip(tipperId, allocations.map((allocation) => allocation.staffId))) {
+    throw new Error("不能打賞自己");
+  }
   const groups = new Map();
   for (const allocation of allocations) {
     const key = `${allocation.item}\u0000${allocation.amount}`;
@@ -7137,6 +7183,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .filter(Boolean),
           ),
         ];
+        if (hasSelfTip(interaction.user.id, selectedStaffIds)) {
+          return interaction.reply({
+            content: "❌ 不能打賞自己，請選擇其他陪陪。",
+            flags: 64,
+          });
+        }
         const tipDraftId = `manual_${interaction.user.id}_${Date.now()}`;
 
         setPendingTip(tipDraftId, {
@@ -10283,6 +10335,12 @@ async function handleButtonInteraction(interaction) {
           components: [],
         });
       }
+      if (hasSelfTip(tipperId, selectedStaffIds)) {
+        return await interaction.editReply({
+          content: "❌ 不能打賞自己，請選擇其他陪陪。",
+          components: [],
+        });
+      }
 
       const isWalletPayment =
         paymentMethod.includes("儲值卡") ||
@@ -10485,6 +10543,12 @@ async function handleButtonInteraction(interaction) {
           content: "❌ 打賞資料不完整，請重新建立打賞流程。",
         });
       }
+      if (hasSelfTip(tipperId, selectedStaffIds)) {
+        return await interaction.editReply({
+          content: "❌ 不能打賞自己，請選擇其他陪陪。",
+          components: [],
+        });
+      }
 
       let payment;
       try {
@@ -10603,6 +10667,13 @@ async function handleButtonInteraction(interaction) {
         item = "打賞";
         amount = parts[5];
 
+        if (hasSelfTip(tipperId, staffIds)) {
+          return await interaction.editReply({
+            content: "❌ 不能打賞自己，無法確認付款。",
+            components: [],
+          });
+        }
+
         await supabase
           .from("play_orders")
           .update({
@@ -10616,6 +10687,13 @@ async function handleButtonInteraction(interaction) {
           .eq("note", "打賞")
           .order("created_at", { ascending: false })
           .limit(1);
+      }
+
+      if (hasSelfTip(tipperId, staffIds)) {
+        return await interaction.editReply({
+          content: "❌ 不能打賞自己，無法確認付款。",
+          components: [],
+        });
       }
 
       const staffText = formatTipStaffMentions(staffIds);
