@@ -7415,6 +7415,50 @@ function isAdminOrStaff(interaction) {
     roleIds.some((roleId) => interaction.member.roles.cache.has(roleId))
   );
 }
+
+function getConfiguredSupportRoleIds() {
+  return [
+    process.env.STAFF_ROLE,
+    process.env.STAFF_ROLE_ID,
+    process.env.STAFF_ROLE_IDS,
+    process.env.CUSTOMER_SERVICE_ROLE_ID,
+    process.env.CUSTOMER_SERVICE_ROLE_IDS,
+    "1210642900355125288",
+  ]
+    .flatMap((value) => String(value || "").match(/\d{16,22}/g) || [])
+    .filter((roleId, index, roleIds) => roleIds.indexOf(roleId) === index);
+}
+
+async function ensureCompletedOrderChannelAccess(channel, customerId) {
+  const guild = channel.guild;
+  if (!guild) return;
+
+  const customer = await guild.members.fetch(customerId).catch(() => null);
+  if (customer) {
+    await channel.permissionOverwrites.edit(customer.user, {
+      ViewChannel: true,
+      SendMessages: true,
+      ReadMessageHistory: true,
+    });
+  } else {
+    console.warn(
+      `[完成訂單] 找不到客人 ${customerId}，略過客人權限覆寫`,
+    );
+  }
+
+  for (const roleId of getConfiguredSupportRoleIds()) {
+    const role =
+      guild.roles.cache.get(roleId) ||
+      (await guild.roles.fetch(roleId).catch(() => null));
+    if (!role) continue;
+
+    await channel.permissionOverwrites.edit(role, {
+      ViewChannel: true,
+      SendMessages: true,
+      ReadMessageHistory: true,
+    });
+  }
+}
 async function handleSlashCommand(interaction) {
   if (interaction.commandName === "指令") {
     return interaction.editReply({ content: buildCommandHelp(commands) });
@@ -11185,21 +11229,10 @@ async function handleButtonInteraction(interaction) {
             permissionFailures.map((result) => result.reason),
           );
         }
-        await interaction.channel.permissionOverwrites.edit(order.customer_id, {
-          ViewChannel: true,
-          SendMessages: true,
-          ReadMessageHistory: true,
-        });
-        if (process.env.STAFF_ROLE) {
-          await interaction.channel.permissionOverwrites.edit(
-            process.env.STAFF_ROLE,
-            {
-              ViewChannel: true,
-              SendMessages: true,
-              ReadMessageHistory: true,
-            },
-          );
-        }
+        await ensureCompletedOrderChannelAccess(
+          interaction.channel,
+          order.customer_id,
+        );
         // ===== 多位陪陪薪資平分 =====
         const playerCount = assignedPlayers.length || 1;
         const totalPrice = Number(order.final_price || order.price || 0);
