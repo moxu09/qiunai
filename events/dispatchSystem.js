@@ -62,6 +62,12 @@ function canApproveSalaryDeduction(interaction) {
   );
 }
 
+async function deferReplyOnce(interaction) {
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply({ flags: 64 });
+  }
+}
+
 async function loadAllSalaryRows(buildQuery) {
   const rows = [];
   const pageSize = 1000;
@@ -5458,7 +5464,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
 }
 
 async function handleSalaryQuoteConfirm(interaction) {
-  await interaction.deferReply({ flags: 64 });
+  await deferReplyOnce(interaction);
   if (!canApproveSalaryDeduction(interaction)) {
     return interaction.editReply({
       content: "❌ 只有客服或管理員可以確認扣薪付款。",
@@ -5517,7 +5523,7 @@ async function handleSalaryQuoteConfirm(interaction) {
 }
 
 async function handleSalaryQuoteCancel(interaction) {
-  await interaction.deferReply({ flags: 64 });
+  await deferReplyOnce(interaction);
   if (!canApproveSalaryDeduction(interaction)) {
     return interaction.editReply({
       content: "❌ 只有客服或管理員可以取消扣薪付款。",
@@ -9998,7 +10004,7 @@ async function handleServicePaymentMethodSelect(interaction) {
 }
 
 async function handleSalaryServiceConfirm(interaction) {
-  await interaction.deferReply({ flags: 64 });
+  await deferReplyOnce(interaction);
   if (!canApproveSalaryDeduction(interaction)) {
     return interaction.editReply({
       content: "❌ 只有客服或管理員可以確認扣薪付款。",
@@ -10113,7 +10119,7 @@ async function handleSalaryServiceConfirm(interaction) {
 }
 
 async function handleSalaryServiceCancel(interaction) {
-  await interaction.deferReply({ flags: 64 });
+  await deferReplyOnce(interaction);
   if (!canApproveSalaryDeduction(interaction)) {
     return interaction.editReply({
       content: "❌ 只有客服或管理員可以取消扣薪付款。",
@@ -11280,6 +11286,7 @@ module.exports = {
   getNewOrderGameOptions,
   getOrderItemOptions,
   shouldPreserveDispatchedOrder,
+  deferReplyOnce,
   submitTopupForm,
   openTopupModal,
   openPlayOrderModal,

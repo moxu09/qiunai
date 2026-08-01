@@ -155,6 +155,7 @@ const {
   getNewOrderGameOptions,
   getOrderItemOptions,
   shouldPreserveDispatchedOrder,
+  deferReplyOnce,
 } = require("../events/dispatchSystem");
 
 test("anonymous complaints never include the sender identity", () => {
@@ -230,6 +231,28 @@ test("edited dispatched orders keep their progress when the customer reconfirms"
     shouldPreserveDispatchedOrder({ assigned_player: null, status: "quoted" }),
     false,
   );
+});
+
+test("salary deduction buttons never defer an interaction twice", async () => {
+  let deferCalls = 0;
+  await deferReplyOnce({
+    deferred: true,
+    replied: false,
+    deferReply: async () => {
+      deferCalls += 1;
+    },
+  });
+  assert.equal(deferCalls, 0);
+
+  await deferReplyOnce({
+    deferred: false,
+    replied: false,
+    deferReply: async (payload) => {
+      assert.deepEqual(payload, { flags: 64 });
+      deferCalls += 1;
+    },
+  });
+  assert.equal(deferCalls, 1);
 });
 const {
   claimDailyCheckinReward,
