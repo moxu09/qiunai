@@ -151,6 +151,10 @@ const { formatComplaintSender } = require("../events/complaintSystem");
 const {
   calculateSalaryDeductionState,
 } = require("../utils/salaryDeduction");
+const {
+  getNewOrderGameOptions,
+  getOrderItemOptions,
+} = require("../events/dispatchSystem");
 
 test("anonymous complaints never include the sender identity", () => {
   const user = { id: "123456789012345678", tag: "secret-user" };
@@ -187,6 +191,23 @@ test("salary deduction uses net commissioned salary and caps advances at 1000", 
   });
   assert.equal(overLimit.projectedAdvance, 1100);
   assert.equal(overLimit.canUse, false);
+});
+
+test("new order command categories include Apex and other service items", () => {
+  const gameValues = getNewOrderGameOptions().map((option) => option.value);
+  assert.deepEqual(
+    ["特戰英豪", "三角洲行動", "Apex", "英雄聯盟", "STEAM", "其他"].every(
+      (game) => gameValues.includes(game),
+    ),
+    true,
+  );
+  assert.deepEqual(
+    getOrderItemOptions("Apex").map((option) => option.value),
+    ["大神陪玩", "技術陪玩", "娛樂陪玩"],
+  );
+  assert.ok(
+    getOrderItemOptions("其他").some((option) => option.value === "自訂需求"),
+  );
 });
 const {
   claimDailyCheckinReward,

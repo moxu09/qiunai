@@ -3189,6 +3189,75 @@ async function showSimpleServiceStart(channel, flowId, serviceType) {
     ],
   });
 }
+const NEW_ORDER_GAME_OPTIONS = [
+  {
+    label: "特戰英豪",
+    description: "VALORANT 大神 / 技術 / 娛樂",
+    value: "特戰英豪",
+  },
+  {
+    label: "三角洲行動",
+    description: "三角洲護航 / 保底 / 娛樂",
+    value: "三角洲行動",
+  },
+  {
+    label: "Apex",
+    description: "Apex 大神 / 技術 / 娛樂",
+    value: "Apex",
+  },
+  {
+    label: "英雄聯盟",
+    description: "召喚峽谷 / ARAM / 聯盟戰棋",
+    value: "英雄聯盟",
+  },
+  {
+    label: "STEAM",
+    description: "Steam 遊戲陪玩",
+    value: "STEAM",
+  },
+  {
+    label: "其他",
+    description: "其他遊戲、語音聊天或自訂需求",
+    value: "其他",
+  },
+  {
+    label: "陪聊服務",
+    description: "聊天 / 陪伴 / 出氣",
+    value: "陪聊服務",
+  },
+  {
+    label: "打賞禮物",
+    description: "打賞 / 禮物單",
+    value: "打賞禮物",
+  },
+];
+
+function getNewOrderGameOptions() {
+  return NEW_ORDER_GAME_OPTIONS.map((option) => ({ ...option }));
+}
+
+function buildNewOrderGameMenu(flowId, placeholder = "請選擇遊戲 / 服務類型") {
+  return new StringSelectMenuBuilder()
+    .setCustomId(`new_order_game_${flowId}`)
+    .setPlaceholder(placeholder)
+    .addOptions(getNewOrderGameOptions());
+}
+
+function buildNewOrderItemMenu(flowId, game) {
+  const options = getOrderItemOptions(game)
+    .slice(0, 25)
+    .map((item) => ({
+      label: item.label.slice(0, 100),
+      description: item.description.slice(0, 100),
+      value: item.value,
+    }));
+
+  return new StringSelectMenuBuilder()
+    .setCustomId(`new_order_item_${flowId}`)
+    .setPlaceholder("請選擇項目")
+    .addOptions(options);
+}
+
 async function openPlayOrderModal(interaction) {
   const flowId = `${interaction.user.id}_${Date.now()}`;
 
@@ -3215,41 +3284,7 @@ async function openPlayOrderModal(interaction) {
     pendingNewOrders.delete(flowId);
   }, ORDER_FLOW_TTL_MS);
 
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`new_order_game_${flowId}`)
-    .setPlaceholder("請選擇遊戲 / 服務類型")
-    .addOptions([
-      {
-        label: "特戰英豪",
-        description: "VALORANT 陪玩 / 技術單",
-        value: "特戰英豪",
-      },
-      {
-        label: "三角洲行動",
-        description: "三角洲護航 / 保底 / 娛樂",
-        value: "三角洲行動",
-      },
-      {
-        label: "PUBG",
-        description: "PUBG 陪玩",
-        value: "PUBG",
-      },
-      {
-        label: "STEAM",
-        description: "Steam 遊戲陪玩",
-        value: "STEAM",
-      },
-      {
-        label: "陪聊服務",
-        description: "聊天 / 陪伴 / 出氣",
-        value: "陪聊服務",
-      },
-      {
-        label: "打賞禮物",
-        description: "打賞 / 禮物單",
-        value: "打賞禮物",
-      },
-    ]);
+  const menu = buildNewOrderGameMenu(flowId);
 
   const row = new ActionRowBuilder().addComponents(menu);
 
@@ -3295,6 +3330,42 @@ function getOrderItemOptions(game) {
     ];
   }
 
+  if (game === "Apex") {
+    return [
+      {
+        label: "大神陪玩",
+        value: "大神陪玩",
+        description: "Apex 大神陪玩",
+      },
+      {
+        label: "技術陪玩",
+        value: "技術陪玩",
+        description: "Apex 技術陪玩",
+      },
+      {
+        label: "娛樂陪玩",
+        value: "娛樂陪玩",
+        description: "Apex 娛樂陪玩",
+      },
+    ];
+  }
+
+  if (game === "英雄聯盟") {
+    return [
+      {
+        label: "召喚峽谷",
+        value: "召喚峽谷",
+        description: "英雄聯盟召喚峽谷",
+      },
+      { label: "ARAM", value: "ARAM", description: "咆哮深淵" },
+      {
+        label: "聯盟戰棋",
+        value: "聯盟戰棋",
+        description: "Teamfight Tactics",
+      },
+    ];
+  }
+
   if (game === "PUBG") {
     return [
       {
@@ -3336,6 +3407,43 @@ function getOrderItemOptions(game) {
         label: "出氣服務",
         value: "出氣服務",
         description: "陪聊 / 出氣",
+      },
+    ];
+  }
+
+  if (game === "其他") {
+    return [
+      { label: "PUBG M", value: "PUBG M", description: "PUBG M" },
+      { label: "NARAKA", value: "NARAKA", description: "NARAKA" },
+      {
+        label: "Minecraft",
+        value: "Minecraft",
+        description: "Minecraft",
+      },
+      {
+        label: "王者榮耀",
+        value: "王者榮耀",
+        description: "王者榮耀",
+      },
+      {
+        label: "第五人格",
+        value: "第五人格",
+        description: "第五人格",
+      },
+      {
+        label: "語音聊天",
+        value: "語音聊天",
+        description: "語音聊天服務",
+      },
+      {
+        label: "點歌服務",
+        value: "點歌服務",
+        description: "點歌服務",
+      },
+      {
+        label: "自訂需求",
+        value: "自訂需求",
+        description: "在後續備註填寫完整內容",
       },
     ];
   }
@@ -3388,18 +3496,7 @@ async function handleNewOrderGameSelect(interaction) {
       components: [],
     });
   }
-  const options = getOrderItemOptions(game)
-    .slice(0, 25)
-    .map((item) => ({
-      label: item.label.slice(0, 100),
-      description: item.description.slice(0, 100),
-      value: item.value,
-    }));
-
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`new_order_item_${flowId}`)
-    .setPlaceholder("請選擇項目")
-    .addOptions(options);
+  const menu = buildNewOrderItemMenu(flowId, game);
 
   const row = new ActionRowBuilder().addComponents(menu);
 
@@ -4050,41 +4147,7 @@ async function handleNewOrderBack(interaction) {
     pending.note = "無";
     pendingNewOrders.set(flowId, pending);
 
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId(`new_order_game_${flowId}`)
-      .setPlaceholder("請選擇遊戲 / 服務類型")
-      .addOptions([
-        {
-          label: "特戰英豪",
-          description: "VALORANT 陪玩 / 技術單",
-          value: "特戰英豪",
-        },
-        {
-          label: "三角洲行動",
-          description: "三角洲護航 / 保底 / 娛樂",
-          value: "三角洲行動",
-        },
-        {
-          label: "PUBG",
-          description: "PUBG 陪玩",
-          value: "PUBG",
-        },
-        {
-          label: "STEAM",
-          description: "Steam 遊戲陪玩",
-          value: "STEAM",
-        },
-        {
-          label: "陪聊服務",
-          description: "聊天 / 陪伴 / 出氣",
-          value: "陪聊服務",
-        },
-        {
-          label: "打賞禮物",
-          description: "打賞 / 禮物單",
-          value: "打賞禮物",
-        },
-      ]);
+    const menu = buildNewOrderGameMenu(flowId);
 
     const row = new ActionRowBuilder().addComponents(menu);
 
@@ -6570,25 +6633,35 @@ async function handleStaffConfirmExtensionPaid(interaction) {
     content: "✅ 已確認加時付款",
   });
 }
-async function startNewOrderFlow(channel, user) {
+async function startNewOrderFlow(channel, user, initialGame = "") {
   const flowId = `${user.id}_${Date.now()}`;
+
+  const allowedGame = NEW_ORDER_GAME_OPTIONS.some(
+    (option) => option.value === initialGame,
+  )
+    ? initialGame
+    : "";
 
   pendingNewOrders.set(flowId, {
     userId: user.id,
     username: user.username,
+    guildId: channel.guildId || channel.guild?.id || process.env.GUILD_ID,
     channelId: channel.id,
 
-    game: "",
+    game: allowedGame,
     item: "",
+    rank: "",
     playerCount: 1,
     gender: "不指定",
 
     selectedPlayerType: "none",
     selectedPlayerId: null,
+    selectedPlayerIds: [],
     selectedPlayerName: "",
     selectedPlayerStatus: "",
 
     duration: "",
+    durationMinutes: 0,
     reservedTime: "",
     note: "無",
   });
@@ -6597,48 +6670,18 @@ async function startNewOrderFlow(channel, user) {
     pendingNewOrders.delete(flowId);
   }, ORDER_FLOW_TTL_MS);
 
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`new_order_game_${flowId}`)
-    .setPlaceholder("請選擇遊戲 / 服務")
-    .addOptions([
-      {
-        label: "特戰英豪",
-        description: "VALORANT 陪玩 / 技術單",
-        value: "特戰英豪",
-      },
-      {
-        label: "三角洲行動",
-        description: "三角洲護航 / 保底 / 娛樂",
-        value: "三角洲行動",
-      },
-      {
-        label: "PUBG",
-        description: "PUBG 陪玩",
-        value: "PUBG",
-      },
-      {
-        label: "STEAM",
-        description: "Steam 遊戲陪玩",
-        value: "STEAM",
-      },
-      {
-        label: "陪聊服務",
-        description: "聊天 / 陪伴 / 出氣",
-        value: "陪聊服務",
-      },
-      {
-        label: "打賞禮物",
-        description: "打賞 / 禮物單",
-        value: "打賞禮物",
-      },
-    ]);
+  const menu = allowedGame
+    ? buildNewOrderItemMenu(flowId, allowedGame)
+    : buildNewOrderGameMenu(flowId, "請選擇遊戲 / 服務");
 
   const row = new ActionRowBuilder().addComponents(menu);
 
   await channel.send({
     content:
-      `<@${user.id}> 歡迎使用深夜不關燈點單系統。\n\n` +
-      `請先選擇你要下單的遊戲 / 服務：`,
+      `<@${user.id}> 歡迎使用秋奈電競點單系統。\n\n` +
+      (allowedGame
+        ? `已選擇：${allowedGame}\n請繼續選擇要下單的項目：`
+        : `請先選擇你要下單的遊戲 / 服務：`),
     components: [row],
   });
 }
@@ -11193,6 +11236,8 @@ module.exports = {
   sendTipOrderPanel,
   startNewOrderFlow,
   sendDailyPlayerSummary,
+  getNewOrderGameOptions,
+  getOrderItemOptions,
   submitTopupForm,
   openTopupModal,
   openPlayOrderModal,

@@ -5508,6 +5508,23 @@ const commands = sortCommandDefinitions([
     .setDescription("查看分類後的指令清單"),
   new SlashCommandBuilder().setName("ping").setDescription("測試機器人"),
   new SlashCommandBuilder()
+    .setName("新增訂單")
+    .setDescription("在目前頻道新增一筆訂單並開始下單流程")
+    .addStringOption((option) =>
+      option
+        .setName("項目")
+        .setDescription("選擇要新增的遊戲或服務")
+        .setRequired(true)
+        .addChoices(
+          { name: "特戰英豪", value: "特戰英豪" },
+          { name: "三角洲行動", value: "三角洲行動" },
+          { name: "Apex", value: "Apex" },
+          { name: "英雄聯盟", value: "英雄聯盟" },
+          { name: "Steam", value: "STEAM" },
+          { name: "其他", value: "其他" },
+        ),
+    ),
+  new SlashCommandBuilder()
     .setName("我的排名")
     .setDescription("查看自己的排名"),
   new SlashCommandBuilder()
@@ -7399,6 +7416,33 @@ async function handleSlashCommand(interaction) {
   // ping
   if (interaction.commandName === "ping") {
     return interaction.editReply("Pong!");
+  }
+  if (interaction.commandName === "新增訂單") {
+    if (
+      !interaction.channel?.isTextBased?.() ||
+      typeof interaction.channel.send !== "function"
+    ) {
+      return interaction.editReply({
+        content: "❌ 這個頻道無法建立下單流程。",
+      });
+    }
+
+    const game = interaction.options.getString("項目", true);
+    try {
+      await dispatchSystem.startNewOrderFlow(
+        interaction.channel,
+        interaction.user,
+        game,
+      );
+      return interaction.editReply({
+        content: `✅ 已在目前頻道開啟「${game === "STEAM" ? "Steam" : game}」下單流程。`,
+      });
+    } catch (error) {
+      console.error("[新增訂單指令] 建立流程失敗", error);
+      return interaction.editReply({
+        content: `❌ 建立下單流程失敗：${error.message || error}`,
+      });
+    }
   }
   if (["單抽", "十抽"].includes(interaction.commandName)) {
     const count = interaction.commandName === "十抽" ? 10 : 1;
