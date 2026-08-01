@@ -15,6 +15,10 @@ const {
   isStaffInteraction,
 } = require("./workReportSystem");
 const { ORDER_FLOW_TTL_MS } = require("../utils/orderFlow");
+const {
+  DEFAULT_SALARY_ADVANCE_LIMIT,
+  calculateSalaryDeductionState,
+} = require("../utils/salaryDeduction");
 const path = require("node:path");
 
 let supabase;
@@ -26,6 +30,259 @@ const pendingNewOrders = new Map();
 const pendingTopups = new Map();
 const processingTopups = new Set();
 const pendingServiceOrders = new Map();
+const processingSalaryPayments = new Set();
+
+const QIUNAI_MANAGEMENT_ROLE_ID = "1525881173962788954";
+
+function parseRoleIds(...values) {
+  return new Set(
+    values
+      .flatMap((value) => String(value || "").match(/\d{16,22}/g) || [])
+      .filter(Boolean),
+  );
+}
+
+function canApproveSalaryDeduction(interaction) {
+  if (interaction.member?.permissions?.has(PermissionFlagsBits.Administrator)) {
+    return true;
+  }
+
+  const allowedRoleIds = parseRoleIds(
+    process.env.STAFF_ROLE,
+    process.env.STAFF_ROLE_ID,
+    process.env.CUSTOMER_SERVICE_ROLE_ID,
+    process.env.CUSTOMER_SERVICE_ROLE_IDS,
+    process.env.MANAGEMENT_ROLE_ID,
+    process.env.MANAGEMENT_ROLE_IDS,
+    QIUNAI_MANAGEMENT_ROLE_ID,
+  );
+
+  return [...allowedRoleIds].some((roleId) =>
+    interaction.member?.roles?.cache?.has(roleId),
+  );
+}
+
+async function loadAllSalaryRows(buildQuery) {
+  const rows = [];
+  const pageSize = 1000;
+
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await buildQuery().range(
+      from,
+      from + pageSize - 1,
+    );
+    if (error) throw error;
+    rows.push(...(data || []));
+    if (!data || data.length < pageSize) break;
+  }
+
+  return rows;
+}
+
+async function getSalaryDeductionEligibility(discordId, amount) {
+  const normalizedDiscordId = String(discordId || "").trim();
+  const { data: staff, error: staffError } = await supabase
+    .from("qiunai_staff")
+    .select("discord_id, discord_name, display_name, real_name")
+    .eq("discord_id", normalizedDiscordId)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (staffError) throw staffError;
+  if (!staff) throw new Error("扣薪付款僅限秋奈在職員工使用");
+
+  const walletStartIso = new Date(
+    `${process.env.SALARY_WALLET_START_DATE || "2026-07-17"}T00:00:00+08:00`,
+  ).toISOString();
+  const [walletEntries, withdrawRequests, pendingOrders, pendingAdjustments] =
+    await Promise.all([
+      loadAllSalaryRows(() =>
+        supabase
+          .from("salary_wallet_entries")
+          .select("amount")
+          .eq("app_key", "qiunai")
+          .eq("discord_id", normalizedDiscordId),
+      ),
+      loadAllSalaryRows(() =>
+        supabase
+          .from("salary_withdraw_requests")
+          .select("amount, status")
+          .eq("app_key", "qiunai")
+          .eq("discord_id", normalizedDiscordId)
+          .in("status", ["pending", "approved"]),
+      ),
+      loadAllSalaryRows(() =>
+        supabase
+          .from("qiunai_salary_orders")
+          .select("staff_salary, bonus_amount")
+          .eq("discord_id", normalizedDiscordId)
+          .gte("order_finished_at", walletStartIso)
+          .is("wallet_settled_at", null)
+          .or("is_deleted.eq.false,is_deleted.is.null")
+          .or("status.neq.已發薪,status.is.null"),
+      ),
+      loadAllSalaryRows(() =>
+        supabase
+          .from("qiunai_staff_bonus")
+          .select("amount")
+          .eq("discord_id", normalizedDiscordId)
+          .gte("created_at", walletStartIso)
+          .is("wallet_settled_at", null),
+      ),
+    ]);
+
+  return {
+    staff,
+    state: calculateSalaryDeductionState({
+      walletEntries,
+      withdrawRequests,
+      pendingOrders,
+      pendingAdjustments,
+      amount,
+      advanceLimit: DEFAULT_SALARY_ADVANCE_LIMIT,
+    }),
+  };
+}
+
+function getSalaryStaffName(staff) {
+  return (
+    staff?.display_name ||
+    staff?.real_name ||
+    staff?.discord_name ||
+    staff?.discord_id ||
+    "員工"
+  );
+}
+
+async function createSalaryDeductionPrompt({
+  channel,
+  customerId,
+  amount,
+  eligibility,
+  confirmId,
+  cancelId,
+}) {
+  const { state } = eligibility;
+  const balanceText = Math.max(0, state.availableBefore).toLocaleString("zh-TW");
+  const details = state.shortage
+    ? `目前抽成後可用薪資：NT$${balanceText}\n` +
+      `本筆金額：NT$${amount.toLocaleString("zh-TW")}\n` +
+      `不足金額：NT$${state.shortage.toLocaleString("zh-TW")}\n` +
+      `確認後預支總額：NT$${state.projectedAdvance.toLocaleString("zh-TW")} / NT$${state.advanceLimit.toLocaleString("zh-TW")}`
+    : `目前抽成後可用薪資：NT$${state.availableBefore.toLocaleString("zh-TW")}\n` +
+      `本筆扣薪：NT$${amount.toLocaleString("zh-TW")}\n` +
+      `扣除後剩餘：NT$${state.projectedBalance.toLocaleString("zh-TW")}`;
+
+  await channel.send({
+    content: `<@&${process.env.STAFF_ROLE}> <@${customerId}> 選擇了員工扣薪付款。`,
+    embeds: [
+      new EmbedBuilder()
+        .setColor(state.shortage ? "#f59e0b" : "#57F287")
+        .setTitle(state.shortage ? "⚠️ 薪資不足，是否確認預支" : "💼 確認使用扣薪付款")
+        .setDescription(
+          `${details}\n\n` +
+            "只有客服或管理員可以確認；確認後會在 ERP 新增「使用薪水點單」扣項。",
+        )
+        .setTimestamp(),
+    ],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(confirmId)
+          .setLabel("確認使用扣薪")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(cancelId)
+          .setLabel("不使用扣薪")
+          .setStyle(ButtonStyle.Danger),
+      ),
+    ],
+  });
+}
+
+async function applySalaryDeductionToOrders({
+  customerId,
+  amount,
+  orderIds,
+  finalStatus,
+  quoteStatus = null,
+}) {
+  const paymentKey = `salary:${customerId}`;
+  if (processingSalaryPayments.has(paymentKey)) {
+    throw new Error("這位員工目前有另一筆扣薪付款正在處理，請稍後再試");
+  }
+  processingSalaryPayments.add(paymentKey);
+
+  let adjustmentId = null;
+  try {
+    const eligibility = await getSalaryDeductionEligibility(customerId, amount);
+    if (!eligibility.state.canUse) {
+      throw new Error(
+        `預支上限為 NT$${eligibility.state.advanceLimit.toLocaleString("zh-TW")}，本筆確認後會預支 NT$${eligibility.state.projectedAdvance.toLocaleString("zh-TW")}`,
+      );
+    }
+
+    const { data: adjustment, error: adjustmentError } = await supabase
+      .from("qiunai_staff_bonus")
+      .insert({
+        discord_id: customerId,
+        staff_name: getSalaryStaffName(eligibility.staff),
+        title: "薪水扣除",
+        amount: -Math.abs(amount),
+        note: "使用薪水點單",
+        created_at: new Date().toISOString(),
+      })
+      .select("id")
+      .single();
+    if (adjustmentError || !adjustment) {
+      throw new Error(adjustmentError?.message || "建立 ERP 扣項失敗");
+    }
+    adjustmentId = adjustment.id;
+
+    const orderUpdate = {
+      payment_method: "扣薪",
+      paid: true,
+      paid_at: new Date().toISOString(),
+      status: finalStatus,
+      updated_at: new Date().toISOString(),
+    };
+    if (quoteStatus) orderUpdate.quote_status = quoteStatus;
+
+    const { data: updatedOrders, error: updateError } = await supabase
+      .from("play_orders")
+      .update(orderUpdate)
+      .in("id", orderIds)
+      .eq("customer_id", customerId)
+      .eq("paid", false)
+      .select("*");
+
+    if (updateError || updatedOrders?.length !== orderIds.length) {
+      if (updatedOrders?.length) {
+        await supabase
+          .from("play_orders")
+          .update({
+            payment_method: "未選擇",
+            paid: false,
+            paid_at: null,
+            status: "waiting_payment",
+            quote_status: null,
+            updated_at: new Date().toISOString(),
+          })
+          .in(
+            "id",
+            updatedOrders.map((order) => order.id),
+          );
+      }
+      await supabase.from("qiunai_staff_bonus").delete().eq("id", adjustmentId);
+      adjustmentId = null;
+      throw new Error(updateError?.message || "訂單已付款或狀態已變更");
+    }
+
+    return { eligibility, orders: updatedOrders, adjustmentId };
+  } finally {
+    processingSalaryPayments.delete(paymentKey);
+  }
+}
 
 function canCustomerOrStaffSubmit(interaction, customerId) {
   return (
@@ -4913,6 +5170,11 @@ async function sendPaymentMethodSelect(channel, order) {
         value: "月結",
       },
       {
+        label: "扣薪（員工專用）",
+        description: "由抽成後薪資扣除，每人最多預支 NT$1,000",
+        value: "扣薪",
+      },
+      {
         label: "美金轉帳",
         description: "請等待客服提供帳號",
         value: "美金轉帳",
@@ -4982,6 +5244,38 @@ async function handleQuotePaymentMethodSelect(interaction) {
       value.includes("月結付款") ||
       value.includes("月結會員")
     );
+  }
+  if (paymentMethod === "扣薪") {
+    const amount = Number(order.final_price || order.price || 0);
+    try {
+      const eligibility = await getSalaryDeductionEligibility(
+        order.customer_id,
+        amount,
+      );
+      if (!eligibility.state.canUse) {
+        return interaction.editReply({
+          content:
+            `❌ 無法使用扣薪付款：每人最多預支 NT$${eligibility.state.advanceLimit.toLocaleString("zh-TW")}。\n` +
+            `本筆確認後會預支 NT$${eligibility.state.projectedAdvance.toLocaleString("zh-TW")}，已超過上限。`,
+        });
+      }
+
+      await createSalaryDeductionPrompt({
+        channel: interaction.channel,
+        customerId: order.customer_id,
+        amount,
+        eligibility,
+        confirmId: `salary_quote_confirm_${order.id}`,
+        cancelId: `salary_quote_cancel_${order.id}`,
+      });
+      return interaction.editReply({
+        content: "✅ 已送出扣薪確認，請等待客服或管理員處理。",
+      });
+    } catch (err) {
+      return interaction.editReply({
+        content: `❌ 無法使用扣薪付款：${err.message || err}`,
+      });
+    }
   }
   let paidNow = false;
   let paidAt = null;
@@ -5097,6 +5391,93 @@ async function handleQuotePaymentMethodSelect(interaction) {
   }
   return interaction.editReply({
     content: `✅ 已選擇付款方式：${paymentMethod}`,
+  });
+}
+
+async function handleSalaryQuoteConfirm(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  if (!canApproveSalaryDeduction(interaction)) {
+    return interaction.editReply({
+      content: "❌ 只有客服或管理員可以確認扣薪付款。",
+    });
+  }
+
+  const orderId = interaction.customId.replace("salary_quote_confirm_", "");
+  const { data: order, error } = await supabase
+    .from("play_orders")
+    .select("*")
+    .eq("id", orderId)
+    .maybeSingle();
+  if (error || !order) {
+    return interaction.editReply({ content: "❌ 找不到這張訂單。" });
+  }
+  if (order.paid) {
+    return interaction.editReply({ content: "❌ 這張訂單已完成付款。" });
+  }
+
+  const amount = Number(order.final_price || order.price || 0);
+  let paymentCompleted = false;
+  try {
+    const result = await applySalaryDeductionToOrders({
+      customerId: order.customer_id,
+      amount,
+      orderIds: [order.id],
+      finalStatus: "waiting_confirm",
+    });
+    paymentCompleted = true;
+    const paidOrder = result.orders[0];
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor("#57F287")
+          .setTitle("✅ 扣薪付款完成")
+          .setDescription(
+            `<@${order.customer_id}> 已使用薪資支付 NT$${amount.toLocaleString("zh-TW")}。\n` +
+              `ERP 已新增扣項：使用薪水點單\n` +
+              `由 <@${interaction.user.id}> 確認。`,
+          )
+          .setTimestamp(),
+      ],
+    });
+    await sendCustomerFinalConfirm(interaction.channel, paidOrder);
+    return interaction.editReply({
+      content: "✅ 已確認扣薪付款，ERP 扣項已建立。",
+    });
+  } catch (err) {
+    return interaction.editReply({
+      content: paymentCompleted
+        ? `⚠️ 扣薪與 ERP 扣項已完成，但通知訊息發送失敗：${err.message || err}`
+        : `❌ 扣薪付款失敗：${err.message || err}`,
+    });
+  }
+}
+
+async function handleSalaryQuoteCancel(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  if (!canApproveSalaryDeduction(interaction)) {
+    return interaction.editReply({
+      content: "❌ 只有客服或管理員可以取消扣薪付款。",
+    });
+  }
+
+  const orderId = interaction.customId.replace("salary_quote_cancel_", "");
+  const { data: order, error } = await supabase
+    .from("play_orders")
+    .select("*")
+    .eq("id", orderId)
+    .maybeSingle();
+  if (error || !order) {
+    return interaction.editReply({ content: "❌ 找不到這張訂單。" });
+  }
+  if (order.paid) {
+    return interaction.editReply({ content: "❌ 這張訂單已完成付款。" });
+  }
+
+  await interaction.message.edit({ components: [] }).catch(() => null);
+  await sendPaymentMethodSelect(interaction.channel, order);
+  return interaction.editReply({
+    content: "✅ 已取消扣薪付款，請員工重新選擇付款方式。",
   });
 }
 async function sendCustomerFinalConfirm(channel, order) {
@@ -8539,6 +8920,11 @@ async function sendServicePaymentMethodSelect(channel, flowId, pending) {
         value: "月結",
       },
       {
+        label: "扣薪（員工專用）",
+        description: "由抽成後薪資扣除，每人最多預支 NT$1,000",
+        value: "扣薪",
+      },
+      {
         label: "匯款 / 轉帳",
         value: "匯款",
       },
@@ -9389,6 +9775,43 @@ async function handleServicePaymentMethodSelect(interaction) {
   pending.paymentMethod = paymentMethod;
   pendingServiceOrders.set(flowId, pending);
 
+  if (paymentMethod === "扣薪") {
+    const amount = getServiceFinalPrice(pending);
+    try {
+      const eligibility = await getSalaryDeductionEligibility(
+        pending.customerId,
+        amount,
+      );
+      if (!eligibility.state.canUse) {
+        pending.paymentMethod = null;
+        pendingServiceOrders.set(flowId, pending);
+        return interaction.editReply({
+          content:
+            `❌ 無法使用扣薪付款：每人最多預支 NT$${eligibility.state.advanceLimit.toLocaleString("zh-TW")}。\n` +
+            `本筆確認後會預支 NT$${eligibility.state.projectedAdvance.toLocaleString("zh-TW")}，已超過上限。`,
+        });
+      }
+
+      await createSalaryDeductionPrompt({
+        channel: interaction.channel,
+        customerId: pending.customerId,
+        amount,
+        eligibility,
+        confirmId: `salary_service_confirm_${flowId}`,
+        cancelId: `salary_service_cancel_${flowId}`,
+      });
+      return interaction.editReply({
+        content: "✅ 已送出扣薪確認，請等待客服或管理員處理。",
+      });
+    } catch (err) {
+      pending.paymentMethod = null;
+      pendingServiceOrders.set(flowId, pending);
+      return interaction.editReply({
+        content: `❌ 無法使用扣薪付款：${err.message || err}`,
+      });
+    }
+  }
+
   let order = null;
   let orderGroup = null;
   const serviceTypes = Array.isArray(pending.serviceTypes)
@@ -9487,6 +9910,150 @@ async function handleServicePaymentMethodSelect(interaction) {
 
   return interaction.editReply({
     content: `✅ 已選擇付款方式：${paymentMethod}，請依照頻道內資訊完成付款。`,
+  });
+}
+
+async function handleSalaryServiceConfirm(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  if (!canApproveSalaryDeduction(interaction)) {
+    return interaction.editReply({
+      content: "❌ 只有客服或管理員可以確認扣薪付款。",
+    });
+  }
+
+  const flowId = interaction.customId.replace("salary_service_confirm_", "");
+  const pending = pendingServiceOrders.get(flowId);
+  if (!pending || pending.paymentMethod !== "扣薪") {
+    return interaction.editReply({
+      content: "❌ 這筆扣薪付款已過期或已處理，請重新下單。",
+    });
+  }
+
+  const amount = getServiceFinalPrice(pending);
+  let createdOrderIds = [];
+  let paymentCompleted = false;
+  try {
+    const latestEligibility = await getSalaryDeductionEligibility(
+      pending.customerId,
+      amount,
+    );
+    if (!latestEligibility.state.canUse) {
+      throw new Error(
+        `本筆確認後會預支 NT$${latestEligibility.state.projectedAdvance.toLocaleString("zh-TW")}，已超過 NT$${latestEligibility.state.advanceLimit.toLocaleString("zh-TW")} 上限`,
+      );
+    }
+
+    const serviceTypes = Array.isArray(pending.serviceTypes)
+      ? pending.serviceTypes
+      : [];
+    const isValorantSplit =
+      pending.category === "valorant" &&
+      serviceTypes.includes("娛樂") &&
+      serviceTypes.includes("技術") &&
+      pending.quoteParts;
+    let order = null;
+    let orderGroup = null;
+    if (isValorantSplit) {
+      orderGroup = await createValorantSplitOrdersFromPending(
+        pending,
+        interaction.channel.id,
+      );
+      createdOrderIds = orderGroup.orders.map((item) => item.id);
+    } else {
+      order = await createPlayOrderFromServicePending(
+        pending,
+        interaction.channel.id,
+      );
+      createdOrderIds = [order.id];
+    }
+
+    await recordServiceUsedCoupon(
+      pending,
+      orderGroup ? orderGroup.orders : order,
+    );
+    const result = await applySalaryDeductionToOrders({
+      customerId: pending.customerId,
+      amount,
+      orderIds: createdOrderIds,
+      finalStatus: "pending",
+      quoteStatus: "dispatched",
+    });
+    paymentCompleted = true;
+
+    for (const paidOrder of result.orders) {
+      if (paymentHelpers.countOrderVipSpentOnce) {
+        await paymentHelpers.countOrderVipSpentOnce(
+          paidOrder,
+          "員工扣薪付款完成",
+        );
+      }
+      await sendOrderToStaffChannel(paidOrder);
+      await sendStaffOrderControlPanel(interaction.channel, paidOrder);
+    }
+
+    pendingServiceOrders.delete(flowId);
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor("#57F287")
+          .setTitle("✅ 扣薪付款完成")
+          .setDescription(
+            `<@${pending.customerId}> 已使用薪資支付 NT$${amount.toLocaleString("zh-TW")}。\n` +
+              `ERP 已新增扣項：使用薪水點單\n` +
+              `由 <@${interaction.user.id}> 確認，系統已自動派單。`,
+          )
+          .setTimestamp(),
+      ],
+    });
+    return interaction.editReply({
+      content: "✅ 已確認扣薪付款、建立 ERP 扣項並完成派單。",
+    });
+  } catch (err) {
+    if (!paymentCompleted && createdOrderIds.length) {
+      await supabase
+        .from("play_orders")
+        .update({
+          status: "cancelled",
+          updated_at: new Date().toISOString(),
+        })
+        .in("id", createdOrderIds)
+        .eq("paid", false);
+    }
+    return interaction.editReply({
+      content: paymentCompleted
+        ? `⚠️ 扣薪與 ERP 扣項已完成，但派單通知發送失敗，請客服人工確認：${err.message || err}`
+        : `❌ 扣薪付款失敗：${err.message || err}`,
+    });
+  }
+}
+
+async function handleSalaryServiceCancel(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  if (!canApproveSalaryDeduction(interaction)) {
+    return interaction.editReply({
+      content: "❌ 只有客服或管理員可以取消扣薪付款。",
+    });
+  }
+
+  const flowId = interaction.customId.replace("salary_service_cancel_", "");
+  const pending = pendingServiceOrders.get(flowId);
+  if (!pending) {
+    return interaction.editReply({
+      content: "❌ 這筆扣薪付款已過期或已處理。",
+    });
+  }
+
+  pending.paymentMethod = null;
+  pendingServiceOrders.set(flowId, pending);
+  await interaction.message.edit({ components: [] }).catch(() => null);
+  await sendServicePaymentMethodSelect(
+    interaction.channel,
+    flowId,
+    pending,
+  );
+  return interaction.editReply({
+    content: "✅ 已取消扣薪付款，請員工重新選擇付款方式。",
   });
 }
 async function handleServiceConfirmWallet(interaction) {
@@ -10281,6 +10848,22 @@ async function handleDispatchInteraction(interaction) {
     }
     if (interaction.customId.startsWith("service_use_coupon_")) {
       await handleServiceUseCoupon(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("salary_quote_confirm_")) {
+      await handleSalaryQuoteConfirm(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("salary_quote_cancel_")) {
+      await handleSalaryQuoteCancel(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("salary_service_confirm_")) {
+      await handleSalaryServiceConfirm(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("salary_service_cancel_")) {
+      await handleSalaryServiceCancel(interaction);
       return true;
     }
     if (interaction.customId.startsWith("service_confirm_wallet_group_")) {

@@ -148,6 +148,9 @@ const {
   normalizeRoleName,
 } = require("../events/employmentSystem");
 const { formatComplaintSender } = require("../events/complaintSystem");
+const {
+  calculateSalaryDeductionState,
+} = require("../utils/salaryDeduction");
 
 test("anonymous complaints never include the sender identity", () => {
   const user = { id: "123456789012345678", tag: "secret-user" };
@@ -156,6 +159,34 @@ test("anonymous complaints never include the sender identity", () => {
   assert.equal(anonymousText.includes(user.id), false);
   assert.equal(anonymousText.includes(user.tag), false);
   assert.match(formatComplaintSender(false, user), /123456789012345678/);
+});
+
+test("salary deduction uses net commissioned salary and caps advances at 1000", () => {
+  const enough = calculateSalaryDeductionState({
+    walletEntries: [{ amount: 500 }],
+    withdrawRequests: [{ amount: 100, status: "approved" }],
+    pendingOrders: [{ staff_salary: 700, bonus_amount: 50 }],
+    pendingAdjustments: [{ amount: -50 }],
+    amount: 1000,
+  });
+  assert.equal(enough.availableBefore, 1100);
+  assert.equal(enough.shortage, 0);
+  assert.equal(enough.canUse, true);
+
+  const advance = calculateSalaryDeductionState({
+    pendingOrders: [{ staff_salary: 300 }],
+    amount: 900,
+  });
+  assert.equal(advance.shortage, 600);
+  assert.equal(advance.projectedAdvance, 600);
+  assert.equal(advance.canUse, true);
+
+  const overLimit = calculateSalaryDeductionState({
+    pendingAdjustments: [{ amount: -300 }],
+    amount: 800,
+  });
+  assert.equal(overLimit.projectedAdvance, 1100);
+  assert.equal(overLimit.canUse, false);
 });
 const {
   claimDailyCheckinReward,
