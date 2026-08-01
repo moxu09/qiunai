@@ -8,7 +8,7 @@ const {
   TextInputStyle,
 } = require("discord.js");
 
-const PANEL_TITLE = "📮 執行長專屬投訴表單";
+const PANEL_TITLE = "您的建議，是我們成長的動力";
 
 function formatTaipeiDateTime(date = new Date()) {
   return new Intl.DateTimeFormat("zh-TW", {
@@ -77,7 +77,11 @@ function createComplaintSystem(client, config) {
     const existing = recent?.find(
       (message) =>
         message.author.id === client.user.id &&
-        message.embeds.some((embed) => embed.title === PANEL_TITLE),
+        message.components.some((row) =>
+          row.components.some(
+            (component) => component.customId === "complaint_open_anonymous",
+          ),
+        ),
     );
     const payload = buildPanelPayload();
     if (existing) {
