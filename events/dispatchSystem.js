@@ -5747,6 +5747,7 @@ async function handleCustomerConfirmOrder(interaction) {
   }
 
   await sendOrderToStaffChannel(updatedOrder);
+  await sendStaffOrderControlPanel(interaction.channel, updatedOrder);
 
   await interaction.channel.send({
     embeds: [
