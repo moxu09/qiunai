@@ -5509,7 +5509,13 @@ const commands = sortCommandDefinitions([
   new SlashCommandBuilder().setName("ping").setDescription("測試機器人"),
   new SlashCommandBuilder()
     .setName("新增訂單")
-    .setDescription("在目前頻道新增一筆訂單並開始下單流程")
+    .setDescription("客服替指定老闆在目前頻道新增訂單")
+    .addUserOption((option) =>
+      option
+        .setName("老闆")
+        .setDescription("選擇這筆訂單的老闆")
+        .setRequired(true),
+    )
     .addStringOption((option) =>
       option
         .setName("項目")
@@ -7418,6 +7424,11 @@ async function handleSlashCommand(interaction) {
     return interaction.editReply("Pong!");
   }
   if (interaction.commandName === "新增訂單") {
+    if (!isAdminOrStaff(interaction)) {
+      return interaction.editReply({
+        content: "❌ 只有客服或管理員可以使用新增訂單指令。",
+      });
+    }
     if (
       !interaction.channel?.isTextBased?.() ||
       typeof interaction.channel.send !== "function"
@@ -7427,15 +7438,23 @@ async function handleSlashCommand(interaction) {
       });
     }
 
+    const customer = interaction.options.getUser("老闆", true);
+    if (customer.bot) {
+      return interaction.editReply({
+        content: "❌ 老闆不能選擇機器人帳號。",
+      });
+    }
     const game = interaction.options.getString("項目", true);
     try {
       await dispatchSystem.startNewOrderFlow(
         interaction.channel,
-        interaction.user,
+        customer,
         game,
       );
       return interaction.editReply({
-        content: `✅ 已在目前頻道開啟「${game === "STEAM" ? "Steam" : game}」下單流程。`,
+        content:
+          `✅ 已替 <@${customer.id}> 在目前頻道開啟` +
+          `「${game === "STEAM" ? "Steam" : game}」下單流程。`,
       });
     } catch (error) {
       console.error("[新增訂單指令] 建立流程失敗", error);
