@@ -1174,7 +1174,7 @@ async function applyExtensionToPlayOrder(extension) {
 
   const newNote = `${oldNote}\n[加時] ${extensionText}｜+NT$${amount}`.trim();
 
-  const { error: updateOrderError } = await supabase
+  const { data: updatedOrder, error: updateOrderError } = await supabase
     .from("play_orders")
     .update({
       final_price: newPrice,
@@ -1183,18 +1183,32 @@ async function applyExtensionToPlayOrder(extension) {
       note: newNote,
       updated_at: new Date().toISOString(),
     })
-    .eq("id", order.id);
+    .eq("id", order.id)
+    .select()
+    .single();
 
-  if (updateOrderError) {
+  if (updateOrderError || !updatedOrder) {
     console.error("[加時進薪資網] 更新原訂單失敗", updateOrderError);
-    throw updateOrderError;
+    await supabase
+      .from("order_extensions")
+      .update({ applied_to_salary: false, applied_at: null })
+      .eq("id", extension.id);
+    throw updateOrderError || new Error("更新原訂單失敗");
   }
 
+  // 加時是獨立的一段服務：原訂單更新總價，同時在每位陪陪的填單區
+  // 建立一張可報時的新單。createReports 以 extension id 去重，不會重複建立。
+  const extensionReports = await workReportSystem.sendForPaidExtension(
+    lockedExtension,
+    updatedOrder
+  );
+
   return {
-    order,
+    order: updatedOrder,
     oldPrice,
     newPrice,
     amount,
+    extensionReportCount: extensionReports.length,
   };
 }
 function formatAvailableTime(player) {
@@ -5451,6 +5465,15 @@ async function submitStaffEditOrder(interaction) {
     });
   }
 
+  const { data: currentOrder, error: currentOrderError } = await supabase
+    .from("play_orders")
+    .select("*")
+    .eq("id", orderId)
+    .single();
+  if (currentOrderError || !currentOrder) {
+    return interaction.editReply({ content: "❌ 找不到這張訂單" });
+  }
+
   const service = interaction.fields.getTextInputValue("service") || "";
 
   const time = interaction.fields.getTextInputValue("time") || "";
@@ -5461,10 +5484,12 @@ async function submitStaffEditOrder(interaction) {
     interaction.fields.getTextInputValue("preferred_player") || "";
   const playerCountRaw =
     interaction.fields.getTextInputValue("player_count") || "";
-  const updateData = {
-    quote_status: "fixed",
-    status: "quoted",
-  };
+  const preserveDispatch =
+    Boolean(currentOrder.assigned_player) &&
+    ["pending", "accepted", "completed"].includes(currentOrder.status);
+  const updateData = preserveDispatch
+    ? {}
+    : { quote_status: "fixed", status: "quoted" };
   if (playerCountRaw.trim()) {
     const playerCount = Number(playerCountRaw.replace(/[^\d]/g, ""));
     if (!playerCount || playerCount <= 0) {
@@ -5531,6 +5556,15 @@ async function submitStaffEditOrder(interaction) {
       content: "❌ 修改訂單失敗，請查看後台 Logs",
     });
   }
+  try {
+    await workReportSystem.syncAcceptedOrder(updatedOrder);
+  } catch (syncError) {
+    console.error("[客服修改訂單] 同步填單失敗", syncError);
+    return interaction.editReply({
+      content:
+        "⚠️ 訂單已修改，但同步陪陪填單失敗，請查看 Railway Logs 後再操作。",
+    });
+  }
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -5574,11 +5608,13 @@ async function submitStaffEditOrder(interaction) {
         )
         .setTimestamp(),
     ],
-    components: [row],
+    components: preserveDispatch ? [] : [row],
   });
 
   return interaction.editReply({
-    content: "✅ 已修改訂單，並重新送出給闆闆確認",
+    content: preserveDispatch
+      ? "✅ 已修改訂單，原訂單與既有陪陪填單已同步更新"
+      : "✅ 已修改訂單，並重新送出給闆闆確認",
   });
 }
 async function openExtendOrderModal(interaction) {
@@ -5685,6 +5721,7 @@ async function submitExtendOrder(interaction) {
       payment_method: "未選擇",
       paid: false,
       status: "pending",
+      applied_to_salary: false,
       note,
     })
     .select()
@@ -6911,6 +6948,15 @@ async function submitChangeOrderPrice(interaction) {
     console.log("[更改金額失敗]", updateError);
     return interaction.editReply({
       content: "❌ 更改金額失敗",
+    });
+  }
+  try {
+    await workReportSystem.syncAcceptedOrder(updated);
+  } catch (syncError) {
+    console.error("[更改金額同步填單失敗]", syncError);
+    return interaction.editReply({
+      content:
+        "⚠️ 原訂單金額已更新，但陪陪填單同步失敗，請查看 Railway Logs。",
     });
   }
 

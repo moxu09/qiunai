@@ -55,9 +55,11 @@ const TIP_GIFTS = require("./config/tipGifts");
 const TIP_BROADCASTS = require("./config/tipBroadcasts");
 const CROWN_PACKAGES = require("./config/crownPackages");
 const employmentConfig = require("./config/employment");
+const complaintConfig = require("./config/complaint");
 const {
   createEmploymentSystem,
 } = require("./events/employmentSystem");
+const { createComplaintSystem } = require("./events/complaintSystem");
 const {
   buildTipAllocations,
   formatTipStaffMentions,
@@ -128,6 +130,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
   ],
 });
@@ -139,6 +142,7 @@ const deviceAuditReviewerSync = createDeviceAuditReviewerSync({
     process.env.DEVICE_AUDIT_REVIEWER_ROLE_ID || "1513626379437211900",
 });
 const employmentSystem = createEmploymentSystem(client, employmentConfig);
+const complaintSystem = createComplaintSystem(client, complaintConfig);
 const runtimeHealth = createHealthState("rainbot-qiunai");
 const runtimeServer = createHealthServer(runtimeHealth);
 const shutdownRuntime = installProcessHandlers({
@@ -3554,6 +3558,7 @@ async function handleSlashExtendOrder(interaction) {
       payment_method: "未選擇",
       paid: false,
       status: "pending",
+      applied_to_salary: false,
       note,
     })
     .select()
@@ -6097,6 +6102,7 @@ client.once(Events.ClientReady, async () => {
       { name: "扭蛋面板", run: () => sendGachaPanel(client) },
       { name: "私人房間面板", run: () => sendPrivateRoomPanel(client) },
       { name: "入職申請面板", run: () => employmentSystem.sendPanel() },
+      { name: "執行長投訴面板", run: () => complaintSystem.sendPanel() },
       {
         name: "電腦稽核審核員權限",
         run: () => deviceAuditReviewerSync.syncAll(),
@@ -6528,6 +6534,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    if (await complaintSystem.handleInteraction(interaction)) return;
     if (await employmentSystem.handleInteraction(interaction)) return;
 
     // ===== Modal Submit：交給 dispatchSystem =====
@@ -9423,6 +9430,7 @@ async function createMonthlyBillPaymentChannel(interaction, bill) {
   return payChannel;
 }
 const dailyCheckinInFlight = new Set();
+const reorderInFlight = new Set();
 
 // ===== 完整按鈕交互處理 =====
 async function handleButtonInteraction(interaction) {
@@ -10840,6 +10848,74 @@ async function handleButtonInteraction(interaction) {
       });
     }
 
+    // ===== 客人在同一頻道再下一單 =====
+    if (customId === "customer_reorder_same_channel") {
+      const { data: order, error: orderError } = await supabase
+        .from("play_orders")
+        .select("*")
+        .eq("channel_id", interaction.channel.id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (orderError || !order) {
+        console.error("[再下一單] 找不到訂單", orderError);
+        return await interaction.editReply({
+          content: "❌ 找不到此頻道對應的已完成訂單",
+        });
+      }
+
+      const customerId = String(order.customer_id || "").trim();
+      const isCustomer = interaction.user.id === customerId;
+      const isStaff =
+        interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
+        interaction.member.roles.cache.has(process.env.STAFF_ROLE) ||
+        (process.env.CUSTOMER_SERVICE_ROLE_ID &&
+          interaction.member.roles.cache.has(
+            process.env.CUSTOMER_SERVICE_ROLE_ID,
+          ));
+      if (!customerId || (!isCustomer && !isStaff)) {
+        return await interaction.editReply({
+          content: "❌ 只有建立此訂單的客人或客服可以再下一單",
+        });
+      }
+      if (order.status !== "completed") {
+        return await interaction.editReply({
+          content: "❌ 最新一筆訂單尚未完成，不能重複開啟下單流程",
+        });
+      }
+
+      const reorderKey = `${interaction.channel.id}:${order.id}`;
+      if (reorderInFlight.has(reorderKey)) {
+        return await interaction.editReply({
+          content: "⚠️ 新的下單流程正在建立中，請不要重複點擊",
+        });
+      }
+      reorderInFlight.add(reorderKey);
+      try {
+        const customer = await client.users.fetch(customerId);
+        await dispatchSystem.startNewOrderFlow(interaction.channel, customer);
+        await interaction.message
+          .edit({
+            content: `🛒 <@${customerId}> 選擇在此頻道再下一單。`,
+            components: [],
+          })
+          .catch(() => {});
+        await interaction.channel.send({
+          content: `<@&${process.env.STAFF_ROLE}> 客人已在原頻道開啟新的下單流程。`,
+        });
+        return await interaction.editReply({
+          content: "✅ 已在目前頻道開啟新的下單內容選擇",
+        });
+      } catch (error) {
+        console.error("[再下一單] 建立流程失敗", error);
+        return await interaction.editReply({
+          content: "❌ 建立新的下單流程失敗，請稍後再試",
+        });
+      } finally {
+        reorderInFlight.delete(reorderKey);
+      }
+    }
+
     // ===== 客人確認關閉訂單 =====
     if (customId === "customer_confirm_close_order") {
       const { data: order, error: orderError } = await supabase
@@ -11026,6 +11102,41 @@ async function handleButtonInteraction(interaction) {
             completed_at: new Date().toISOString(),
           })
           .eq("id", order.id);
+        // 完成後立刻收回所有接單陪陪的頻道權限；客人與客服保留存取，
+        // 讓後續關閉確認、補充說明與客服處理仍可在原頻道完成。
+        const permissionResults = await Promise.allSettled(
+          assignedPlayers.map((playerId) =>
+            interaction.channel.permissionOverwrites.edit(playerId, {
+              ViewChannel: false,
+              SendMessages: false,
+              ReadMessageHistory: false,
+            }),
+          ),
+        );
+        const permissionFailures = permissionResults.filter(
+          (result) => result.status === "rejected",
+        );
+        if (permissionFailures.length) {
+          console.error(
+            "[完成訂單] 收回陪陪頻道權限失敗",
+            permissionFailures.map((result) => result.reason),
+          );
+        }
+        await interaction.channel.permissionOverwrites.edit(order.customer_id, {
+          ViewChannel: true,
+          SendMessages: true,
+          ReadMessageHistory: true,
+        });
+        if (process.env.STAFF_ROLE) {
+          await interaction.channel.permissionOverwrites.edit(
+            process.env.STAFF_ROLE,
+            {
+              ViewChannel: true,
+              SendMessages: true,
+              ReadMessageHistory: true,
+            },
+          );
+        }
         // ===== 多位陪陪薪資平分 =====
         const playerCount = assignedPlayers.length || 1;
         const totalPrice = Number(order.final_price || order.price || 0);
@@ -11090,9 +11201,14 @@ async function handleButtonInteraction(interaction) {
           .setCustomId("customer_cancel_close_order")
           .setLabel("❌ 暫不關閉")
           .setStyle(ButtonStyle.Secondary);
+        const reorderButton = new ButtonBuilder()
+          .setCustomId("customer_reorder_same_channel")
+          .setLabel("🛒 再下一單")
+          .setStyle(ButtonStyle.Primary);
         const row = new ActionRowBuilder().addComponents(
           confirmCloseButton,
           cancelCloseButton,
+          reorderButton,
         );
         let closeTargetId = null;
         // 如果是陪玩訂單，從 play_orders 找客人
