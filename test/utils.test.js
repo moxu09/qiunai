@@ -154,6 +154,7 @@ const {
 const {
   getNewOrderGameOptions,
   getOrderItemOptions,
+  shouldPreserveDispatchedOrder,
 } = require("../events/dispatchSystem");
 
 test("anonymous complaints never include the sender identity", () => {
@@ -207,6 +208,27 @@ test("new order command categories include Apex and other service items", () => 
   );
   assert.ok(
     getOrderItemOptions("其他").some((option) => option.value === "自訂需求"),
+  );
+});
+
+test("edited dispatched orders keep their progress when the customer reconfirms", () => {
+  assert.equal(
+    shouldPreserveDispatchedOrder({
+      assigned_player: "123456789012345678",
+      status: "accepted",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldPreserveDispatchedOrder({
+      assigned_player: "123456789012345678",
+      status: "completed",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldPreserveDispatchedOrder({ assigned_player: null, status: "quoted" }),
+    false,
   );
 });
 const {

@@ -5683,6 +5683,14 @@ async function handleStaffConfirmOrderPaid(interaction) {
     content: "✅ 已標記為已付款",
   });
 }
+
+function shouldPreserveDispatchedOrder(order) {
+  return (
+    Boolean(order?.assigned_player) &&
+    ["pending", "accepted", "completed"].includes(order?.status)
+  );
+}
+
 async function handleCustomerConfirmOrder(interaction) {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({
@@ -5728,6 +5736,33 @@ async function handleCustomerConfirmOrder(interaction) {
     });
   }
 
+  if (shouldPreserveDispatchedOrder(order)) {
+    const { error: confirmEditError } = await supabase
+      .from("play_orders")
+      .update({
+        confirmed_by_customer: true,
+        quote_status: "dispatched",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", order.id);
+    if (confirmEditError) {
+      console.error("[闆闆確認修改內容] 更新失敗", confirmEditError);
+      return interaction.editReply({
+        content: "❌ 確認修改內容失敗，請稍後再試",
+      });
+    }
+
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.channel.send({
+      content:
+        `✅ <@${order.customer_id}> 已確認客服修改後的訂單內容正確。\n` +
+        `原訂單進度與已接單陪陪維持不變。`,
+    });
+    return interaction.editReply({
+      content: "✅ 已確認修改後的訂單內容正確",
+    });
+  }
+
   const { data: updatedOrder, error: updateError } = await supabase
     .from("play_orders")
     .update({
@@ -5748,6 +5783,7 @@ async function handleCustomerConfirmOrder(interaction) {
 
   await sendOrderToStaffChannel(updatedOrder);
   await sendStaffOrderControlPanel(interaction.channel, updatedOrder);
+  await interaction.message.edit({ components: [] }).catch(() => null);
 
   await interaction.channel.send({
     embeds: [
@@ -5803,12 +5839,18 @@ async function handleCustomerOrderWrong(interaction) {
     });
   }
 
+  const preserveDispatch = shouldPreserveDispatchedOrder(order);
   await supabase
     .from("play_orders")
-    .update({
-      quote_status: "need_fix",
-      status: "quoted",
-    })
+    .update(
+      preserveDispatch
+        ? { quote_status: "need_fix", updated_at: new Date().toISOString() }
+        : {
+            quote_status: "need_fix",
+            status: "quoted",
+            updated_at: new Date().toISOString(),
+          },
+    )
     .eq("id", order.id);
 
   const staffFixRow = new ActionRowBuilder().addComponents(
@@ -5929,9 +5971,7 @@ async function submitStaffEditOrder(interaction) {
     interaction.fields.getTextInputValue("preferred_player") || "";
   const playerCountRaw =
     interaction.fields.getTextInputValue("player_count") || "";
-  const preserveDispatch =
-    Boolean(currentOrder.assigned_player) &&
-    ["pending", "accepted", "completed"].includes(currentOrder.status);
+  const preserveDispatch = shouldPreserveDispatchedOrder(currentOrder);
   const updateData = preserveDispatch
     ? {}
     : { quote_status: "fixed", status: "quoted" };
@@ -6014,7 +6054,7 @@ async function submitStaffEditOrder(interaction) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`customer_confirm_order_${updatedOrder.id}`)
-      .setLabel("確認訂單")
+      .setLabel("確認正確")
       .setEmoji("✅")
       .setStyle(ButtonStyle.Success),
 
@@ -6053,12 +6093,12 @@ async function submitStaffEditOrder(interaction) {
         )
         .setTimestamp(),
     ],
-    components: preserveDispatch ? [] : [row],
+    components: [row],
   });
 
   return interaction.editReply({
     content: preserveDispatch
-      ? "✅ 已修改訂單，原訂單與既有陪陪填單已同步更新"
+      ? "✅ 已修改訂單並重新送出確認，原訂單與既有陪陪填單已同步更新"
       : "✅ 已修改訂單，並重新送出給闆闆確認",
   });
 }
@@ -11239,6 +11279,7 @@ module.exports = {
   sendDailyPlayerSummary,
   getNewOrderGameOptions,
   getOrderItemOptions,
+  shouldPreserveDispatchedOrder,
   submitTopupForm,
   openTopupModal,
   openPlayOrderModal,
