@@ -33,6 +33,7 @@ test("tips cannot target the tipper", () => {
 });
 const {
   buildTipBroadcastContent,
+  splitTipBroadcastAllocations,
 } = require("../utils/tipBroadcasts");
 const {
   buildRedPacketShares,
@@ -116,6 +117,17 @@ test("打賞播報可依老闆選擇顯示帳號或匿名", () => {
   assert.match(anonymousContent, /匿名闆闆/);
   assert.doesNotMatch(anonymousContent, /<@430903870135336962>/);
 });
+
+test("多人打賞播報拆成每位陪陪各自一筆", () => {
+  const jobs = splitTipBroadcastAllocations([
+    { staffId: "staff-a", lines: [{ name: "煙火", quantity: 2 }] },
+    { staffId: "staff-b", lines: [{ name: "煙火", quantity: 1 }] },
+  ]);
+  assert.deepEqual(
+    jobs.map((job) => [job.staffId, job.line.quantity]),
+    [["staff-a", 2], ["staff-b", 1]],
+  );
+});
 const { ORDER_FLOW_TTL_MS } = require("../utils/orderFlow");
 const {
   isCouponInventoryItem,
@@ -134,6 +146,15 @@ const {
   scheduleMapExpiry,
   validateEnvironment,
 } = require("../utils/runtime");
+const { getTaipeiScheduleParts } = require("../utils/dailySelfCheck");
+
+test("每日自動偵錯使用台北時間排程", () => {
+  assert.deepEqual(getTaipeiScheduleParts(new Date("2026-08-06T20:10:00Z")), {
+    date: "2026-08-07",
+    hour: 4,
+    minute: 10,
+  });
+});
 const {
   commandDefinitionsMatch,
   syncApplicationCommands,

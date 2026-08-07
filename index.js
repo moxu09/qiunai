@@ -24,6 +24,9 @@ const {
   syncApplicationCommands,
 } = require("./runtime/commandRegistry");
 const { runStartupGroup } = require("./runtime/startupOrchestrator");
+const {
+  startDailySelfCheckScheduler,
+} = require("./utils/dailySelfCheck");
 const { createClient } = require("@supabase/supabase-js");
 const { createAccountingLedger } = require("./utils/accounting");
 const { createAllianceMembership } = require("./utils/allianceMembership");
@@ -81,6 +84,7 @@ const {
 } = require("./utils/reviews");
 const {
   buildTipBroadcastContent,
+  splitTipBroadcastAllocations,
 } = require("./utils/tipBroadcasts");
 const {
   Client,
@@ -473,25 +477,8 @@ function getTipBroadcastEntry(item) {
 async function sendTipBroadcastSafely(tipData) {
   if (!tipData?.broadcastEnabled || tipData.crownOrder) return;
 
-  const staffIds = getTipStaffIds(tipData);
   const allocations = buildTipAllocations(tipData);
-  const entries = getTipGiftSelections(tipData)
-    .map((gift) => {
-      const entry = getTipBroadcastEntry(gift.name);
-      if (!entry) return null;
-      const quantity = allocations.reduce(
-        (sum, allocation) =>
-          sum +
-          Number(
-            allocation.lines.find((line) => line.key === gift.key)?.quantity ||
-              0,
-          ),
-        0,
-      );
-      return { ...entry, quantity };
-    })
-    .filter(Boolean);
-  if (!entries.length || !staffIds.length) return;
+  if (!allocations.length) return;
 
   try {
     const channel = await client.channels
@@ -500,36 +487,38 @@ async function sendTipBroadcastSafely(tipData) {
     if (!channel?.isTextBased()) {
       throw new Error(`找不到打賞播報頻道 ${TIP_BROADCAST_CHANNEL_ID}`);
     }
-    const mentionIds = tipData.broadcastAnonymous
-      ? staffIds
-      : [tipData.tipperId, ...staffIds];
-    for (const entry of entries) {
-      const imagePath = path.join(
-        __dirname,
-        "assets",
-        "tip-gifts",
-        entry.broadcast.imageFile,
-      );
-      await channel.send({
-        content: buildTipBroadcastContent({
-          anonymous: Boolean(tipData.broadcastAnonymous),
-          description: entry.broadcast.description,
-          emoji: entry.broadcast.emoji,
-          giftName:
-            entry.quantity > 1
-              ? `${entry.gift.name} × ${entry.quantity}`
-              : entry.gift.name,
-          staffIds,
-          tipperId: tipData.tipperId,
-        }),
-        files: [
-          {
-            attachment: imagePath,
-            name: entry.broadcast.imageFile,
-          },
-        ],
-        allowedMentions: { users: [...new Set(mentionIds)] },
-      });
+    for (const { staffId, line } of splitTipBroadcastAllocations(allocations)) {
+        const entry = getTipBroadcastEntry(line.name);
+        if (!entry) continue;
+        const imagePath = path.join(
+          __dirname,
+          "assets",
+          "tip-gifts",
+          entry.broadcast.imageFile,
+        );
+        const mentionIds = tipData.broadcastAnonymous
+          ? [staffId]
+          : [tipData.tipperId, staffId];
+        await channel.send({
+          content: buildTipBroadcastContent({
+            anonymous: Boolean(tipData.broadcastAnonymous),
+            description: entry.broadcast.description,
+            emoji: entry.broadcast.emoji,
+            giftName:
+              line.quantity > 1
+                ? `${entry.gift.name} × ${line.quantity}`
+                : entry.gift.name,
+            staffIds: [staffId],
+            tipperId: tipData.tipperId,
+          }),
+          files: [
+            {
+              attachment: imagePath,
+              name: entry.broadcast.imageFile,
+            },
+          ],
+          allowedMentions: { users: [...new Set(mentionIds)] },
+        });
     }
     await channel.send({
       content:
@@ -6149,6 +6138,23 @@ client.once(Events.ClientReady, async () => {
       {
         name: "秋奈薪資每日報告排程",
         run: () => startQiunaiSalaryReportCron(client, supabase),
+      },
+      {
+        name: "每日自動偵錯排程",
+        run: () =>
+          startDailySelfCheckScheduler({
+            client,
+            supabase,
+            guildId: process.env.GUILD_ID,
+            healthState: runtimeHealth,
+            repairTasks: [
+              { name: "分區下單面板", run: () => dispatchSystem.sendGameOrderPanels() },
+              { name: "打賞下單面板", run: () => dispatchSystem.sendTipOrderPanel() },
+              { name: "報單面板", run: () => dispatchSystem.sendWorkReportPanel() },
+              { name: "入職申請面板", run: () => employmentSystem.sendPanel() },
+              { name: "投訴面板", run: () => complaintSystem.sendPanel() },
+            ],
+          }),
       },
     ],
     { concurrency: 3, healthState: runtimeHealth },

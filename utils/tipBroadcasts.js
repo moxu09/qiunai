@@ -17,6 +17,16 @@ function buildTipBroadcastContent({
   );
 }
 
+function splitTipBroadcastAllocations(allocations = []) {
+  return allocations.flatMap((allocation) =>
+    (allocation.lines || []).map((line) => ({
+      staffId: allocation.staffId,
+      line,
+    })),
+  );
+}
+
 module.exports = {
   buildTipBroadcastContent,
+  splitTipBroadcastAllocations,
 };
