@@ -6132,6 +6132,10 @@ client.once(Events.ClientReady, async () => {
       { name: "每日陪玩總結排程", run: startDailySummaryScheduler },
       { name: "月結帳單排程", run: startMonthlyBillScheduler },
       {
+        name: "考核討論串刪除排程",
+        run: () => employmentSystem.startCleanupScheduler(),
+      },
+      {
         name: "冠名到期提醒排程",
         run: () => dispatchSystem.startCrownReminderScheduler(),
       },
