@@ -34,6 +34,18 @@ const processingSalaryPayments = new Set();
 
 const QIUNAI_MANAGEMENT_ROLE_ID = "1525881173962788954";
 
+async function getNextPlayOrderNumber() {
+  const { data, error } = await supabase.rpc("next_play_order_number");
+  const orderNo = String(data || "").trim();
+
+  if (error || !/^ORD-\d{10,}$/.test(orderNo)) {
+    console.error("[訂單編號] 取得流水號失敗", error || data);
+    throw new Error(error?.message || "無法取得訂單編號");
+  }
+
+  return orderNo;
+}
+
 function parseRoleIds(...values) {
   return new Set(
     values
@@ -4470,7 +4482,7 @@ async function submitNewOrderNote(interaction) {
   return await createWaitingQuoteOrder(interaction, flowId, pending);
 }
 async function createWaitingQuoteOrder(interaction, flowId, pending) {
-  const orderNo = `DQ-${Date.now()}`;
+  const orderNo = await getNextPlayOrderNumber();
 
   const service = `${pending.game}｜${pending.item}`;
 
@@ -9538,12 +9550,13 @@ async function createPlayOrderFromServicePending(pending, channelId) {
   const preferredPlayer = pending.selectedPlayerIds?.length
     ? pending.selectedPlayerIds.join(",")
     : null;
+  const orderNo = await getNextPlayOrderNumber();
 
   const { data, error } = await supabase
     .from("play_orders")
     .insert({
       guild_id: pending.guildId || process.env.GUILD_ID,
-      order_no: `ORD-${Date.now()}`,
+      order_no: orderNo,
 
       customer_id: pending.customerId,
       customer_username: pending.customerUsername || `<@${pending.customerId}>`,
