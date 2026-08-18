@@ -2367,13 +2367,10 @@ async function saveTipToPlayOrders({
   });
   return data;
 }
-function getManualCommissionRate(tier) {
-  if (tier === "rate_80") return 80;
-  if (tier === "rate_85") return 85;
-  if (tier === "rate_90") return 90;
-  if (tier === "manager_95") return 95;
-  return null;
-}
+const {
+  getManualCommissionRate,
+  getOrderCommissionBase,
+} = require("./utils/salaryCommission");
 
 function getTaipeiMonthText(date = new Date()) {
   const taipeiDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
@@ -2460,17 +2457,6 @@ async function getQiunaiCommissionInfo(
   discordId,
   finishedAt = new Date().toISOString(),
 ) {
-  const finishedDate = new Date(finishedAt);
-
-  const openingEnd = new Date("2026-09-01T00:00:00+08:00");
-
-  if (finishedDate < openingEnd) {
-    return {
-      rate: 90,
-      level: "開幕期 90%",
-    };
-  }
-
   const staff = await getStaffByDiscordId(discordId);
 
   const manualRate = getManualCommissionRate(staff?.commission_tier);
@@ -2479,6 +2465,17 @@ async function getQiunaiCommissionInfo(
     return {
       rate: manualRate,
       level: manualRate === 95 ? "主管津貼 95%" : `手動檔位 ${manualRate}%`,
+    };
+  }
+
+  const finishedDate = new Date(finishedAt);
+
+  const openingEnd = new Date("2026-09-01T00:00:00+08:00");
+
+  if (finishedDate < openingEnd) {
+    return {
+      rate: 90,
+      level: "開幕期 90%",
     };
   }
 
@@ -11320,8 +11317,9 @@ async function handleButtonInteraction(interaction) {
         );
         // ===== 多位陪陪薪資平分 =====
         const playerCount = assignedPlayers.length || 1;
-        const totalPrice = Number(order.final_price || order.price || 0);
-        const splitAmount = Math.floor(totalPrice / playerCount);
+        const paidTotal = Number(order.final_price || order.price || 0);
+        const salaryBaseTotal = getOrderCommissionBase(order);
+        const splitAmount = Math.floor(salaryBaseTotal / playerCount);
         const { data: workReports } = await supabase
           .from("qiunai_salary_orders")
           .select("id")
@@ -11329,7 +11327,11 @@ async function handleButtonInteraction(interaction) {
           .limit(1);
         const hasWorkReports = Boolean(workReports?.length);
         // ===== 寫入薪資紀錄：多位陪陪平分 =====
-        if (assignedPlayers.length > 0 && totalPrice > 0 && !hasWorkReports) {
+        if (
+          assignedPlayers.length > 0 &&
+          salaryBaseTotal > 0 &&
+          !hasWorkReports
+        ) {
           const finishedAt = new Date().toISOString();
           for (const playerId of assignedPlayers) {
             const player = await getStaffByDiscordId(playerId);
@@ -11366,8 +11368,9 @@ async function handleButtonInteraction(interaction) {
                     "未指定"
                   }\n` +
                   `服務：${order.service || order.order_item || "未填寫"}\n` +
-                  `商品金額：NT$${totalPrice.toLocaleString("zh-TW")}\n` +
-                  `每位分攤金額：NT$${splitAmount.toLocaleString("zh-TW")}`,
+                  `實收金額：NT$${paidTotal.toLocaleString("zh-TW")}\n` +
+                  `抽成基準（折扣前）：NT$${salaryBaseTotal.toLocaleString("zh-TW")}\n` +
+                  `每位抽成基準：NT$${splitAmount.toLocaleString("zh-TW")}`,
               )
               .setTimestamp(),
           ],
