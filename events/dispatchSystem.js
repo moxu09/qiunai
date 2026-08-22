@@ -21,6 +21,10 @@ const {
   getTopupNumberFromTopic,
 } = require("../utils/topupNumbers");
 const {
+  hasCustomerServicePointRole,
+  recordCustomerServicePoint,
+} = require("../utils/customerServicePoints");
+const {
   DEFAULT_SALARY_ADVANCE_LIMIT,
   calculateSalaryDeductionState,
 } = require("../utils/salaryDeduction");
@@ -353,6 +357,21 @@ function getServiceName(serviceType) {
 const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 const TIP_ORDER_PANEL_CHANNEL_ID = "1531515179559551047";
+const CUSTOMER_SERVICE_POINT_ROLE_ID =
+  process.env.CUSTOMER_SERVICE_POINT_ROLE_ID || "1210642900355125288";
+const CUSTOMER_SERVICE_POINT_APP_KEY = "qiunai";
+
+async function awardCustomerServicePoint(orderId, discordId) {
+  try {
+    await recordCustomerServicePoint(supabase, {
+      appKey: CUSTOMER_SERVICE_POINT_APP_KEY,
+      orderId,
+      discordId,
+    });
+  } catch (error) {
+    console.error("[客服點數] 記錄失敗", error);
+  }
+}
 
 function getCategoryIds(value) {
   return String(value || "")
@@ -4857,6 +4876,10 @@ async function submitStaffQuotePrice(interaction) {
     });
   }
 
+  if (hasCustomerServicePointRole(interaction, CUSTOMER_SERVICE_POINT_ROLE_ID)) {
+    await awardCustomerServicePoint(order.id, interaction.user.id);
+  }
+
   await interaction.channel.send({
     embeds: [
       new EmbedBuilder()
@@ -8954,6 +8977,12 @@ async function submitServiceQuotePrice(interaction) {
   pending.usedCouponItemId = null;
   pending.usedCouponName = null;
   pending.serviceCouponRecorded = false;
+  pending.quotedBy = hasCustomerServicePointRole(
+    interaction,
+    CUSTOMER_SERVICE_POINT_ROLE_ID,
+  )
+    ? interaction.user.id
+    : null;
   pendingServiceOrders.set(flowId, pending);
 
   await sendServiceCouponPrompt(interaction.channel, flowId, pending);
@@ -9627,6 +9656,8 @@ async function createPlayOrderFromServicePending(pending, channelId) {
       discount_amount: Number(pending.discountAmount || 0),
       coupon_text: pending.couponText || "未使用優惠券",
       payment_method: pending.paymentMethod || null,
+      quoted_by: pending.quotedBy || null,
+      quote_status: "quoted",
 
       paid: false,
       paid_at: null,
@@ -9642,6 +9673,10 @@ async function createPlayOrderFromServicePending(pending, channelId) {
   if (error || !data) {
     console.error("[新版下單] 建立 play_orders 失敗", error);
     throw new Error(error?.message || "建立訂單失敗");
+  }
+
+  if (pending.quotedBy) {
+    await awardCustomerServicePoint(data.id, pending.quotedBy);
   }
 
   return data;
