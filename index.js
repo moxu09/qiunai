@@ -2568,7 +2568,7 @@ async function saveQiunaiSalaryOrder({
       salary_level: commission.level,
       platform_income: finalOrderAmount,
       platform_expense: finalStaffSalary + finalBonusAmount,
-      status: "未發薪",
+      status: "未入帳",
       order_finished_at: finishedAt,
       is_deleted: false,
     })

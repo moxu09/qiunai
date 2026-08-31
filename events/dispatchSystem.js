@@ -146,7 +146,7 @@ async function getSalaryDeductionEligibility(discordId, amount) {
           .gte("order_finished_at", walletStartIso)
           .is("wallet_settled_at", null)
           .or("is_deleted.eq.false,is_deleted.is.null")
-          .or("status.neq.已發薪,status.is.null"),
+          .or("status.neq.已入帳,status.is.null"),
       ),
       loadAllSalaryRows(() =>
         supabase
