@@ -156,6 +156,14 @@ function isGiftOrderType(value) {
   return /打賞|禮物|礼物|gift|tip/i.test(String(value || ""));
 }
 
+function shouldAutomaticallyFinalizeWorkReport(appKey, meta, isComplete) {
+  return (
+    appKey === "qiunai" &&
+    Boolean(isComplete) &&
+    meta?.sourceKind === "bot_order"
+  );
+}
+
 function parseCrownDurationHours(value) {
   const match = String(value || "").match(/冠名時長\s*(\d+)\s*hrs/i);
   const hours = Number(match?.[1] || 0);
@@ -318,6 +326,7 @@ function createWorkReportSystem({
   staffRoleId,
   customerServiceRoleId,
   salaryTable,
+  finalizeBotWorkReport,
 }) {
   const pendingManualReports = new Map();
   let crownReminderTimer = null;
@@ -595,6 +604,7 @@ function createWorkReportSystem({
       const reportKey = `WORK-${payload.sourceOrderId}-${staffId}`;
       const reportMeta = {
         sourceKind: payload.sourceKind,
+        sourceOrderId: payload.sourceOrderId,
         customerId: payload.customerId || null,
         customerName: payload.customerName || null,
         orderType: payload.orderType || "訂單",
@@ -950,6 +960,17 @@ function createWorkReportSystem({
 
   function isStaff(interaction) {
     return isStaffInteraction(interaction, staffRoleId, customerServiceRoleId);
+  }
+
+  async function buildAutomaticBotOrderPayload(current, meta, endedAt) {
+    if (
+      !shouldAutomaticallyFinalizeWorkReport(appKey, meta, true) ||
+      typeof finalizeBotWorkReport !== "function"
+    ) {
+      return null;
+    }
+
+    return finalizeBotWorkReport({ row: current, meta, endedAt });
   }
 
   async function notifyCustomerAboutSavedOrder(
@@ -1713,6 +1734,19 @@ function createWorkReportSystem({
       );
       const expectedMinutes = Number(meta.expectedDurationMinutes || 0);
       const shortageMinutes = Math.max(0, expectedMinutes - totalMinutes);
+      const closedMeta = {
+        ...meta,
+        durationMinutes: totalMinutes,
+        shortageMinutes,
+        closedEarly: isClose,
+      };
+      const automaticPayload = isClose
+        ? await buildAutomaticBotOrderPayload(
+            current,
+            closedMeta,
+            meta.endedAt || current.order_finished_at || new Date().toISOString(),
+          )
+        : null;
       const updatePayload =
         appKey === "deepnight"
           ? {
@@ -1726,10 +1760,10 @@ function createWorkReportSystem({
             }
           : {
               status: isClose ? "工時待審核" : "工時已存單",
+              ...(automaticPayload || {}),
               admin_note: JSON.stringify({
-                ...meta,
-                shortageMinutes,
-                closedEarly: isClose,
+                ...closedMeta,
+                automaticallyFinalized: Boolean(automaticPayload),
               }),
             };
       const { error } = await supabase
@@ -1752,7 +1786,9 @@ function createWorkReportSystem({
       }
       await interaction.update({
         content: isClose
-          ? `已由客服結單，實際工時 ${durationText(totalMinutes)}，已送後台審核。`
+          ? automaticPayload
+            ? `已由客服結單，實際工時 ${durationText(totalMinutes)}，薪資已自動同步，不需再次批准。`
+            : `已由客服結單，實際工時 ${durationText(totalMinutes)}，已送後台審核。`
           : `已存單，尚差 ${durationText(shortageMinutes)}，系統已通知客戶。`,
         embeds: [buildUpdatedReportEmbed(interaction.message, meta)],
         components: [],
@@ -1999,6 +2035,13 @@ function createWorkReportSystem({
         endedAt: segmentEnd?.toISOString() || null,
         durationMinutes: totalMinutes,
       };
+      const automaticPayload = isComplete
+        ? await buildAutomaticBotOrderPayload(
+            current,
+            nextMeta,
+            segmentEnd?.toISOString() || current.order_finished_at,
+          )
+        : null;
       const updatePayload =
         appKey === "deepnight"
           ? {
@@ -2018,7 +2061,11 @@ function createWorkReportSystem({
                 ? { order_finished_at: segmentEnd.toISOString() }
                 : {}),
               status: isComplete ? "工時待審核" : "工時待填",
-              admin_note: JSON.stringify(nextMeta),
+              ...(automaticPayload || {}),
+              admin_note: JSON.stringify({
+                ...nextMeta,
+                automaticallyFinalized: Boolean(automaticPayload),
+              }),
             };
       const { data, error } = await supabase
         .from(salaryTable)
@@ -2037,7 +2084,9 @@ function createWorkReportSystem({
         content: !segmentEnd
           ? `第 ${segments.length + 1} 段開始時間已儲存，完成後請輸入結束時間。`
           : isComplete
-            ? `本段時間已儲存，累積 ${durationText(totalMinutes)}，已送到薪資後台等待審核。`
+            ? automaticPayload
+              ? `本段時間已儲存，累積 ${durationText(totalMinutes)}，薪資已自動同步，不需再次批准。`
+              : `本段時間已儲存，累積 ${durationText(totalMinutes)}，已送到薪資後台等待審核。`
             : `本段時間已儲存，目前累積 ${durationText(totalMinutes)}，尚不足 ${durationText(expectedMinutes - totalMinutes)}。請選擇繼續報時、存單或由客服結單。`,
         flags: 64,
       });
@@ -2064,6 +2113,8 @@ function createWorkReportSystem({
                 .setStyle(ButtonStyle.Secondary),
             ),
           ]
+        : isComplete && automaticPayload
+          ? []
         : isComplete
           ? [
               new ActionRowBuilder().addComponents(
@@ -2128,5 +2179,6 @@ module.exports = {
   parseDurationMinutes,
   parseCrownDurationHours,
   parseMoney,
+  shouldAutomaticallyFinalizeWorkReport,
   splitStaffLookupInput,
 };

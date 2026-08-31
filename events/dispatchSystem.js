@@ -1299,6 +1299,7 @@ function setup(supabaseInstance, clientInstance, helpers = {}) {
         .filter(Boolean)
         .join(","),
     salaryTable: "qiunai_salary_orders",
+    finalizeBotWorkReport: paymentHelpers.buildQiunaiWorkReportSalaryPayload,
   });
 }
 function getStaffGuildId() {

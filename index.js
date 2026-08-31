@@ -328,6 +328,7 @@ dispatchSystem.setup(supabase, client, {
   startTipFlowInChannel,
   startCrownFlowInChannel,
   countOrderVipSpentOnce,
+  buildQiunaiWorkReportSalaryPayload,
 });
 // ===== 轉帳冷卻 =====
 const transferCooldown = new Map();
@@ -2553,6 +2554,26 @@ async function saveQiunaiSalaryOrder({
     staff?.name ||
     null;
 
+  const sourceKeys = [
+    String(orderNo || orderId || ""),
+    orderId && discordId ? `WORK-${orderId}-${discordId}` : "",
+  ].filter(Boolean);
+  if (sourceKeys.length) {
+    const { data: existing, error: existingError } = await supabase
+      .from("qiunai_salary_orders")
+      .select("*")
+      .eq("discord_id", String(discordId))
+      .in("order_id", sourceKeys)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (existingError) {
+      console.error("[秋奈薪資網] 檢查重複薪資訂單失敗:", existingError);
+      return null;
+    }
+    if (existing) return existing;
+  }
+
   const { data, error } = await supabase
     .from("qiunai_salary_orders")
     .insert({
@@ -2581,6 +2602,38 @@ async function saveQiunaiSalaryOrder({
   }
 
   return data;
+}
+
+async function buildQiunaiWorkReportSalaryPayload({ row, meta, endedAt }) {
+  const discordId = String(row?.discord_id || "").trim();
+  if (!discordId) throw new Error("工時單缺少陪陪 Discord ID");
+
+  const serviceName = meta?.serviceName || row.service_name || "陪玩訂單";
+  const orderType = meta?.orderType || "訂單";
+  const isTip =
+    String(orderType).includes("打賞") || String(serviceName).includes("打賞");
+  const regularCommission = await getQiunaiCommissionInfo(discordId, endedAt);
+  const commission =
+    isTip && regularCommission.rate !== 95
+      ? { rate: 90, level: "打賞固定 90%" }
+      : regularCommission;
+  const orderAmount = Number(row.order_amount || 0);
+  const bonusAmount = Number(row.bonus_amount || 0);
+  const staffSalary = Math.round(orderAmount * (commission.rate / 100));
+
+  return {
+    customer_name:
+      meta?.customerName || row.customer_name || meta?.customerId || "機器人訂單",
+    service_name: serviceName,
+    staff_salary: staffSalary,
+    salary_rate: commission.rate,
+    salary_level: commission.level,
+    platform_income: orderAmount,
+    platform_expense: staffSalary + bonusAmount,
+    status: "未入帳",
+    order_finished_at: endedAt,
+    is_deleted: false,
+  };
 }
 async function payTipWithWalletAtomic({
   operationKey,

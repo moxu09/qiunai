@@ -104,6 +104,7 @@ const {
   parseCrownDurationHours,
   parseDurationMinutes,
   parseMoney,
+  shouldAutomaticallyFinalizeWorkReport,
   splitStaffLookupInput,
 } = require("../events/workReportSystem");
 
@@ -114,6 +115,33 @@ test("work reports accept raw channel IDs and Discord channel URLs", () => {
       "https://discord.com/channels/1513174069087047731/1538937975629418587",
     ),
     "1538937975629418587",
+  );
+});
+
+test("normal Qiunai bot orders finalize without manual approval", () => {
+  assert.equal(
+    shouldAutomaticallyFinalizeWorkReport(
+      "qiunai",
+      { sourceKind: "bot_order" },
+      true,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldAutomaticallyFinalizeWorkReport(
+      "qiunai",
+      { sourceKind: "manual" },
+      true,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldAutomaticallyFinalizeWorkReport(
+      "deepnight",
+      { sourceKind: "bot_order" },
+      true,
+    ),
+    false,
   );
 });
 
