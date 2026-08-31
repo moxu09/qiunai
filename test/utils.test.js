@@ -519,6 +519,27 @@ test("admin money grants never count as spend, topup, or VIP progress", () => {
   assert.doesNotMatch(grantFlow, /checkAndUpgradeVip/);
 });
 
+test("admin money deductions never count as spend, topup, or VIP progress", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  const deductionStart = source.indexOf(
+    'if (interaction.commandName === "扣錢")',
+  );
+  const deductionEnd = source.indexOf(
+    'if (interaction.commandName === "給與身份組")',
+    deductionStart,
+  );
+  const deductionFlow = source.slice(deductionStart, deductionEnd);
+
+  assert.ok(deductionStart >= 0 && deductionEnd > deductionStart);
+  assert.match(deductionFlow, /"管理員扣錢"/);
+  assert.match(deductionFlow, /不列入累積消費或儲值/);
+  assert.doesNotMatch(deductionFlow, /allianceMembership\.applyActivity/);
+  assert.doesNotMatch(deductionFlow, /checkAndUpgradeVip/);
+});
+
 test("tip helpers preserve multi-staff behavior", () => {
   assert.deepEqual(getTipStaffIds({ selectedStaffIds: ["1", "2", "1", ""] }), [
     "1",

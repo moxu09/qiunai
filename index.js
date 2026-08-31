@@ -5698,7 +5698,7 @@ const commands = sortCommandDefinitions([
 
   new SlashCommandBuilder()
     .setName("扣錢")
-    .setDescription("扣除玩家星雨幣")
+    .setDescription("扣除玩家星雨幣（不計入累積消費或儲值）")
     .addUserOption((option) =>
       option.setName("玩家").setDescription("選擇玩家").setRequired(true),
     )
@@ -7902,9 +7902,15 @@ async function handleSlashCommand(interaction) {
       );
     }
     const finalCoins = await changeCoins(target.id, -amount);
-    await sendWalletLog(target.id, "扣款", -amount, finalCoins, "後台扣款");
+    await sendWalletLog(
+      target.id,
+      "管理員扣錢",
+      -amount,
+      finalCoins,
+      "管理員扣款，不列入累積消費或儲值",
+    );
     return interaction.editReply({
-      content: `❌ 已扣除 <@${target.id}> ${amount} 星雨幣，目前餘額 ${finalCoins} 星雨幣`,
+      content: `✅ 已扣除 <@${target.id}> ${amount} 星雨幣，目前餘額 ${finalCoins} 星雨幣（不列入累積消費或儲值）`,
     });
   }
   if (interaction.commandName === "給與身份組") {
