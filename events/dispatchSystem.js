@@ -1093,15 +1093,6 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
       { label: "女陪", value: "女陪" },
     ]);
 
-  const assignMenu = new StringSelectMenuBuilder()
-    .setCustomId(`service_assign_${flowId}`)
-    .setPlaceholder("是否指定陪陪")
-    .addOptions([
-      { label: "不指定陪陪", value: "不指定" },
-      { label: "指定陪陪", value: "指定" },
-      { label: "預約指定陪陪", value: "預約指定" },
-    ]);
-
   const durationMenu = new StringSelectMenuBuilder()
     .setCustomId(`service_duration_${flowId}`)
     .setPlaceholder("請選擇時間")
@@ -1249,8 +1240,6 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
 
     new ActionRowBuilder().addComponents(countMenu),
     new ActionRowBuilder().addComponents(genderMenu),
-    new ActionRowBuilder().addComponents(assignMenu),
-
     ...(initial.category === "valorant"
       ? []
       : isTftOrder
@@ -1269,7 +1258,7 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
           }\n\n` +
             `請依序選擇${isDeltaOrder ? "服務內容、" : ""}${
               isApexOrder ? "段位、" : ""
-            }${isLolOrder ? "段位 / 娛樂、" : ""}人數、性別偏好、指定方式與${
+            }${isLolOrder ? "段位 / 娛樂、" : ""}人數、性別偏好與${
               isTftOrder ? "局數" : "時間"
             }。\n` +
             `有特殊需求可以按「填寫備註 / 自訂需求」。\n\n` +
@@ -2551,7 +2540,7 @@ async function createServiceTicket(interaction, serviceType, initial = {}) {
 
     playerCount: initial.playerCount || null,
     genderPreference: null,
-    assignMode: null,
+    assignMode: "不指定",
     selectedPlayerIds: [],
 
     duration: null,
@@ -2781,23 +2770,6 @@ async function showValorantStart(channel, flowId) {
       },
     ]);
 
-  const assignMenu = new StringSelectMenuBuilder()
-    .setCustomId(`service_assign_${flowId}`)
-    .setPlaceholder("是否指定陪陪")
-    .addOptions([
-      {
-        label: "不指定陪陪",
-        value: "不指定",
-      },
-      {
-        label: "指定陪陪",
-        value: "指定",
-      },
-      {
-        label: "預約指定陪陪",
-        value: "預約指定",
-      },
-    ]);
   const durationMenu = new StringSelectMenuBuilder()
     .setCustomId(`service_duration_${flowId}`)
     .setPlaceholder("請選擇時長｜娛樂 / 金牌以下技術適用")
@@ -2873,11 +2845,10 @@ async function showValorantStart(channel, flowId) {
 
   await channel.send({
     content:
-      `請繼續選擇指定方式與時間：\n\n` +
+      `請繼續選擇時間：\n\n` +
       `娛樂陪玩 / 金牌以下技術單 → 選「時長」\n` +
       `金牌以上技術單 → 選「局數」`,
     components: [
-      new ActionRowBuilder().addComponents(assignMenu),
       new ActionRowBuilder().addComponents(durationMenu),
       new ActionRowBuilder().addComponents(roundsMenu),
     ],
@@ -2934,15 +2905,6 @@ async function showSteamStart(channel, flowId) {
       { label: "女陪", value: "女陪" },
     ]);
 
-  const assignMenu = new StringSelectMenuBuilder()
-    .setCustomId(`service_assign_${flowId}`)
-    .setPlaceholder("是否指定陪陪")
-    .addOptions([
-      { label: "不指定陪陪", value: "不指定" },
-      { label: "指定陪陪", value: "指定" },
-      { label: "預約指定陪陪", value: "預約指定" },
-    ]);
-
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`steam_game_name_${flowId}`)
@@ -2961,7 +2923,7 @@ async function showSteamStart(channel, flowId) {
         .setColor("#5dade2")
         .setTitle("🎮 Steam 下單需求")
         .setDescription(
-          `請選擇遊戲類型、人數、性別、指定方式與時長。\n\n` +
+          `請選擇遊戲類型、人數、性別與時長。\n\n` +
             `⚠️ 價格只提供客服參考，正式報價由客服輸入。`
         ),
     ],
@@ -2969,7 +2931,6 @@ async function showSteamStart(channel, flowId) {
       new ActionRowBuilder().addComponents(categoryMenu),
       new ActionRowBuilder().addComponents(countMenu),
       new ActionRowBuilder().addComponents(genderMenu),
-      new ActionRowBuilder().addComponents(assignMenu),
       row,
     ],
   });
@@ -3009,22 +2970,13 @@ async function showDeltaStart(channel, flowId) {
       { label: "女陪", value: "女陪" },
     ]);
 
-  const assignMenu = new StringSelectMenuBuilder()
-    .setCustomId(`service_assign_${flowId}`)
-    .setPlaceholder("是否指定陪陪")
-    .addOptions([
-      { label: "不指定陪陪", value: "不指定" },
-      { label: "指定陪陪", value: "指定" },
-      { label: "預約指定陪陪", value: "預約指定" },
-    ]);
-
   await channel.send({
     embeds: [
       new EmbedBuilder()
         .setColor("#95d5b2")
         .setTitle("🛡️ 三角洲下單需求")
         .setDescription(
-          `請選擇玩法、人數、性別、指定方式與時間。\n\n` +
+          `請選擇玩法、人數、性別與時間。\n\n` +
             `⚠️ 保底、雙護、護航等價格僅供客服參考，正式報價由客服輸入。`
         ),
     ],
@@ -3032,7 +2984,6 @@ async function showDeltaStart(channel, flowId) {
       new ActionRowBuilder().addComponents(modeMenu),
       new ActionRowBuilder().addComponents(countMenu),
       new ActionRowBuilder().addComponents(genderMenu),
-      new ActionRowBuilder().addComponents(assignMenu),
     ],
   });
 
@@ -3173,24 +3124,6 @@ async function showSimpleServiceStart(channel, flowId, serviceType) {
       },
     ]);
 
-  const assignMenu = new StringSelectMenuBuilder()
-    .setCustomId(`service_assign_${flowId}`)
-    .setPlaceholder("是否指定陪陪")
-    .addOptions([
-      {
-        label: "不指定陪陪",
-        value: "不指定",
-      },
-      {
-        label: "指定陪陪",
-        value: "指定",
-      },
-      {
-        label: "預約指定陪陪",
-        value: "預約指定",
-      },
-    ]);
-
   const durationMenu = new StringSelectMenuBuilder()
     .setCustomId(`service_duration_${flowId}`)
     .setPlaceholder("請選擇時間")
@@ -3224,7 +3157,7 @@ async function showSimpleServiceStart(channel, flowId, serviceType) {
         .setTitle(title)
         .setDescription(
           `${description}\n\n` +
-            `請依序選擇人數、性別、指定方式與時間。\n\n` +
+            `請依序選擇人數、性別與時間。\n\n` +
             `⚠️ 價格僅供參考，正式報價由客服輸入。`
         )
         .setTimestamp(),
@@ -3232,7 +3165,6 @@ async function showSimpleServiceStart(channel, flowId, serviceType) {
     components: [
       new ActionRowBuilder().addComponents(countMenu),
       new ActionRowBuilder().addComponents(genderMenu),
-      new ActionRowBuilder().addComponents(assignMenu),
       new ActionRowBuilder().addComponents(durationMenu),
     ],
   });
@@ -3817,51 +3749,11 @@ async function handleNewOrderGenderSelect(interaction) {
   }
 
   pending.gender = interaction.values[0];
+  pending.selectedPlayerType = "none";
+  pending.selectedPlayerId = null;
+  pending.selectedPlayerIds = [];
   pendingNewOrders.set(flowId, pending);
-
-  const playerOptions = await getQualifiedPlayerOptions(pending);
-
-  if (!playerOptions.length) {
-    return interaction.update({
-      content:
-        `🎮 遊戲：${pending.game}\n` +
-        `📌 項目：${pending.item}\n` +
-        (pending.game === "特戰英豪"
-          ? `🏅 段位：${pending.rank || "未填寫"}\n`
-          : "") +
-        `👥 人數：${pending.playerCount || "自訂"}\n` +
-        `🚻 性別偏好：${pending.gender}\n\n` +
-        `❌ 目前沒有符合資格的陪陪，請聯繫客服協助安排。`,
-      components: [],
-    });
-  }
-
-  const maxPlayerCount = Math.max(1, Number(pending.playerCount || 1));
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`new_order_player_${flowId}`)
-    .setPlaceholder(
-      maxPlayerCount > 1 ? `可選 0～${maxPlayerCount} 位指定陪陪` : "請選擇陪陪"
-    )
-    .setMinValues(1)
-    .setMaxValues(Math.min(maxPlayerCount, playerOptions.length))
-    .addOptions(playerOptions);
-
-  const row = new ActionRowBuilder().addComponents(menu);
-
-  return interaction.update({
-    content:
-      `🎮 遊戲：${pending.game}\n` +
-      `📌 項目：${pending.item}\n` +
-      (pending.game === "特戰英豪"
-        ? `🏅 段位：${pending.rank || "未填寫"}\n`
-        : "") +
-      `👥 人數：${pending.playerCount || "自訂"}\n` +
-      `🚻 性別偏好：${pending.gender}\n\n` +
-      `請選擇陪陪：\n` +
-      `🟢 在線：可直接安排\n` +
-      `⚪ 不在線：可查看可接單時間並預約`,
-    components: [row, buildOrderBackRow(flowId, "gender")],
-  });
+  return showDurationSelect(interaction, flowId, pending);
 }
 async function handleNewOrderPlayerSelect(interaction) {
   const flowId = interaction.customId.replace("new_order_player_", "");
@@ -4003,13 +3895,6 @@ async function showDurationSelect(interaction, flowId, pending) {
 
   const row = new ActionRowBuilder().addComponents(menu);
 
-  const selectedPlayerIds = Array.isArray(pending.selectedPlayerIds)
-    ? pending.selectedPlayerIds.map((id) => String(id).trim()).filter(Boolean)
-    : [];
-  const playerText =
-    pending.selectedPlayerType === "none" || !selectedPlayerIds.length
-      ? "不指定陪陪"
-      : selectedPlayerIds.map((id) => `<@${id}>`).join("、");
   return interaction.update({
     content:
       `🎮 遊戲：${pending.game}\n` +
@@ -4019,9 +3904,8 @@ async function showDurationSelect(interaction, flowId, pending) {
         : "") +
       `👥 人數：${pending.playerCount || "自訂"}\n` +
       `🚻 性別偏好：${pending.gender}\n` +
-      `🌟 指定陪陪：${playerText}\n\n` +
       (isValorantGameBased ? `請選擇需要的局數：` : `請選擇需要的時間段：`),
-    components: [row, buildOrderBackRow(flowId, "player")],
+    components: [row, buildOrderBackRow(flowId, "gender")],
   });
 }
 async function handleNewOrderDurationSelect(interaction) {
@@ -4119,17 +4003,7 @@ async function askNewOrderNoteChoice(interaction, flowId, pending) {
       .setStyle(ButtonStyle.Secondary)
   );
 
-  const selectedPlayerIds = Array.isArray(pending.selectedPlayerIds)
-    ? pending.selectedPlayerIds.map((id) => String(id).trim()).filter(Boolean)
-    : [];
-  const playerText =
-    pending.selectedPlayerType === "none" || !selectedPlayerIds.length
-      ? "不指定陪陪"
-      : selectedPlayerIds.map((id) => `<@${id}>`).join("、");
-  const timeText =
-    pending.selectedPlayerType === "reserve"
-      ? pending.reservedTime
-      : pending.duration;
+  const timeText = pending.duration;
 
   const payload = {
     content:
@@ -4141,7 +4015,6 @@ async function askNewOrderNoteChoice(interaction, flowId, pending) {
         : "") +
       `👥 人數：${pending.playerCount || "自訂"}\n` +
       `🚻 性別偏好：${pending.gender}\n` +
-      `🌟 指定陪陪：${playerText}\n` +
       `🕒 時間：${timeText || "未填寫"}\n\n` +
       `不填則預設為：無`,
     components: [row],
@@ -4516,17 +4389,7 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
 
   const service = `${pending.game}｜${pending.item}`;
 
-  const timeText =
-    pending.selectedPlayerType === "reserve"
-      ? pending.reservedTime
-      : pending.duration;
-
-  const selectedPlayerIds = Array.isArray(pending.selectedPlayerIds)
-    ? pending.selectedPlayerIds.map((id) => String(id).trim()).filter(Boolean)
-    : [];
-  const preferredPlayer = selectedPlayerIds.length
-    ? selectedPlayerIds.join(",")
-    : null;
+  const timeText = pending.duration;
 
   const { data: order, error } = await supabase
     .from("play_orders")
@@ -4546,14 +4409,12 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
       rank_preference: pending.rank || null,
       player_count: pending.playerCount || 0,
       gender_preference: pending.gender,
-      preferred_player_type: pending.selectedPlayerType,
+      preferred_player_type: "none",
 
       service,
-      preferred_player: preferredPlayer,
-      reserved_player:
-        pending.selectedPlayerType === "reserve" ? preferredPlayer : null,
-      reserved_time:
-        pending.selectedPlayerType === "reserve" ? pending.reservedTime : null,
+      preferred_player: null,
+      reserved_player: null,
+      reserved_time: null,
 
       duration_minutes: pending.durationMinutes || 0,
       duration_text: timeText || "未填寫",
@@ -4644,12 +4505,6 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
         name: "🚻 性別偏好",
         value: pending.gender || "不指定",
         inline: true,
-      },
-      {
-        name: "🌟 陪陪",
-        value: selectedPlayerIds.length
-          ? selectedPlayerIds.map((id) => `<@${id}>`).join("、")
-          : "不指定",
       },
       {
         name: "🕒 時間",
@@ -8791,11 +8646,6 @@ async function finishServiceNeed(interaction) {
         inline: true,
       },
       {
-        name: "指定方式",
-        value: pending.assignMode || "不指定",
-        inline: true,
-      },
-      {
         name: "時間 / 局數",
         value: pending.duration
           ? `${pending.duration} 小時`
@@ -9606,9 +9456,6 @@ async function createPlayOrderFromServicePending(pending, channelId) {
 
   const serviceText = buildServiceTextFromPending(pending);
 
-  const preferredPlayer = pending.selectedPlayerIds?.length
-    ? pending.selectedPlayerIds.join(",")
-    : null;
   const orderNo = await getNextPlayOrderNumber();
 
   const { data, error } = await supabase
@@ -9634,11 +9481,9 @@ async function createPlayOrderFromServicePending(pending, channelId) {
       player_count: Number(pending.playerCount || 1),
       gender_preference: pending.genderPreference || "不指定",
 
-      preferred_player: preferredPlayer,
-      reserved_player:
-        pending.assignMode === "預約指定" ? preferredPlayer : null,
-      dispatch_type:
-        pending.selectedPlayerType === "reserve" ? "reserve" : null,
+      preferred_player: null,
+      reserved_player: null,
+      dispatch_type: null,
       assigned_player: null,
 
       duration_text: pending.duration
@@ -11209,10 +11054,6 @@ async function handleDispatchInteraction(interaction) {
       await submitNewOrderNote(interaction);
       return true;
     }
-    if (interaction.customId.startsWith("submit_new_order_reserve_time_")) {
-      await submitNewOrderReserveTime(interaction);
-      return true;
-    }
     if (interaction.customId === "submit_topup_form") {
       await submitTopupForm(interaction);
       return true;
@@ -11277,14 +11118,6 @@ async function handleDispatchInteraction(interaction) {
       return true;
     }
 
-    if (interaction.customId.startsWith("service_assign_")) {
-      await handleServiceAssignSelect(interaction);
-      return true;
-    }
-    if (interaction.customId.startsWith("service_selected_players_")) {
-      await handleServiceSelectedPlayersSelect(interaction);
-      return true;
-    }
     if (interaction.customId.startsWith("service_duration_")) {
       await handleServiceDurationSelect(interaction);
       return true;
@@ -11327,10 +11160,6 @@ async function handleDispatchInteraction(interaction) {
     }
     if (interaction.customId.startsWith("new_order_gender_")) {
       await handleNewOrderGenderSelect(interaction);
-      return true;
-    }
-    if (interaction.customId.startsWith("new_order_player_")) {
-      await handleNewOrderPlayerSelect(interaction);
       return true;
     }
     if (interaction.customId.startsWith("new_order_duration_")) {

@@ -16,6 +16,10 @@ function parseUserIds(value) {
   return [...new Set(String(value || "").match(/\d{17,20}/g) || [])];
 }
 
+function parseChannelId(value) {
+  return String(value || "").match(/\d{17,20}(?!.*\d)/)?.[0] || null;
+}
+
 function parseRoleIds(...values) {
   return [
     ...new Set(
@@ -478,7 +482,9 @@ function createWorkReportSystem({
     staff,
     { completed = false } = {},
   ) {
-    const channelId = staff?.report_channel_id || staff?.salary_channel_id;
+    const channelId = parseChannelId(
+      staff?.report_channel_id || staff?.salary_channel_id,
+    );
     if (!channelId)
       throw new Error(`陪陪 <@${report.staff_id}> 尚未設定個人薪資頻道 ID`);
     const channel = await client.channels.fetch(channelId);
@@ -657,7 +663,12 @@ function createWorkReportSystem({
       // 資料庫已經有同一張工時單時，不要再次把相同面板送進填單區。
       // 接單按鈕或事件重送時仍會走到這裡，因此資料庫與 Discord 都要冪等。
       if (!existing) {
-        await sendReportCard(report, staff);
+        try {
+          await sendReportCard(report, staff);
+        } catch (sendError) {
+          await supabase.from(salaryTable).delete().eq("id", data.id);
+          throw sendError;
+        }
       }
       reports.push(report);
     }
@@ -1839,7 +1850,6 @@ function createWorkReportSystem({
               note: JSON.stringify(nextMeta),
             }
           : {
-              paid_at: enteredTime.toISOString(),
               admin_note: JSON.stringify(nextMeta),
             };
       const { data: updated, error } = await supabase
@@ -2004,7 +2014,6 @@ function createWorkReportSystem({
               note: JSON.stringify(nextMeta),
             }
           : {
-              paid_at: nextMeta.startedAt,
               ...(segmentEnd
                 ? { order_finished_at: segmentEnd.toISOString() }
                 : {}),
@@ -2114,6 +2123,7 @@ module.exports = {
   isStaffInteraction,
   matchStaffLookup,
   normalizeStaffLookup,
+  parseChannelId,
   parseTaipeiWorkTime,
   parseDurationMinutes,
   parseCrownDurationHours,

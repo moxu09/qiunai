@@ -99,12 +99,34 @@ const {
   isStaffInteraction,
   matchStaffLookup,
   normalizeStaffLookup,
+  parseChannelId,
   parseTaipeiWorkTime,
   parseCrownDurationHours,
   parseDurationMinutes,
   parseMoney,
   splitStaffLookupInput,
 } = require("../events/workReportSystem");
+
+test("work reports accept raw channel IDs and Discord channel URLs", () => {
+  assert.equal(parseChannelId("1538937975629418587"), "1538937975629418587");
+  assert.equal(
+    parseChannelId(
+      "https://discord.com/channels/1513174069087047731/1538937975629418587",
+    ),
+    "1538937975629418587",
+  );
+});
+
+test("customer order flows no longer route through companion designation", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "events", "dispatchSystem.js"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    source,
+    /customId\.startsWith\("(?:service_assign_|service_selected_players_|new_order_player_)"\)/,
+  );
+});
 
 test("冠名品項可解析時長並計算到期時間", () => {
   assert.equal(
