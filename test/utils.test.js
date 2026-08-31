@@ -502,6 +502,23 @@ test("VIP upgrades accept cumulative spend or a single topup, never cumulative t
   );
 });
 
+test("admin money grants never count as spend, topup, or VIP progress", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  const grantStart = source.indexOf(
+    'if (interaction.commandName === "發錢")',
+  );
+  const grantEnd = source.indexOf("// 扣錢", grantStart);
+  const grantFlow = source.slice(grantStart, grantEnd);
+
+  assert.ok(grantStart >= 0 && grantEnd > grantStart);
+  assert.match(grantFlow, /"管理員發錢"/);
+  assert.doesNotMatch(grantFlow, /allianceMembership\.applyActivity/);
+  assert.doesNotMatch(grantFlow, /checkAndUpgradeVip/);
+});
+
 test("tip helpers preserve multi-staff behavior", () => {
   assert.deepEqual(getTipStaffIds({ selectedStaffIds: ["1", "2", "1", ""] }), [
     "1",
