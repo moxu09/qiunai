@@ -320,6 +320,20 @@ test("salary deduction uses net commissioned salary and caps advances at 1000", 
   assert.equal(overLimit.canUse, false);
 });
 
+test("Qiunai salary deduction covers quote, service, and extension payments", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "events", "dispatchSystem.js"),
+    "utf8",
+  );
+
+  assert.match(source, /\.eq\("app_key", "qiunai"\)/);
+  assert.match(source, /\.from\("qiunai_staff_bonus"\)/);
+  assert.match(source, /salary_quote_confirm_/);
+  assert.match(source, /salary_service_confirm_/);
+  assert.match(source, /salary_extension_confirm_/);
+  assert.match(source, /使用薪水續單/);
+});
+
 test("new order command categories include Apex and other service items", () => {
   const gameValues = getNewOrderGameOptions().map((option) => option.value);
   assert.deepEqual(
