@@ -45,8 +45,11 @@ const {
 } = require("../utils/customerServicePoints");
 const { calculateSelfServicePrice } = require("../config/selfServicePricing");
 const {
+  appendSelfServiceClaimNote,
+  getSelfServiceClaimNotes,
   getSelfServiceDispatchAt,
   getSelfServiceDispatchRoleIds,
+  stripSelfServiceClaimNotes,
   resolveSelfServicePlayerNumbers,
   getPaidOrderPriceAdjustment,
 } = require("../events/dispatchSystem");
@@ -229,6 +232,25 @@ test("自助派單湊足需求人數後仍持續開放扣 1，直到客人選定
   assert.match(source, /老闆選定前仍可繼續扣 1/);
   assert.match(source, /content: `\$\{selectedIds\.map\(\(id\) => `<@\$\{id\}>`\)\.join\(" "\)\} 接！`/);
   assert.doesNotMatch(source, /playerIds\.length >= needCount\) return interaction\.editReply\(\{ content: "❌ 這張訂單人數已滿/);
+  assert.doesNotMatch(source, /只有秋奈在職陪陪可以扣 1/);
+  assert.doesNotMatch(source, /你的身分組不符合這筆訂單/);
+  assert.match(source, /setLabel\("接單備註（選填）"\)/);
+});
+
+test("自助派單扣 1 備註可保存、讀取並在重新派單時清除", () => {
+  const note = appendSelfServiceClaimNote(
+    "[SELF_SERVICE] 原始訂單內容",
+    "808875987034308618",
+    "可立即開始 @everyone",
+  );
+  assert.equal(
+    getSelfServiceClaimNotes(note).get("808875987034308618"),
+    "可立即開始 @everyone",
+  );
+  assert.equal(
+    stripSelfServiceClaimNotes(note),
+    "[SELF_SERVICE] 原始訂單內容",
+  );
 });
 
 test("自助下單無價格組合會保留資料並轉客服報價", () => {

@@ -974,6 +974,49 @@ function resolveSelfServicePlayerNumbers(candidateIds, selectedValues, requiredC
   return numbers.map((number) => candidates[number - 1]);
 }
 
+function stripSelfServiceClaimNotes(note) {
+  return String(note || "")
+    .replace(/\s*\[SELF_CLAIM:\d{16,22}:[A-Za-z0-9_-]*\]/g, "")
+    .trim();
+}
+
+function appendSelfServiceClaimNote(note, discordId, claimNote) {
+  const cleanNote = stripSelfServiceClaimNotesForUser(note, discordId);
+  const encoded = Buffer.from(String(claimNote || "").trim(), "utf8").toString(
+    "base64url",
+  );
+  return `${cleanNote} [SELF_CLAIM:${discordId}:${encoded}]`.trim();
+}
+
+function stripSelfServiceClaimNotesForUser(note, discordId) {
+  const escapedId = String(discordId || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return String(note || "")
+    .replace(new RegExp(`\\s*\\[SELF_CLAIM:${escapedId}:[A-Za-z0-9_-]*\\]`, "g"), "")
+    .trim();
+}
+
+function getSelfServiceClaimNotes(note) {
+  const notes = new Map();
+  for (const match of String(note || "").matchAll(
+    /\[SELF_CLAIM:(\d{16,22}):([A-Za-z0-9_-]*)\]/g,
+  )) {
+    try {
+      notes.set(match[1], Buffer.from(match[2], "base64url").toString("utf8"));
+    } catch {
+      notes.set(match[1], "");
+    }
+  }
+  return notes;
+}
+
+function safeSelfServiceClaimNote(note, maxLength = 30) {
+  const text = String(note || "")
+    .replace(/@/g, "＠")
+    .replace(/[\r\n]+/g, " ")
+    .trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
 async function failSelfServiceDispatch(orderId, messageId = null) {
   selfServiceDispatchTimers.delete(String(orderId));
   const { data: order, error } = await supabase
@@ -1408,7 +1451,7 @@ async function confirmSelfServiceQuote(interaction) {
   });
   scheduleSelfServiceDispatchTimeout(dispatchOrder, dispatchMessage.id);
   await interaction.message.edit({ components: [] }).catch(() => null);
-  await interaction.channel.send("✅ 已統一送往自助派單廳，系統會等待符合身分的陪陪扣 1；15 分鐘未湊足即自動判定失敗。");
+  await interaction.channel.send("✅ 已統一送往自助派單廳；任何有意願的成員都能填寫備註並扣 1，15 分鐘未湊足即自動判定失敗。");
   return interaction.editReply({ content: "✅ 已確認報價並送出派單。" });
 }
 
@@ -1416,15 +1459,19 @@ async function showSelfServiceCandidatePrompt(order, playerIds) {
   const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
   if (!orderChannel?.isTextBased()) return;
   const needCount = Number(order.player_count || 1);
+  const claimNotes = getSelfServiceClaimNotes(order.note);
   const numberOptions = playerIds.slice(0, 25).map((id, index) => ({
     label: `${index + 1}. ${orderChannel.guild?.members?.cache?.get(id)?.displayName || `陪陪 ${index + 1}`}`.slice(0, 100),
-    description: `選擇編號 ${index + 1}`,
+    description: safeSelfServiceClaimNote(claimNotes.get(id), 80) || `選擇編號 ${index + 1}`,
     value: String(index + 1),
   }));
   const payload = {
     content:
       `<@${order.customer_id}> 已湊足人數，扣 1 仍會持續開放；請從目前候選名單選擇 ${needCount} 位陪陪：\n` +
-      `${playerIds.map((id, index) => `${index + 1}. <@${id}>`).join("\n")}\n\n` +
+      `${playerIds.map((id, index) => {
+        const claimNote = safeSelfServiceClaimNote(claimNotes.get(id));
+        return `${index + 1}. <@${id}>${claimNote ? `｜備註：${claimNote}` : ""}`;
+      }).join("\n")}\n\n` +
       `選完後，系統會依數字判斷對應人員並請你再次確認。`,
     components: [new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
@@ -1458,9 +1505,40 @@ async function closeSelfServiceClaimButton(orderId) {
   await dispatchMessage?.edit({ components: [] }).catch(() => null);
 }
 
+async function findSelfServiceClaimMessage(orderId) {
+  const dispatchChannel = await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
+  if (!dispatchChannel?.isTextBased()) return null;
+  const messages = await dispatchChannel.messages.fetch({ limit: 100 }).catch(() => null);
+  return messages?.find((message) =>
+    message.components.some((row) => row.components.some(
+      (component) => component.customId === `self_service_claim_${orderId}`,
+    )),
+  ) || null;
+}
+
+async function openSelfServiceClaimModal(interaction) {
+  const orderId = interaction.customId.replace("self_service_claim_", "");
+  const modal = new ModalBuilder()
+    .setCustomId(`self_service_claim_submit_${orderId}`)
+    .setTitle("自助派單｜扣 1 接單")
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("claim_note")
+          .setLabel("接單備註（選填）")
+          .setPlaceholder("例如：可立即開始、可配合指定需求")
+          .setStyle(TextInputStyle.Paragraph)
+          .setMaxLength(80)
+          .setRequired(false),
+      ),
+    );
+  return interaction.showModal(modal);
+}
+
 async function claimSelfServiceOrder(interaction) {
   await deferReplyOnce(interaction);
-  const orderId = interaction.customId.replace("self_service_claim_", "");
+  const orderId = interaction.customId.replace("self_service_claim_submit_", "");
+  const claimNote = interaction.fields.getTextInputValue("claim_note").trim();
   if (processingSelfServiceClaims.has(orderId)) {
     return interaction.editReply({ content: "⚠️ 另一位陪陪正在扣 1，請稍後再試。" });
   }
@@ -1470,20 +1548,11 @@ async function claimSelfServiceOrder(interaction) {
     if (error || !order || !isSelfServiceOrder(order)) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
     if (!["self_dispatching", "self_choosing_open"].includes(order.quote_status)) return interaction.editReply({ content: "❌ 這張訂單已經結束派單。" });
     if (order.quote_status === "self_dispatching" && Date.now() - getSelfServiceDispatchAt(order) >= SELF_SERVICE_DISPATCH_TIMEOUT_MS) {
-      await failSelfServiceDispatch(order.id, interaction.message?.id);
+      const dispatchMessage = await findSelfServiceClaimMessage(order.id);
+      await failSelfServiceDispatch(order.id, dispatchMessage?.id);
       return interaction.editReply({ content: "❌ 已超過 15 分鐘，這張訂單派單失敗。" });
     }
     if (interaction.user.id === order.customer_id) return interaction.editReply({ content: "❌ 不能接自己的訂單。" });
-    let staffQuery = supabase.from("qiunai_staff").select("discord_id,is_active").eq("discord_id", interaction.user.id).eq("is_active", true).limit(1);
-    staffQuery = applyStaffGuildFilter(staffQuery);
-    const { data: staffRows, error: staffError } = await staffQuery;
-    if (staffError || !staffRows?.[0]) return interaction.editReply({ content: "❌ 只有秋奈在職陪陪可以扣 1。" });
-    const { genderRoleIds, serviceRoleIds } = getSelfServiceDispatchRoleIds(order);
-    const hasGender = genderRoleIds.some((id) => interaction.member.roles.cache.has(id));
-    const hasService = serviceRoleIds.some((id) => interaction.member.roles.cache.has(id));
-    if (!hasGender || !hasService) {
-      return interaction.editReply({ content: `❌ 你的身分組不符合這筆訂單（${order.gender_preference || "不指定"}＋指定遊戲服務）。` });
-    }
     const playerIds = String(order.preferred_player || "").split(",").map((id) => id.trim()).filter(Boolean);
     if (playerIds.includes(interaction.user.id)) return interaction.editReply({ content: "⚠️ 你已經扣過 1 了。" });
     const needCount = Number(order.player_count || 1);
@@ -1491,20 +1560,35 @@ async function claimSelfServiceOrder(interaction) {
     playerIds.push(interaction.user.id);
     const success = playerIds.length >= needCount;
     const firstReady = order.quote_status === "self_dispatching" && success;
+    const updatedNote = appendSelfServiceClaimNote(
+      order.note,
+      interaction.user.id,
+      claimNote,
+    );
     const { data: updated, error: updateError } = await supabase
       .from("play_orders")
-      .update({ preferred_player: playerIds.join(","), quote_status: success ? "self_choosing_open" : "self_dispatching", updated_at: new Date().toISOString() })
+      .update({ preferred_player: playerIds.join(","), quote_status: success ? "self_choosing_open" : "self_dispatching", note: updatedNote, updated_at: new Date().toISOString() })
       .eq("id", order.id)
       .eq("quote_status", order.quote_status)
       .select()
       .maybeSingle();
     if (updateError || !updated) return interaction.editReply({ content: "❌ 扣 1 失敗，訂單狀態可能已更新。" });
-    await interaction.channel.send(`${interaction.user} 扣 1（${playerIds.length}/${needCount}）`);
+    await interaction.channel.send({
+      content:
+        `${interaction.user} 扣 1（${playerIds.length}/${needCount}）` +
+        (claimNote ? `｜備註：${safeSelfServiceClaimNote(claimNote, 80)}` : ""),
+      allowedMentions: { users: [interaction.user.id] },
+    });
     if (!success) {
-      const embed = EmbedBuilder.from(interaction.message.embeds[0]).setDescription(
+      const dispatchMessage = await findSelfServiceClaimMessage(order.id);
+      const embed = dispatchMessage?.embeds?.[0]
+        ? EmbedBuilder.from(dispatchMessage.embeds[0]).setDescription(
         `訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n段位 / 地圖：${order.rank_preference || "無"}\n需求：${needCount} 位\n目前：${playerIds.length} / ${needCount}\n訂單頻道：<#${order.channel_id}>\n\n15 分鐘內未湊足人數即派單失敗。`,
-      );
-      await interaction.message.edit({ embeds: [embed] }).catch(() => null);
+      )
+        : null;
+      if (dispatchMessage && embed) {
+        await dispatchMessage.edit({ embeds: [embed] }).catch(() => null);
+      }
       return interaction.editReply({ content: "✅ 扣 1 成功，正在等待其他陪陪。" });
     }
     if (firstReady) {
@@ -1534,6 +1618,7 @@ async function selectSelfServicePlayerNumbers(interaction) {
     return interaction.editReply({ content: "❌ 選擇的數字無效或人數不符，請重新選擇。" });
   }
   const selectedNumbers = interaction.values.map((value) => Number(value));
+  const claimNotes = getSelfServiceClaimNotes(order.note);
   const { data: selectedOrder, error } = await supabase
     .from("play_orders")
     .update({ preferred_player: selectedIds.join(","), quote_status: "confirming_players", updated_at: new Date().toISOString() })
@@ -1557,7 +1642,10 @@ async function selectSelfServicePlayerNumbers(interaction) {
   await interaction.channel.send({
     content:
       `<@${order.customer_id}> 你選擇的編號：${selectedNumbers.join("、")}\n` +
-      `對應陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n` +
+      `對應陪陪：\n${selectedIds.map((id) => {
+        const claimNote = safeSelfServiceClaimNote(claimNotes.get(id), 80);
+        return `<@${id}>${claimNote ? `｜備註：${claimNote}` : ""}`;
+      }).join("\n")}\n\n` +
       `請確認是否選擇以上陪陪。`,
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`self_players_confirm_${order.id}`).setLabel("確定選擇").setStyle(ButtonStyle.Success),
@@ -1648,7 +1736,7 @@ async function reselectSelfServicePlayers(interaction) {
   if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
   if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以重新派單。" });
   const dispatchAtIso = new Date().toISOString();
-  const dispatchNote = `${String(order.note || "").replace(/\[DISPATCH_AT:[^\]]+\]/g, "").trim()} [DISPATCH_AT:${dispatchAtIso}]`;
+  const dispatchNote = `${stripSelfServiceClaimNotes(String(order.note || "").replace(/\[DISPATCH_AT:[^\]]+\]/g, ""))} [DISPATCH_AT:${dispatchAtIso}]`;
   const { data: redispatchOrder, error } = await supabase
     .from("play_orders")
     .update({ preferred_player: null, status: "pending", quote_status: "self_dispatching", note: dispatchNote, updated_at: dispatchAtIso })
@@ -12425,7 +12513,7 @@ async function handleDispatchInteraction(interaction) {
       return true;
     }
     if (interaction.customId.startsWith("self_service_claim_")) {
-      await claimSelfServiceOrder(interaction);
+      await openSelfServiceClaimModal(interaction);
       return true;
     }
     if (interaction.customId.startsWith("self_players_confirm_")) {
@@ -12727,6 +12815,10 @@ async function handleDispatchInteraction(interaction) {
     }
   }
   if (interaction.isModalSubmit()) {
+    if (interaction.customId.startsWith("self_service_claim_submit_")) {
+      await claimSelfServiceOrder(interaction);
+      return true;
+    }
     if (interaction.customId.startsWith("self_service_requirement_")) {
       await submitSelfServiceRequirement(interaction);
       return true;
@@ -12915,6 +13007,9 @@ module.exports = {
   getSelfServiceDispatchAt,
   resolveSelfServicePlayerNumbers,
   getPaidOrderPriceAdjustment,
+  appendSelfServiceClaimNote,
+  getSelfServiceClaimNotes,
+  stripSelfServiceClaimNotes,
   shouldPreserveDispatchedOrder,
   deferReplyOnce,
   submitTopupForm,
