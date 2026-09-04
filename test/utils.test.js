@@ -235,6 +235,15 @@ test("自助派單湊足需求人數後仍持續開放扣 1，直到客人選定
   assert.doesNotMatch(source, /只有秋奈在職陪陪可以扣 1/);
   assert.doesNotMatch(source, /你的身分組不符合這筆訂單/);
   assert.match(source, /setLabel\("接單備註（選填）"\)/);
+  const indexSource = fs.readFileSync(
+    path.join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  const modalButtonRoutes = indexSource.slice(
+    indexSource.indexOf("// Modal 類按鈕不能 defer"),
+    indexSource.indexOf("// ===== 使用者按錯建立訂單"),
+  );
+  assert.match(modalButtonRoutes, /customId\.startsWith\("self_service_claim_"\)/);
 });
 
 test("自助派單扣 1 備註可保存、讀取並在重新派單時清除", () => {
