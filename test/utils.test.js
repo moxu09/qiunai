@@ -43,7 +43,10 @@ const {
   recordCustomerServiceReception,
   recordCustomerServicePoint,
 } = require("../utils/customerServicePoints");
-const { calculateSelfServicePrice } = require("../config/selfServicePricing");
+const {
+  calculateSelfServicePrice,
+  getValorantExpectedUnit,
+} = require("../config/selfServicePricing");
 const {
   appendSelfServiceClaimNote,
   getSelfServiceClaimNotes,
@@ -55,6 +58,18 @@ const {
 } = require("../events/dispatchSystem");
 
 test("自助下單依現行價目表計算多人與時數", () => {
+  assert.equal(
+    getValorantExpectedUnit({ serviceType: "黃金以下", rankOrMap: "頂輻" }),
+    "小時",
+  );
+  assert.equal(
+    getValorantExpectedUnit({ serviceType: "超凡", rankOrMap: "娛樂" }),
+    "小時",
+  );
+  assert.equal(
+    getValorantExpectedUnit({ serviceType: "超凡", rankOrMap: "頂輻" }),
+    "局",
+  );
   assert.deepEqual(
     calculateSelfServicePrice({
       game: "valorant",
@@ -287,6 +302,9 @@ test("自助下單無價格組合會保留資料並轉客服報價", () => {
   assert.match(source, /workReportSystem\.sendForAcceptedOrder\(acceptedOrder, selectedIds\)/);
   assert.match(source, /\["service_type", "要打的段位"/);
   assert.match(source, /\["rank_map", "需求的陪陪段位"/);
+  assert.match(source, /此組合只能輸入時數，請再輸入一次/);
+  assert.match(source, /此組合只能輸入局數，請再輸入一次/);
+  assert.match(source, /self_service_quantity_submit_/);
 });
 const {
   buildTipAllocations,

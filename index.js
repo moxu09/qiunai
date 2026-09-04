@@ -7667,6 +7667,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         interaction.customId === "open_play_order_form" ||
         interaction.customId === "self_service_start" ||
         interaction.customId.startsWith("self_service_claim_") ||
+        interaction.customId.startsWith("self_service_quantity_") ||
         interaction.customId.startsWith("self_service_extend_") ||
         interaction.customId.startsWith("new_order_note_yes_") ||
         interaction.customId.startsWith("service_quote_price_") ||

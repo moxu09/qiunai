@@ -27,6 +27,7 @@ const {
 const {
   GAME_OPTIONS: SELF_SERVICE_GAME_OPTIONS,
   calculateSelfServicePrice,
+  getValorantExpectedUnit,
 } = require("../config/selfServicePricing");
 const path = require("node:path");
 
@@ -1232,7 +1233,6 @@ async function openSelfServiceRequirementModal(interaction) {
               ["service_type", "要打的段位", "黃金以下、白金、鑽石、超凡、神話1～3"],
               ["rank_map", "需求的陪陪段位", "娛樂、超凡、神話、輻能或頂輻"],
               ["player_count", "需求陪陪人數", "1～8"],
-              ["quantity", "時數 / 局數", "請依價目表單位填寫"],
             ]
           : [
             ["platform_mode", "模式", "例如：一般、排位"],
@@ -1291,8 +1291,92 @@ async function submitSelfServiceRequirement(interaction) {
     serviceType: interaction.fields.getTextInputValue("service_type"),
     rankOrMap: interaction.fields.getTextInputValue("rank_map"),
     playerCount: interaction.fields.getTextInputValue("player_count"),
-    quantity: interaction.fields.getTextInputValue("quantity"),
+    quantity:
+      pending.game === "valorant"
+        ? null
+        : interaction.fields.getTextInputValue("quantity"),
   };
+  if (pending.game === "valorant") {
+    const expectedUnit = getValorantExpectedUnit(input);
+    pending.input = input;
+    pending.expectedUnit = expectedUnit;
+    pendingSelfServiceOrders.set(flowId, pending);
+    return interaction.editReply({
+      content:
+        `✅ 已收到特戰需求。\n` +
+        `要打的段位：${input.serviceType}\n` +
+        `需求的陪陪段位：${input.rankOrMap}\n\n` +
+        `此組合按「${expectedUnit}」計算，請繼續輸入${expectedUnit}。`,
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`self_service_quantity_${flowId}`)
+            .setLabel(`輸入${expectedUnit}`)
+            .setStyle(ButtonStyle.Primary),
+        ),
+      ],
+    });
+  }
+  return finalizeSelfServiceRequirement(interaction, flowId, pending, input);
+}
+
+async function openSelfServiceQuantityModal(interaction) {
+  const flowId = interaction.customId.replace("self_service_quantity_", "");
+  const pending = pendingSelfServiceOrders.get(flowId);
+  if (!pending || pending.customerId !== interaction.user.id || !pending.input) {
+    return interaction.reply({ content: "❌ 流程已過期，請重新開始。", flags: 64 });
+  }
+  const expectedUnit = pending.expectedUnit || getValorantExpectedUnit(pending.input);
+  const modal = new ModalBuilder()
+    .setCustomId(`self_service_quantity_submit_${flowId}`)
+    .setTitle(`特戰英豪｜輸入${expectedUnit}`)
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("quantity")
+          .setLabel(`需求${expectedUnit}`)
+          .setPlaceholder(expectedUnit === "小時" ? "例如：1小時、1.5小時" : "例如：1局、2局、3局")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true),
+      ),
+    );
+  return interaction.showModal(modal);
+}
+
+async function submitSelfServiceQuantity(interaction) {
+  await deferReplyOnce(interaction);
+  const flowId = interaction.customId.replace("self_service_quantity_submit_", "");
+  const pending = pendingSelfServiceOrders.get(flowId);
+  if (!pending || pending.customerId !== interaction.user.id || !pending.input) {
+    return interaction.editReply({ content: "❌ 流程已過期，請重新開始。" });
+  }
+  const rawQuantity = interaction.fields.getTextInputValue("quantity").trim();
+  const expectedUnit = pending.expectedUnit || getValorantExpectedUnit(pending.input);
+  const enteredHours = /(小時|鐘頭|hours?|hrs?)/i.test(rawQuantity);
+  const enteredRounds = /局/.test(rawQuantity);
+  const retryRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`self_service_quantity_${flowId}`)
+      .setLabel(`重新輸入${expectedUnit}`)
+      .setStyle(ButtonStyle.Primary),
+  );
+  if (expectedUnit === "小時" && enteredRounds) {
+    return interaction.editReply({
+      content: "❌ 此組合只能輸入時數，請再輸入一次。",
+      components: [retryRow],
+    });
+  }
+  if (expectedUnit === "局" && enteredHours) {
+    return interaction.editReply({
+      content: "❌ 此組合只能輸入局數，請再輸入一次。",
+      components: [retryRow],
+    });
+  }
+  const input = { ...pending.input, quantity: rawQuantity };
+  return finalizeSelfServiceRequirement(interaction, flowId, pending, input);
+}
+
+async function finalizeSelfServiceRequirement(interaction, flowId, pending, input) {
   let quote;
   try {
     quote = calculateSelfServicePrice(input);
@@ -12672,6 +12756,10 @@ async function handleDispatchInteraction(interaction) {
       await openSelfServiceClaimModal(interaction);
       return true;
     }
+    if (interaction.customId.startsWith("self_service_quantity_")) {
+      await openSelfServiceQuantityModal(interaction);
+      return true;
+    }
     if (interaction.customId.startsWith("self_players_confirm_")) {
       await confirmSelfServicePlayers(interaction);
       return true;
@@ -12973,6 +13061,10 @@ async function handleDispatchInteraction(interaction) {
   if (interaction.isModalSubmit()) {
     if (interaction.customId.startsWith("self_service_claim_submit_")) {
       await claimSelfServiceOrder(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_quantity_submit_")) {
+      await submitSelfServiceQuantity(interaction);
       return true;
     }
     if (interaction.customId.startsWith("self_service_requirement_")) {
