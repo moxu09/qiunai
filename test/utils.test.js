@@ -880,6 +880,8 @@ test("paid wallet order price edits charge or refund only the difference", () =>
   assert.match(source, /confirm_order_paid_gap_/);
   assert.match(source, /只會調整上述差額，不會重複扣除原訂單金額/);
   assert.match(source, /changeCoins\(order\.customer_id, -difference\)/);
+  assert.match(source, /hasMatchingManualPriceGapDeduction\(order, difference\)/);
+  assert.match(source, /這張延遲補扣通知已作廢，不會再次扣款/);
 });
 
 test("salary deduction buttons never defer an interaction twice", async () => {

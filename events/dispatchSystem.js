@@ -8401,6 +8401,27 @@ function getPaidOrderPriceAdjustment(oldPrice, newPrice) {
   }
   return { oldAmount, newAmount, difference: newAmount - oldAmount };
 }
+
+async function hasMatchingManualPriceGapDeduction(order, difference) {
+  const amount = Math.abs(Number(difference || 0));
+  const changedAt = new Date(order.updated_at || order.paid_at || order.created_at || 0);
+  if (!amount || Number.isNaN(changedAt.getTime())) return false;
+  const windowEnd = new Date(changedAt.getTime() + 30 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("wallet_logs")
+    .select("id")
+    .eq("user_id", order.customer_id)
+    .eq("type", "管理員扣錢")
+    .eq("amount", -amount)
+    .gte("created_at", changedAt.toISOString())
+    .lte("created_at", windowEnd)
+    .limit(1);
+  if (error) {
+    console.error("[訂單差額] 查詢人工扣款失敗", error);
+    throw new Error("無法核對既有人工扣款，已停止補扣以避免重複扣款");
+  }
+  return Boolean(data?.length);
+}
 // ===== 開啟更改訂單金額視窗 =====
 async function openChangeOrderPriceModal(interaction) {
   if (!canEditOrderPrice(interaction)) {
@@ -9299,6 +9320,18 @@ async function confirmPaidWalletPriceAdjustment(interaction) {
     if (!difference) {
       await interaction.message.edit({ components: [] }).catch(() => null);
       return interaction.editReply({ content: "⚠️ 訂單已是這個金額，不會重複調整。" });
+    }
+    if (
+      isExistingPaidGap &&
+      difference > 0 &&
+      await hasMatchingManualPriceGapDeduction(order, difference)
+    ) {
+      await interaction.message.edit({ components: [] }).catch(() => null);
+      return interaction.editReply({
+        content:
+          `✅ 已查到客服在訂單改價後人工扣除同額 ${difference.toLocaleString("zh-TW")} ASD，` +
+          "這張延遲補扣通知已作廢，不會再次扣款。",
+      });
     }
     if (difference > 0) {
       const user = await paymentHelpers.getUser(order.customer_id);
