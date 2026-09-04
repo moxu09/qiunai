@@ -899,7 +899,9 @@ function getSelfServiceGameLabel(game) {
 }
 
 function getSelfServiceDispatchKey(game, input) {
-  const type = String(input.serviceType || "");
+  const type = String(
+    game === "valorant" ? input.rankOrMap : input.serviceType || "",
+  );
   if (game === "valorant") {
     return type.includes("娛樂") ? "特戰英豪娛樂陪玩" : "特戰英豪技術陪玩";
   }
@@ -1081,6 +1083,12 @@ function isManualQuoteSelfServiceOrder(order) {
   return String(order?.note || "").includes("[SELF_SERVICE_MANUAL]");
 }
 
+function getSelfServiceRankFieldLabel(order) {
+  return String(order?.game || order?.service || "").includes("特戰英豪")
+    ? "需求的陪陪段位"
+    : "段位 / 地圖";
+}
+
 async function sendSelfServiceDispatch(order) {
   const dispatchChannel = await client.channels
     .fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID)
@@ -1098,7 +1106,7 @@ async function sendSelfServiceDispatch(order) {
         .setColor("#7cc7ff")
         .setTitle("🖨️ 自助派單需求")
         .setDescription(
-          `訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n段位 / 地圖：${order.rank_preference || "無"}\n需求：${order.player_count} 位\n目前：0 / ${order.player_count}\n訂單頻道：<#${order.channel_id}>\n\n15 分鐘內未湊足人數即派單失敗。`,
+          `訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n${getSelfServiceRankFieldLabel(order)}：${order.rank_preference || "無"}\n需求：${order.player_count} 位\n目前：0 / ${order.player_count}\n訂單頻道：<#${order.channel_id}>\n\n15 分鐘內未湊足人數即派單失敗。`,
         )
         .setTimestamp(),
     ],
@@ -1218,9 +1226,17 @@ async function openSelfServiceRequirementModal(interaction) {
             ["player_count", "需求陪陪人數", "1～8"],
             ["quantity", "需求時數", "例如：1、1.5、2"],
           ]
-        : [
+        : game === "valorant"
+          ? [
+              ["platform_mode", "模式", "例如：一般、排位"],
+              ["service_type", "要打的段位", "黃金以下、白金、鑽石、超凡、神話1～3"],
+              ["rank_map", "需求的陪陪段位", "娛樂、超凡、神話、輻能或頂輻"],
+              ["player_count", "需求陪陪人數", "1～8"],
+              ["quantity", "時數 / 局數", "請依價目表單位填寫"],
+            ]
+          : [
             ["platform_mode", "模式", "例如：一般、排位"],
-            ["service_type", game === "valorant" ? "陪陪等級" : "類型", game === "valorant" ? "娛樂、超凡、神話、輻能或頂輻" : "娛樂、技術或大神"],
+            ["service_type", "類型", "娛樂、技術或大神"],
             ["rank_map", "目前段位", "請依價目表填寫段位"],
             ["player_count", "需求陪陪人數", "1～8"],
             ["quantity", "時數 / 局數", "請依價目表單位填寫"],
@@ -1322,8 +1338,9 @@ async function submitSelfServiceRequirement(interaction) {
         durationMinutes: 0,
         note:
           `[SELF_SERVICE_MANUAL] 自動報價無此組合：${reason}；` +
-          `平台/模式：${input.platformOrMode}；類型：${input.serviceType}；` +
-          `段位/地圖：${input.rankOrMap}；數量：${input.quantity}`,
+          `平台/模式：${input.platformOrMode}；` +
+          `${pending.game === "valorant" ? "要打的段位" : "類型"}：${input.serviceType}；` +
+          `${pending.game === "valorant" ? "需求的陪陪段位" : "段位/地圖"}：${input.rankOrMap}；數量：${input.quantity}`,
       };
       await channel.send({
         content: `<@${pending.customerId}> <@&${process.env.STAFF_ROLE}>`,
@@ -1335,8 +1352,8 @@ async function submitSelfServiceRequirement(interaction) {
               `系統已保留客人填寫的資料，不需要重新填寫。\n\n` +
                 `遊戲：${manualPending.game}\n` +
                 `平台 / 模式：${input.platformOrMode}\n` +
-                `類型：${input.serviceType}\n` +
-                `段位 / 地圖：${input.rankOrMap}\n` +
+                `${pending.game === "valorant" ? "要打的段位" : "類型"}：${input.serviceType}\n` +
+                `${pending.game === "valorant" ? "需求的陪陪段位" : "段位 / 地圖"}：${input.rankOrMap}\n` +
                 `性別：${manualPending.gender}\n` +
                 `人數：${playerCount}\n` +
                 `時數 / 局數：${input.quantity}\n` +
@@ -1428,7 +1445,7 @@ async function submitSelfServiceRequirement(interaction) {
         .setColor("#ffd166")
         .setTitle("💰 自動報價確認")
         .setDescription(
-          `訂單編號：${order.order_no}\n遊戲：${gameLabel}\n平台 / 模式：${input.platformOrMode}\n類型：${input.serviceType}\n段位 / 地圖：${input.rankOrMap}\n陪陪人數：${quote.playerCount} 位\n數量：${quote.quantity} ${quote.unit}\n單價：NT$${quote.unitPrice.toLocaleString("zh-TW")} / ${quote.unit} / 位\n\n應付總額：**NT$${quote.total.toLocaleString("zh-TW")}**`,
+          `訂單編號：${order.order_no}\n遊戲：${gameLabel}\n平台 / 模式：${input.platformOrMode}\n${pending.game === "valorant" ? "要打的段位" : "類型"}：${input.serviceType}\n${pending.game === "valorant" ? "需求的陪陪段位" : "段位 / 地圖"}：${input.rankOrMap}\n陪陪人數：${quote.playerCount} 位\n數量：${quote.quantity} ${quote.unit}\n單價：NT$${quote.unitPrice.toLocaleString("zh-TW")} / ${quote.unit} / 位\n\n應付總額：**NT$${quote.total.toLocaleString("zh-TW")}**`,
         )
         .setFooter({ text: "確認後會送往自助派單廳" })
         .setTimestamp(),
@@ -3251,7 +3268,9 @@ async function sendOrderToStaffChannel(order) {
         inline: false,
       },
       {
-        name: "🏅 段位",
+        name: isManualQuoteSelfServiceOrder(order)
+          ? `🏅 ${getSelfServiceRankFieldLabel(order)}`
+          : "🏅 段位",
         value: order.rank_preference || "不指定",
         inline: true,
       },
@@ -5734,7 +5753,9 @@ async function sendStaffQuotePanel(order) {
             inline: false,
           },
           {
-            name: "🏅 段位",
+            name: isManualQuoteSelfServiceOrder(order)
+              ? `🏅 ${getSelfServiceRankFieldLabel(order)}`
+              : "🏅 段位",
             value: order.rank_preference || "不指定",
             inline: true,
           },

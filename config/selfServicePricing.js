@@ -177,8 +177,8 @@ function calculateSelfServicePrice(input) {
   }
 
   if (game === "valorant") {
-    const rank = match(input.rankOrMap, RANK_ALIASES.valorant);
-    const level = match(input.serviceType, [
+    const rank = match(input.serviceType, RANK_ALIASES.valorant);
+    const level = match(input.rankOrMap, [
       ["entertain", ["娛樂", "娛樂陪玩"]],
       ["ascendant", ["超凡", "超凡陪"]],
       ["immortal", ["神話", "神話陪"]],
@@ -186,8 +186,8 @@ function calculateSelfServicePrice(input) {
       ["topRadiant", ["頂輻", "頂輻陪"]],
     ]);
     const price = PRICES.valorant?.[rank]?.[level];
-    if (!rank) throw new Error("特戰段位不在目前價目表範圍內");
-    if (!level) throw new Error("特戰請填陪陪等級：娛樂、超凡、神話、輻能或頂輻");
+    if (!rank) throw new Error("要打的段位不在目前價目表範圍內");
+    if (!level) throw new Error("需求的陪陪段位請填：娛樂、超凡、神話、輻能或頂輻");
     if (!price) throw new Error("目前價目表沒有這個特戰段位與陪陪等級組合");
     const [unitPrice, unit] = price;
     if (unit === "局" && !Number.isInteger(quantity)) throw new Error("局數必須是整數");

@@ -57,6 +57,17 @@ const {
 test("自助下單依現行價目表計算多人與時數", () => {
   assert.deepEqual(
     calculateSelfServicePrice({
+      game: "valorant",
+      platformOrMode: "排位",
+      serviceType: "超凡",
+      rankOrMap: "頂輻",
+      playerCount: "2",
+      quantity: "3",
+    }),
+    { unitPrice: 295, total: 1770, unit: "局", quantity: 3, playerCount: 2 },
+  );
+  assert.deepEqual(
+    calculateSelfServicePrice({
       game: "apex",
       platformOrMode: "排位",
       serviceType: "技術",
@@ -274,6 +285,8 @@ test("自助下單無價格組合會保留資料並轉客服報價", () => {
   assert.match(source, /await sendSelfServiceDispatch\(dispatchOrder\)/);
   assert.match(source, /款項先前已完成核帳，不會重複扣款/);
   assert.match(source, /workReportSystem\.sendForAcceptedOrder\(acceptedOrder, selectedIds\)/);
+  assert.match(source, /\["service_type", "要打的段位"/);
+  assert.match(source, /\["rank_map", "需求的陪陪段位"/);
 });
 const {
   buildTipAllocations,
