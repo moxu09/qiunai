@@ -11,4 +11,18 @@ function getOrderCommissionBase(order = {}) {
   return Number(order.price || order.order_amount || order.final_price || 0);
 }
 
-module.exports = { getManualCommissionRate, getOrderCommissionBase };
+function chooseHigherCommission(baseCommission, activityCommission) {
+  if (
+    activityCommission &&
+    Number(activityCommission.rate || 0) > Number(baseCommission?.rate || 0)
+  ) {
+    return activityCommission;
+  }
+  return baseCommission;
+}
+
+module.exports = {
+  chooseHigherCommission,
+  getManualCommissionRate,
+  getOrderCommissionBase,
+};

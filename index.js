@@ -1,5 +1,6 @@
 require("dotenv").config();
 const fs = require("node:fs/promises");
+const { createHash } = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
 const {
@@ -30,6 +31,7 @@ const {
 const { createClient } = require("@supabase/supabase-js");
 const { createAccountingLedger } = require("./utils/accounting");
 const { createAllianceMembership } = require("./utils/allianceMembership");
+const { createJkopayService } = require("./utils/jkopay");
 const {
   createDeviceAuditReviewerSync,
 } = require("./utils/deviceAuditReviewers");
@@ -39,6 +41,11 @@ const {
   buildTopupTopic,
   getNextTopupNumber,
 } = require("./utils/topupNumbers");
+const {
+  QIUNAI_CUSTOMER_SERVICE_IDS,
+  getSeptemberShiftCommissionRate,
+  recordCustomerServiceReception,
+} = require("./utils/customerServicePoints");
 const {
   createSupabaseDailyCheckinClaimer,
 } = require("./utils/dailyCheckin");
@@ -73,6 +80,7 @@ const {
   getTipAllocationTotal,
   getTipGiftByKey: findTipGiftByKey,
   getTipGiftSelections,
+  getTipStaffPage,
   getTipStaffIds,
   getTipTotalAmount,
   hasSelfTip,
@@ -133,6 +141,8 @@ const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 const REVIEW_SHOWCASE_CHANNEL_ID = "1206157728532271185";
 const TIP_BROADCAST_CHANNEL_ID = "1210250269292761099";
+const JKOPAY_REFUND_CHANNEL_ID =
+  process.env.JKOPAY_REFUND_CHANNEL_ID || "1545380103675052092";
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -149,10 +159,19 @@ const deviceAuditReviewerSync = createDeviceAuditReviewerSync({
   roleId:
     process.env.DEVICE_AUDIT_REVIEWER_ROLE_ID || "1513626379437211900",
 });
-const employmentSystem = createEmploymentSystem(client, employmentConfig);
+const employmentSystem = createEmploymentSystem(client, employmentConfig, supabase);
 const complaintSystem = createComplaintSystem(client, complaintConfig);
 const runtimeHealth = createHealthState("rainbot-qiunai");
-const runtimeServer = createHealthServer(runtimeHealth);
+let jkopayService;
+const runtimeServer = createHealthServer(runtimeHealth, {
+  requestHandler: (request, response) =>
+    jkopayService?.handleHttpRequest(request, response) || false,
+});
+jkopayService = createJkopayService({
+  supabase,
+  client,
+  onPaid: handleJkopayTopupPaid,
+});
 const shutdownRuntime = installProcessHandlers({
   client,
   server: runtimeServer,
@@ -322,13 +341,25 @@ dispatchSystem.setup(supabase, client, {
       sourceKey,
       note,
     }),
+  recordSpendActivity: ({ userId, amount, sourceKey, note }) =>
+    allianceMembership.applyActivity({
+      discordUserId: userId,
+      activityType: "spend",
+      amount,
+      sourceKey,
+      note,
+    }),
   checkAndUpgradeVip,
   changeCoins,
   recordAccountingLedger,
+  checkAndUpgradeVip,
   startTipFlowInChannel,
   startCrownFlowInChannel,
   countOrderVipSpentOnce,
   buildQiunaiWorkReportSalaryPayload,
+  createJkopayTopup: jkopayService.createTopupPayment,
+  attachJkopayPaymentMessage: jkopayService.attachPaymentMessage,
+  jkopayEnabled: jkopayService.config.enabled,
 });
 // ===== 轉帳冷卻 =====
 const transferCooldown = new Map();
@@ -344,6 +375,7 @@ const handledInteractionIds = createTtlSet(15 * 60 * 1000);
 const TIP_HARD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function setPendingTip(tipId, tipData) {
+  if (tipData && !tipData.flowId) tipData.flowId = String(tipId);
   const shouldScheduleExpiry = !pendingTips.has(tipId);
   pendingTips.set(tipId, tipData);
   if (shouldScheduleExpiry) {
@@ -474,11 +506,49 @@ async function sendTipWorkReportsSafely(orders, { tipperId, item, amount }) {
     console.error("[打賞報單] 發送個人報單失敗", error);
   }
 }
-function getTipBroadcastEntry(item) {
-  const gift = TIP_GIFTS.find((candidate) => candidate.name === item);
+function getTipBroadcastEntry(item, key) {
+  const gift = TIP_GIFTS.find(
+    (candidate) => candidate.key === key || candidate.name === item,
+  );
   const broadcast = gift ? TIP_BROADCASTS[gift.key] : null;
   return gift && broadcast ? { gift, broadcast } : null;
 }
+
+function isTransientTipBroadcastError(error) {
+  const status = Number(error?.status || error?.statusCode || error?.rawError?.status);
+  const code = String(error?.code || error?.cause?.code || "");
+  return (
+    status === 429 ||
+    status >= 500 ||
+    ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"].includes(code)
+  );
+}
+
+function getTipBroadcastNonce(tipData, suffix) {
+  const flowId = tipData?.flowId || tipData?.tipId || tipData?.createdAt || "tip";
+  return createHash("sha256")
+    .update(`tip-broadcast:${flowId}:${suffix}`)
+    .digest("hex")
+    .slice(0, 25);
+}
+
+async function sendTipBroadcastMessage(channel, payload, tipData, suffix) {
+  const messagePayload = {
+    ...payload,
+    nonce: getTipBroadcastNonce(tipData, suffix),
+    enforceNonce: true,
+  };
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await channel.send(messagePayload);
+    } catch (error) {
+      if (attempt === 3 || !isTransientTipBroadcastError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 750));
+    }
+  }
+  return null;
+}
+
 async function sendTipBroadcastSafely(tipData) {
   if (!tipData?.broadcastEnabled || tipData.crownOrder) return;
 
@@ -492,44 +562,77 @@ async function sendTipBroadcastSafely(tipData) {
     if (!channel?.isTextBased()) {
       throw new Error(`找不到打賞播報頻道 ${TIP_BROADCAST_CHANNEL_ID}`);
     }
-    for (const { staffId, line } of splitTipBroadcastAllocations(allocations)) {
-        const entry = getTipBroadcastEntry(line.name);
-        if (!entry) continue;
+    const failures = [];
+    let sentCount = 0;
+    const jobs = splitTipBroadcastAllocations(allocations);
+    for (const [index, { staffId, line }] of jobs.entries()) {
+      const entry = getTipBroadcastEntry(line.name, line.key);
+      try {
+        const mentionIds = tipData.broadcastAnonymous
+          ? [staffId]
+          : [tipData.tipperId, staffId];
+        const commonPayload = {
+          content: buildTipBroadcastContent({
+            anonymous: Boolean(tipData.broadcastAnonymous),
+            description:
+              entry?.broadcast.description || "感謝老闆對陪陪的支持與喜愛。",
+            emoji: entry?.broadcast.emoji,
+            giftName:
+              line.quantity > 1
+                ? `${entry?.gift.name || line.name} × ${line.quantity}`
+                : entry?.gift.name || line.name,
+            staffIds: [staffId],
+            tipperId: tipData.tipperId,
+          }),
+          allowedMentions: { users: [...new Set(mentionIds)] },
+        };
+        if (entry) {
         const imagePath = path.join(
           __dirname,
           "assets",
           "tip-gifts",
           entry.broadcast.imageFile,
         );
-        const mentionIds = tipData.broadcastAnonymous
-          ? [staffId]
-          : [tipData.tipperId, staffId];
-        await channel.send({
-          content: buildTipBroadcastContent({
-            anonymous: Boolean(tipData.broadcastAnonymous),
-            description: entry.broadcast.description,
-            emoji: entry.broadcast.emoji,
-            giftName:
-              line.quantity > 1
-                ? `${entry.gift.name} × ${line.quantity}`
-                : entry.gift.name,
-            staffIds: [staffId],
-            tipperId: tipData.tipperId,
-          }),
-          files: [
+          commonPayload.files = [
             {
               attachment: imagePath,
               name: entry.broadcast.imageFile,
             },
-          ],
-          allowedMentions: { users: [...new Set(mentionIds)] },
-        });
+          ];
+        }
+        await sendTipBroadcastMessage(
+          channel,
+          commonPayload,
+          tipData,
+          `${index}:${staffId}:${line.key || line.name}`,
+        );
+        sentCount += 1;
+      } catch (error) {
+        failures.push(error);
+        console.error(
+          `[打賞公開播報失敗] 陪陪 ${staffId}｜${line.name}`,
+          error,
+        );
+      }
     }
-    await channel.send({
-      content:
-        "**感謝老闆對秋奈陪玩及陪陪的喜愛 <:I_cn_b02:1221687963621265451>**",
-      allowedMentions: { parse: [] },
-    });
+    if (sentCount) {
+      await sendTipBroadcastMessage(
+        channel,
+        {
+          content:
+            "**感謝老闆對秋奈陪玩及陪陪的喜愛 <:I_cn_b02:1221687963621265451>**",
+          allowedMentions: { parse: [] },
+        },
+        tipData,
+        "thanks",
+      );
+    }
+    if (failures.length) {
+      console.error(
+        "[打賞公開播報失敗] 部分播報未送達",
+        new AggregateError(failures, `${failures.length} 筆打賞公開播報失敗`),
+      );
+    }
   } catch (error) {
     console.error("[打賞公開播報失敗]", error);
   }
@@ -618,6 +721,11 @@ function buildTipPaymentMenu(tipId) {
         label: "儲值卡 / 錢包",
         description: "直接使用 ASD 餘額扣款",
         value: "儲值卡",
+      },
+      {
+        label: "員工扣薪",
+        description: "由客服確認後從本人薪資扣除",
+        value: "員工扣薪",
       },
       {
         label: "美金轉帳",
@@ -1147,6 +1255,67 @@ async function handleCrownPackageSelect(interaction) {
   await sendTipStaffSelectionStatus(interaction.channel, tipId, tipData);
   return interaction.editReply({ content: "✅ 已選擇冠名方案" });
 }
+
+function buildTipStaffPage(tipId, playerOptions, requestedPage = 0) {
+  const pageData = getTipStaffPage(playerOptions, requestedPage);
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(`tip_staff_${tipId}_page_${pageData.page + 1}`)
+    .setPlaceholder(
+      `請選擇要打賞的陪陪，可複選｜第 ${pageData.page + 1}/${pageData.pageCount} 頁`,
+    )
+    .setMinValues(1)
+    .setMaxValues(pageData.options.length)
+    .addOptions(pageData.options);
+  const components = [new ActionRowBuilder().addComponents(select)];
+
+  if (pageData.pageCount > 1) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`tip_staff_page_${tipId}_${pageData.page - 1}`)
+          .setLabel("上一頁")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(pageData.page === 0),
+        new ButtonBuilder()
+          .setCustomId(`tip_staff_page_${tipId}_${pageData.page + 1}`)
+          .setLabel("下一頁")
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(pageData.page >= pageData.pageCount - 1),
+      ),
+    );
+  }
+
+  return { ...pageData, components };
+}
+
+async function handleTipStaffPage(interaction) {
+  const match = /^tip_staff_page_(.+)_(-?\d+)$/.exec(interaction.customId);
+  if (!match) {
+    return interaction.editReply({ content: "❌ 陪陪分頁資料不正確，請重新建立打賞流程。" });
+  }
+  const [, tipId, rawPage] = match;
+  const tipData = pendingTips.get(tipId);
+  if (!tipData || !Array.isArray(tipData.staffOptions) || !tipData.staffOptions.length) {
+    return interaction.editReply({ content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。" });
+  }
+  if (interaction.user.id !== tipData.createdBy) {
+    return interaction.editReply({ content: "❌ 只有建立這筆打賞的人可以切換陪陪頁面。" });
+  }
+
+  const pageData = buildTipStaffPage(tipId, tipData.staffOptions, Number(rawPage));
+  tipData.staffPage = pageData.page;
+  setPendingTip(tipId, tipData);
+  await interaction.message.edit({
+    content:
+      `✅ 已選擇 ${getTipGiftSelections(tipData).length} 項禮物：\n${getTipGiftListText(tipData)}\n\n` +
+      `請選擇要打賞的陪陪｜第 ${pageData.page + 1}/${pageData.pageCount} 頁：`,
+    components: pageData.components,
+  });
+  return interaction.editReply({
+    content: `✅ 已切換至陪陪清單第 ${pageData.page + 1}/${pageData.pageCount} 頁`,
+  });
+}
+
 async function handleTipGiftSelect(interaction) {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({
@@ -1232,23 +1401,15 @@ async function handleTipGiftSelect(interaction) {
       content: "❌ 目前沒有可選擇的陪陪資料。",
     });
   }
-  const rows = [];
-  for (let i = 0; i < playerOptions.length; i += 25) {
-    const page = Math.floor(i / 25) + 1;
-    const group = playerOptions.slice(i, i + 25);
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId(`tip_staff_${tipId}_page_${page}`)
-      .setPlaceholder(`請選擇要打賞的陪陪，可複選｜第 ${page} 頁`)
-      .setMinValues(1)
-      .setMaxValues(group.length)
-      .addOptions(group);
-    rows.push(new ActionRowBuilder().addComponents(menu));
-  }
+  tipData.staffOptions = playerOptions;
+  tipData.staffPage = 0;
+  setPendingTip(tipId, tipData);
+  const pageData = buildTipStaffPage(tipId, playerOptions, 0);
   await interaction.channel.send({
     content:
       `✅ 已選擇 ${gifts.length} 項禮物：\n${getTipGiftListText(tipData)}\n\n` +
-      `請選擇要打賞的陪陪：`,
-    components: rows.slice(0, 5),
+      `請選擇要打賞的陪陪｜第 1/${pageData.pageCount} 頁：`,
+    components: pageData.components,
   });
   await sendTipStaffSelectionStatus(interaction.channel, tipId, tipData);
   return interaction.editReply({
@@ -2051,6 +2212,7 @@ async function handleTipPaymentSelect(interaction) {
     paymentMethod.includes("儲值") ||
     paymentMethod.includes("錢包") ||
     paymentMethod.includes("餘額");
+  const salaryPayment = paymentMethod.includes("扣薪");
 
   tipData.keepForPayment = !walletPayment;
   setPendingTip(tipId, tipData);
@@ -2091,6 +2253,39 @@ async function handleTipPaymentSelect(interaction) {
 
     return interaction.editReply({
       content: "✅ 已選擇儲值卡付款，請確認是否使用此付款方式。",
+    });
+  }
+
+  if (salaryPayment) {
+    let eligibility;
+    try {
+      eligibility = await dispatchSystem.getSalaryDeductionEligibility(
+        tipperId,
+        totalAmount,
+      );
+    } catch (error) {
+      return interaction.editReply({
+        content: `❌ 無法使用打賞扣薪付款：${error.message || error}`,
+      });
+    }
+    if (!eligibility.state.canUse) {
+      return interaction.editReply({
+        content:
+          `❌ 無法使用打賞扣薪付款：每人最多預支 NT$${eligibility.state.advanceLimit.toLocaleString("zh-TW")}。\n` +
+          `本筆確認後預支總額會是 NT$${eligibility.state.projectedAdvance.toLocaleString("zh-TW")}。`,
+      });
+    }
+    await dispatchSystem.createSalaryDeductionPrompt({
+      channel: interaction.channel,
+      customerId: tipperId,
+      amount: totalAmount,
+      eligibility,
+      confirmId: `confirm_tip_salary_${tipId}`,
+      cancelId: `cancel_tip_salary_${tipId}`,
+      purpose: "打賞",
+    });
+    return interaction.editReply({
+      content: "✅ 已選擇員工扣薪，請等待客服或管理員確認。",
     });
   }
 
@@ -2369,6 +2564,7 @@ async function saveTipToPlayOrders({
   return data;
 }
 const {
+  chooseHigherCommission,
   getManualCommissionRate,
   getOrderCommissionBase,
 } = require("./utils/salaryCommission");
@@ -2385,43 +2581,31 @@ function getTaipeiYearText(date = new Date()) {
   return taipeiDate.toISOString().slice(0, 4);
 }
 
-function getNextMonthTextFromIso(isoText) {
-  const date = new Date(isoText);
-  const taipeiDate = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-
-  const year = taipeiDate.getUTCFullYear();
-
-  const month = taipeiDate.getUTCMonth();
-
-  const next = new Date(Date.UTC(year, month + 1, 1));
-
-  return next.toISOString().slice(0, 7);
-}
-
-async function getFirstReachAmountDate(discordId, targetAmount) {
-  const { data, error } = await supabase
-    .from("qiunai_salary_orders")
-    .select("*")
-    .eq("discord_id", String(discordId))
-    .eq("is_deleted", false)
-    .order("order_finished_at", { ascending: true });
-
-  if (error) {
-    console.error("[抽成計算] 讀取歷史訂單失敗", error);
-    return null;
-  }
-
+async function getCompletedOrderAmountBeforeMonth(discordId, finishedAt) {
+  const month = getTaipeiMonthText(new Date(finishedAt));
+  const monthStart = new Date(`${month}-01T00:00:00+08:00`).toISOString();
+  const pageSize = 1000;
   let total = 0;
 
-  for (const order of data || []) {
-    total += Number(order.order_amount || 0);
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await supabase
+      .from("qiunai_salary_orders")
+      .select("order_amount")
+      .eq("discord_id", String(discordId))
+      .or("is_deleted.eq.false,is_deleted.is.null")
+      .lt("order_finished_at", monthStart)
+      .range(from, from + pageSize - 1);
 
-    if (total >= targetAmount) {
-      return order.order_finished_at;
+    if (error) {
+      console.error("[抽成計算] 讀取上月以前累積訂單失敗", error);
+      return 0;
     }
-  }
 
-  return null;
+    for (const order of data || []) {
+      total += Number(order.order_amount || 0);
+    }
+    if ((data || []).length < pageSize) return total;
+  }
 }
 
 async function getPreviousYearSalaryTotal(discordId, finishedAt) {
@@ -2454,19 +2638,53 @@ async function getPreviousYearSalaryTotal(discordId, finishedAt) {
   );
 }
 
+async function getActiveQiunaiCommissionActivity(finishedAt) {
+  const at = new Date(finishedAt).toISOString();
+  const { data, error } = await supabase
+    .from("salary_activity_commission_settings")
+    .select("activity_rate")
+    .eq("app_key", "qiunai")
+    .not("activity_rate", "is", null)
+    .lte("starts_at", at)
+    .gt("ends_at", at)
+    .maybeSingle();
+  if (error) {
+    console.error("[抽成計算] 讀取活動抽成失敗", error);
+    return null;
+  }
+  const rate = Number(data?.activity_rate || 0);
+  return rate > 0
+    ? { rate, level: `活動抽成 ${rate}%` }
+    : null;
+}
+
 async function getQiunaiCommissionInfo(
   discordId,
   finishedAt = new Date().toISOString(),
 ) {
   const staff = await getStaffByDiscordId(discordId);
+  const activity = await getActiveQiunaiCommissionActivity(finishedAt);
+  const useHigherRate = (commission) =>
+    chooseHigherCommission(commission, activity);
 
   const manualRate = getManualCommissionRate(staff?.commission_tier);
 
   if (manualRate) {
-    return {
+    return useHigherRate({
       rate: manualRate,
       level: manualRate === 95 ? "主管津貼 95%" : `手動檔位 ${manualRate}%`,
-    };
+    });
+  }
+
+  const septemberShiftRate = getSeptemberShiftCommissionRate(
+    discordId,
+    finishedAt,
+  );
+  if (septemberShiftRate) {
+    return useHigherRate({
+      rate: septemberShiftRate,
+      level: "9 月輪班客服｜85%",
+    });
   }
 
   const finishedDate = new Date(finishedAt);
@@ -2474,10 +2692,10 @@ async function getQiunaiCommissionInfo(
   const openingEnd = new Date("2026-09-01T00:00:00+08:00");
 
   if (finishedDate < openingEnd) {
-    return {
+    return useHigherRate({
       rate: 90,
       level: "開幕期 90%",
-    };
+    });
   }
 
   const previousYearSalary = await getPreviousYearSalaryTotal(
@@ -2486,31 +2704,28 @@ async function getQiunaiCommissionInfo(
   );
 
   if (previousYearSalary >= 100000) {
-    return {
+    return useHigherRate({
       rate: 90,
       level: "年度薪資達標｜隔年 90%",
-    };
+    });
   }
 
-  const firstReach10kDate = await getFirstReachAmountDate(discordId, 10000);
+  const completedAmountBeforeMonth = await getCompletedOrderAmountBeforeMonth(
+    discordId,
+    finishedAt,
+  );
 
-  if (firstReach10kDate) {
-    const reachNextMonth = getNextMonthTextFromIso(firstReach10kDate);
-
-    const orderMonth = getTaipeiMonthText(new Date(finishedAt));
-
-    if (orderMonth >= reachNextMonth) {
-      return {
-        rate: 85,
-        level: "累積接單滿 10,000｜85%",
-      };
-    }
+  if (completedAmountBeforeMonth >= 10000) {
+    return useHigherRate({
+      rate: 85,
+      level: "上月前累積接單滿 10,000｜85%",
+    });
   }
 
-  return {
+  return useHigherRate({
     rate: 80,
     level: "預設 80%",
-  };
+  });
 }
 async function saveQiunaiSalaryOrder({
   orderId,
@@ -2743,7 +2958,7 @@ async function sendTipCloseButtons(channel) {
     components: [row],
   });
 }
-function buildOrderReviewComponents(orderId, anonymous = false) {
+function buildOrderReviewComponents(orderId, anonymous = false, allowSkip = false) {
   const makeButton = (rating, label, style) =>
     new ButtonBuilder()
       .setCustomId(
@@ -2751,7 +2966,7 @@ function buildOrderReviewComponents(orderId, anonymous = false) {
       )
       .setLabel(label)
       .setStyle(style);
-  return [
+  const rows = [
     new ActionRowBuilder().addComponents(
       makeButton(5, "🌟🌟🌟🌟🌟 超級滿意", ButtonStyle.Success),
       makeButton(4, "🌟🌟🌟🌟 很滿意", ButtonStyle.Primary),
@@ -2774,6 +2989,17 @@ function buildOrderReviewComponents(orderId, anonymous = false) {
         .setStyle(anonymous ? ButtonStyle.Primary : ButtonStyle.Secondary),
     ),
   ];
+  if (allowSkip) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`self_service_review_skip_${orderId}`)
+          .setLabel("不輸入評價，完成訂單")
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    );
+  }
+  return rows;
 }
 
 function buildManualReviewComponents(
@@ -2907,7 +3133,11 @@ async function sendOrderReviewPanel(channel, order, assignedPlayers = []) {
         })
         .setTimestamp(),
     ],
-    components: buildOrderReviewComponents(order.id),
+    components: buildOrderReviewComponents(
+      order.id,
+      false,
+      String(order.note || "").includes("[SELF_SERVICE]"),
+    ),
   });
 }
 async function sendManualOrderReviewPanel(channel, customer, staff) {
@@ -3329,6 +3559,90 @@ async function sendWalletLog(
       });
   } catch (err) {
     console.error("[錢包通知失敗]", err);
+  }
+}
+
+async function handleJkopayTopupPaid({
+  order,
+  transaction,
+  balance,
+  alreadyProcessed,
+}) {
+  const sourceKey = `jkopay-topup:${order.platform_order_id}:${order.user_id}`;
+  const note = `${order.topup_no}｜街口交易 ${transaction.tradeNo}`;
+
+  await allianceMembership.applyActivity({
+    discordUserId: order.user_id,
+    activityType: "topup",
+    amount: Number(order.amount),
+    sourceKey,
+    note,
+  });
+  await checkAndUpgradeVip(
+    order.user_id,
+    "topup",
+    Number(order.amount),
+    process.env.GUILD_ID,
+    order.channel_id,
+  );
+  await recordAccountingLedger({
+    entry_type: "customer_topup",
+    entry_label: "客人儲值",
+    amount: Number(order.amount),
+    cash_amount: Number(order.amount),
+    liability_amount: Number(order.amount),
+    payment_method: "街口支付",
+    customer_id: order.user_id,
+    source_table: "jkopay_topup_orders",
+    source_id: order.platform_order_id,
+    dedupe_key: `jkopay-topup:${order.platform_order_id}`,
+    note,
+    metadata: { trade_no: transaction.tradeNo },
+  });
+
+  if (!alreadyProcessed) {
+    await sendWalletLog(
+      order.user_id,
+      "儲值",
+      Number(order.amount),
+      balance,
+      `💳 街口支付自動儲值｜${order.topup_no}`,
+      false,
+    );
+  }
+
+  const channel = order.channel_id
+    ? await client.channels.fetch(order.channel_id).catch(() => null)
+    : null;
+  if (!channel?.isTextBased()) return;
+
+  const successEmbed = new EmbedBuilder()
+    .setColor("#57F287")
+    .setTitle("✅ 街口付款及 ASD 儲值完成")
+    .setDescription(
+      `<@${order.user_id}> 已完成街口付款。\n\n` +
+        `儲值編號：${order.topup_no}\n` +
+        `儲值金額：${Number(order.amount).toLocaleString("zh-TW")} ASD\n` +
+        `目前餘額：${Number(balance).toLocaleString("zh-TW")} ASD`,
+    )
+    .setTimestamp();
+  const components = [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("close_ticket")
+        .setLabel("關閉單子")
+        .setEmoji("🗑️")
+        .setStyle(ButtonStyle.Danger),
+    ),
+  ];
+
+  const paymentMessage = order.payment_message_id
+    ? await channel.messages.fetch(order.payment_message_id).catch(() => null)
+    : null;
+  if (paymentMessage) {
+    await paymentMessage.edit({ embeds: [successEmbed], components });
+  } else if (!alreadyProcessed) {
+    await channel.send({ embeds: [successEmbed], components });
   }
 }
 function isWalletPayment(text = "") {
@@ -5137,7 +5451,8 @@ async function sendTopupPanel(client) {
       `歡迎來到 ASD 儲值區。\n\n` +
         `點擊下方按鈕後，系統會建立專屬儲值臨時頻道。\n\n` +
         `匯率：1 元台幣 = 1 ASD\n` +
-        `支援付款方式：匯款 / 無卡 / 刷卡 / 美金 / 加密貨幣`,
+        `支援付款方式：街口支付 / 匯款 / 無卡 / 刷卡 / 美金 / 加密貨幣\n\n` +
+        `✅ 使用街口支付，付款完成後系統會自動核帳並將 ASD 存入錢包。`,
     )
     .setFooter({
       text: "深夜不關燈｜We Are Still Here",
@@ -5147,7 +5462,7 @@ async function sendTopupPanel(client) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId("order_start_topup")
-      .setLabel("建立儲值單")
+      .setLabel("建立儲值單｜支援街口支付")
       .setEmoji("💳")
       .setStyle(ButtonStyle.Success),
   );
@@ -5183,6 +5498,130 @@ async function sendTopupPanel(client) {
   );
 
   console.log("[TOPUP PANEL] 已建立");
+}
+
+async function sendJkopayRefundPanel() {
+  const channel = await client.channels.fetch(JKOPAY_REFUND_CHANNEL_ID).catch(() => null);
+  if (!channel?.isTextBased?.()) {
+    throw new Error(`找不到街口退款頻道 ${JKOPAY_REFUND_CHANNEL_ID}`);
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor("#00a94f")
+    .setTitle("💳 街口支付退款專區")
+    .setDescription(
+      `退款操作與結果紀錄統一集中在此頻道。\n\n` +
+      `查詢訂單：\`/街口查詢\`\n` +
+        `執行退款：\`/街口退款\`\n` +
+        `• ASD 儲值單：輸入 TOP-... 或 QIUNAI-TOP-...\n` +
+        `• 官網商品單：輸入 WASH-...\n` +
+        `• 目前僅支援整筆退款\n` +
+        `• 儲值退款會同步扣回該筆 ASD\n\n` +
+        `⚠️ 執行前請再次核對訂單編號與退款對象。`,
+    )
+    .setFooter({ text: "秋奈｜街口支付退款管理" })
+    .setTimestamp();
+
+  const panel = await getPanelMessage("jkopay_refund", process.env.GUILD_ID);
+  if (panel) {
+    try {
+      const message = await channel.messages.fetch(panel.message_id);
+      await message.edit({ embeds: [embed], components: [] });
+      console.log("[JKOPAY REFUND PANEL] 已更新");
+      return;
+    } catch {
+      console.log("[JKOPAY REFUND PANEL] 舊面板不存在，重新建立");
+    }
+  }
+
+  const message = await channel.send({ embeds: [embed] });
+  await savePanelMessage(
+    "jkopay_refund",
+    channel.id,
+    message.id,
+    process.env.GUILD_ID,
+  );
+  console.log("[JKOPAY REFUND PANEL] 已建立");
+}
+
+async function sendJkopayRefundAudit({
+  status,
+  actorId,
+  platformOrderId,
+  amount,
+  kind,
+  detail,
+}) {
+  const channel = await client.channels.fetch(JKOPAY_REFUND_CHANNEL_ID).catch(() => null);
+  if (!channel?.isTextBased?.()) {
+    console.error(`[JKOPAY][REFUND] 找不到退款紀錄頻道 ${JKOPAY_REFUND_CHANNEL_ID}`);
+    return false;
+  }
+
+  const style = {
+    success: { color: "#22c55e", title: "✅ 街口退款完成" },
+    duplicate: { color: "#f59e0b", title: "ℹ️ 街口退款重複操作" },
+    failed: { color: "#ef4444", title: "❌ 街口退款失敗" },
+  }[status] || { color: "#64748b", title: "💳 街口退款紀錄" };
+  const fields = [
+    { name: "操作人員", value: `<@${actorId}>`, inline: true },
+    { name: "訂單類型", value: kind === "merchandise" ? "官網商品" : kind === "topup" ? "ASD 儲值" : "待確認", inline: true },
+    { name: "街口訂單編號", value: `\`${String(platformOrderId || "未知").slice(0, 100)}\`` },
+  ];
+  if (Number.isFinite(Number(amount)) && Number(amount) > 0) {
+    fields.push({
+      name: "退款金額",
+      value: `NT$${Number(amount).toLocaleString("zh-TW")}`,
+      inline: true,
+    });
+  }
+  if (detail) fields.push({ name: "處理結果", value: String(detail).slice(0, 1000) });
+
+  await channel.send({
+    embeds: [new EmbedBuilder().setColor(style.color).setTitle(style.title).addFields(fields).setTimestamp()],
+  });
+  return true;
+}
+
+async function sendJkopayInquiryAudit({ actorId, platformOrderId, transaction, error }) {
+  const channel = await client.channels.fetch(JKOPAY_REFUND_CHANNEL_ID).catch(() => null);
+  if (!channel?.isTextBased?.()) {
+    console.error(`[JKOPAY][INQUIRY] 找不到查單紀錄頻道 ${JKOPAY_REFUND_CHANNEL_ID}`);
+    return false;
+  }
+
+  const fields = [
+    { name: "操作人員", value: `<@${actorId}>`, inline: true },
+    { name: "Inquiry 結果", value: error ? "查詢失敗" : "000", inline: true },
+    { name: "街口訂單編號", value: `\`${String(platformOrderId || "未知").slice(0, 100)}\`` },
+  ];
+  if (transaction) {
+    fields.push(
+      { name: "交易狀態", value: `\`${String(transaction.status ?? "未知")}\``, inline: true },
+      {
+        name: "交易金額",
+        value: `NT$${Number(transaction.final_price || 0).toLocaleString("zh-TW")}`,
+        inline: true,
+      },
+      {
+        name: "街口交易序號",
+        value: `\`${String(transaction.tradeNo || transaction.trade_no || "未提供").slice(0, 100)}\``,
+      },
+      { name: "交易時間", value: String(transaction.trans_time || "未提供"), inline: true },
+    );
+  }
+  if (error) fields.push({ name: "錯誤訊息", value: String(error).slice(0, 1000) });
+
+  await channel.send({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(error ? "#ef4444" : "#3b82f6")
+        .setTitle(error ? "❌ 街口訂單查詢失敗" : "🔎 街口訂單查詢 Log")
+        .addFields(fields)
+        .setTimestamp(),
+    ],
+  });
+  return true;
 }
 // ===== 發送訂單系統 =====
 async function sendCheckinPanel(client) {
@@ -5574,6 +6013,30 @@ const commands = sortCommandDefinitions([
         ),
     ),
   new SlashCommandBuilder()
+    .setName("客服接待單數新增")
+    .setDescription("新增客服接待件數，每件增加 NT$10 薪資")
+    .addIntegerOption((option) =>
+      option
+        .setName("件數")
+        .setDescription("本次要新增的客服接待件數")
+        .setMinValue(1)
+        .setMaxValue(500)
+        .setRequired(true),
+    )
+    .addUserOption((option) =>
+      option
+        .setName("客服")
+        .setDescription("管理員可代指定客服登錄，未指定則登錄自己")
+        .setRequired(false),
+    )
+    .addStringOption((option) =>
+      option
+        .setName("備註")
+        .setDescription("選填備註")
+        .setMaxLength(200)
+        .setRequired(false),
+    ),
+  new SlashCommandBuilder()
     .setName("我的排名")
     .setDescription("查看自己的排名"),
   new SlashCommandBuilder()
@@ -5704,6 +6167,30 @@ const commands = sortCommandDefinitions([
     )
     .addIntegerOption((option) =>
       option.setName("金額").setDescription("輸入金額").setRequired(true),
+    ),
+  new SlashCommandBuilder()
+    .setName("街口查詢")
+    .setDescription("查詢街口儲值單或官網商品單的最新交易狀態")
+    .addStringOption((option) =>
+      option
+        .setName("訂單編號")
+        .setDescription("輸入 TOP-...、QIUNAI-TOP-... 或 WASH-... 編號")
+        .setRequired(true),
+    ),
+  new SlashCommandBuilder()
+    .setName("街口退款")
+    .setDescription("將已付款的街口儲值單或官網商品單整筆退款")
+    .addStringOption((option) =>
+      option
+        .setName("訂單編號")
+        .setDescription("輸入 TOP-...、QIUNAI-TOP-... 或 WASH-... 編號")
+        .setRequired(true),
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName("確認")
+        .setDescription("確認退款；儲值單會同步扣回這筆入帳的 ASD")
+        .setRequired(true),
     ),
   new SlashCommandBuilder()
     .setName("滿意度調查")
@@ -6159,10 +6646,13 @@ client.once(Events.ClientReady, async () => {
           }),
       },
       { name: "分區下單面板", run: () => dispatchSystem.sendGameOrderPanels() },
+      { name: "自助下單面板", run: () => dispatchSystem.sendSelfServiceOrderPanel() },
+      { name: "自助派單倒數恢復", run: () => dispatchSystem.restoreSelfServiceDispatchTimers() },
       { name: "打賞下單面板", run: () => dispatchSystem.sendTipOrderPanel() },
       { name: "報單面板", run: () => dispatchSystem.sendWorkReportPanel() },
       { name: "商店面板", run: () => refreshShop(client) },
       { name: "儲值面板", run: () => sendTopupPanel(client) },
+      { name: "街口退款面板", run: sendJkopayRefundPanel },
       { name: "ATM 面板", run: () => sendAtmPanel(client) },
       { name: "簽到面板", run: () => sendCheckinPanel(client) },
       { name: "扭蛋面板", run: () => sendGachaPanel(client) },
@@ -6207,10 +6697,12 @@ client.once(Events.ClientReady, async () => {
             healthState: runtimeHealth,
             repairTasks: [
               { name: "分區下單面板", run: () => dispatchSystem.sendGameOrderPanels() },
+              { name: "自助下單面板", run: () => dispatchSystem.sendSelfServiceOrderPanel() },
               { name: "打賞下單面板", run: () => dispatchSystem.sendTipOrderPanel() },
               { name: "報單面板", run: () => dispatchSystem.sendWorkReportPanel() },
               { name: "入職申請面板", run: () => employmentSystem.sendPanel() },
               { name: "投訴面板", run: () => complaintSystem.sendPanel() },
+              { name: "街口退款面板", run: sendJkopayRefundPanel },
             ],
           }),
       },
@@ -6993,7 +7485,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (
         customId.startsWith("order_review_") ||
         customId.startsWith("manual_review_") ||
-        customId.startsWith("review_privacy_")
+        customId.startsWith("review_privacy_") ||
+        customId.startsWith("self_service_review_skip_")
       ) {
         await handleButtonInteraction(interaction);
         return;
@@ -7024,6 +7517,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (customId.startsWith("tip_custom_price_")) {
         await openTipCustomPriceModal(interaction);
         return;
+      }
+      if (customId.startsWith("tip_staff_page_")) {
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.deferReply({ flags: 64 });
+        }
+        return await handleTipStaffPage(interaction);
       }
       if (
         customId.startsWith("tip_broadcast_yes_") ||
@@ -7166,6 +7665,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (
         interaction.customId === "open_topup_modal" ||
         interaction.customId === "open_play_order_form" ||
+        interaction.customId === "self_service_start" ||
+        interaction.customId.startsWith("self_service_extend_") ||
         interaction.customId.startsWith("new_order_note_yes_") ||
         interaction.customId.startsWith("service_quote_price_") ||
         interaction.customId.startsWith("staff_quote_price_") ||
@@ -7213,7 +7714,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (
         interaction.customId.startsWith("order_review_") ||
         interaction.customId.startsWith("manual_review_") ||
-        interaction.customId.startsWith("review_privacy_")
+        interaction.customId.startsWith("review_privacy_") ||
+        interaction.customId.startsWith("self_service_review_skip_")
       ) {
         await handleButtonInteraction(interaction);
         return;
@@ -7237,6 +7739,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isStringSelectMenu()) {
       // ===== 新版下單流程：不能先 defer，因為 dispatchSystem 會用 interaction.update() =====
       if (
+        interaction.customId.startsWith("self_service_game_") ||
+        interaction.customId.startsWith("self_service_gender_") ||
+        interaction.customId.startsWith("self_customer_numbers_") ||
         interaction.customId.startsWith("new_order_game_") ||
         interaction.customId.startsWith("new_order_item_") ||
         interaction.customId.startsWith("new_order_rank_") ||
@@ -7318,7 +7823,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const tipPaymentInput = new TextInputBuilder()
           .setCustomId("tip_payment_method")
           .setLabel("付款方式")
-          .setPlaceholder("轉帳 / 無卡 / 儲值卡 / 錢包 / 餘額")
+          .setPlaceholder("轉帳 / 無卡 / 儲值卡 / 員工扣薪")
           .setStyle(TextInputStyle.Short)
           .setRequired(true);
         modal.addComponents(
@@ -7568,6 +8073,61 @@ async function handleSlashCommand(interaction) {
       console.error("[新增訂單指令] 建立流程失敗", error);
       return interaction.editReply({
         content: `❌ 建立下單流程失敗：${error.message || error}`,
+      });
+    }
+  }
+  if (interaction.commandName === "客服接待單數新增") {
+    const target = interaction.options.getUser("客服") || interaction.user;
+    const count = interaction.options.getInteger("件數", true);
+    const note = interaction.options.getString("備註") || "";
+    const isAdministrator =
+      interaction.guild.ownerId === interaction.user.id ||
+      interaction.member.permissions.has(PermissionFlagsBits.Administrator);
+
+    if (!QIUNAI_CUSTOMER_SERVICE_IDS.includes(target.id)) {
+      return interaction.editReply({
+        content: "❌ 只能替目前排班或支援客服新增接待件數。",
+      });
+    }
+    if (target.id !== interaction.user.id && !isAdministrator) {
+      return interaction.editReply({
+        content: "❌ 只有管理員可以代其他客服新增接待件數。",
+      });
+    }
+
+    const staff = await getStaffByDiscordId(target.id);
+    if (!staff?.is_active) {
+      return interaction.editReply({ content: "❌ 找不到已啟用的客服資料。" });
+    }
+
+    try {
+      const result = await recordCustomerServiceReception(supabase, {
+        appKey: "qiunai",
+        interactionId: interaction.id,
+        discordId: target.id,
+        staffName:
+          staff.display_name ||
+          staff.real_name ||
+          staff.discord_name ||
+          staff.name ||
+          target.globalName ||
+          target.username,
+        count,
+        recordedBy: interaction.user.id,
+        note,
+      });
+      return interaction.editReply({
+        content:
+          `✅ 已替 <@${target.id}> 新增客服接待 ${result.count} 件，` +
+          `薪資增加 NT$${result.amount.toLocaleString("zh-TW")}。`,
+      });
+    } catch (error) {
+      console.error("[客服接待單數新增] 寫入失敗", error);
+      const duplicate = String(error?.code || "") === "23505";
+      return interaction.editReply({
+        content: duplicate
+          ? "❌ 這次指令已經登錄過，未重複增加件數或薪資。"
+          : `❌ 新增客服接待件數失敗：${error.message || error}`,
       });
     }
   }
@@ -7912,6 +8472,179 @@ async function handleSlashCommand(interaction) {
     return interaction.editReply({
       content: `✅ 已扣除 <@${target.id}> ${amount} 星雨幣，目前餘額 ${finalCoins} 星雨幣`,
     });
+  }
+  if (interaction.commandName === "街口查詢") {
+    if (!isOwnerOrAdmin(interaction)) {
+      return interaction.editReply({
+        content: "❌ 只有群主或管理員可以查詢街口訂單。",
+      });
+    }
+    if (interaction.channelId !== JKOPAY_REFUND_CHANNEL_ID) {
+      return interaction.editReply({
+        content: `❌ 街口訂單查詢請統一到 <#${JKOPAY_REFUND_CHANNEL_ID}> 操作與查看 Log。`,
+      });
+    }
+
+    const inputOrderId = interaction.options.getString("訂單編號", true);
+    try {
+      const inquiry = await jkopayService.inquirePayment(inputOrderId);
+      const transaction = inquiry.transaction;
+      await sendJkopayInquiryAudit({
+        actorId: interaction.user.id,
+        platformOrderId: inquiry.platformOrderId,
+        transaction,
+      });
+      return interaction.editReply({
+        content:
+          `✅ 街口訂單查詢完成，Log 已送到本頻道。\n\n` +
+          `訂單編號：${inquiry.platformOrderId}\n` +
+          `交易狀態：${transaction.status ?? "未知"}\n` +
+          `交易金額：NT$${Number(transaction.final_price || 0).toLocaleString("zh-TW")}\n` +
+          `街口交易序號：${transaction.tradeNo || transaction.trade_no || "未提供"}\n` +
+          `交易時間：${transaction.trans_time || "未提供"}`,
+      });
+    } catch (error) {
+      console.error("[JKOPAY][INQUIRY] 管理員查單失敗", error);
+      await sendJkopayInquiryAudit({
+        actorId: interaction.user.id,
+        platformOrderId: inputOrderId,
+        error: error.message || error,
+      }).catch((auditError) =>
+        console.error("[JKOPAY][INQUIRY] 發送查單失敗紀錄失敗", auditError),
+      );
+      return interaction.editReply({
+        content: `❌ 街口訂單查詢失敗：${error.message || error}`,
+      });
+    }
+  }
+  if (interaction.commandName === "街口退款") {
+    if (!isOwnerOrAdmin(interaction)) {
+      return interaction.editReply({
+        content: "❌ 只有群主或管理員可以執行街口退款。",
+      });
+    }
+    if (interaction.channelId !== JKOPAY_REFUND_CHANNEL_ID) {
+      return interaction.editReply({
+        content: `❌ 街口退款請統一到 <#${JKOPAY_REFUND_CHANNEL_ID}> 操作與查看紀錄。`,
+      });
+    }
+    if (!interaction.options.getBoolean("確認", true)) {
+      return interaction.editReply({
+        content: "❌ 已取消退款，沒有變更街口訂單或 ASD。",
+      });
+    }
+
+    const inputOrderId = interaction.options.getString("訂單編號", true);
+    try {
+      const refund = await jkopayService.refundPayment({
+        platformOrderId: inputOrderId,
+        requestedBy: interaction.user.id,
+      });
+      if (refund.alreadyProcessed) {
+        await sendJkopayRefundAudit({
+          status: "duplicate",
+          actorId: interaction.user.id,
+          platformOrderId: refund.order.platform_order_id,
+          amount: refund.amount,
+          kind: refund.kind,
+          detail: "此訂單先前已完成退款，本次沒有重複執行。",
+        }).catch((error) => console.error("[JKOPAY][REFUND] 發送重複退款紀錄失敗", error));
+        return interaction.editReply({
+          content:
+            `ℹ️ 此街口訂單已退款，沒有重複執行。\n` +
+            `訂單編號：${refund.order.platform_order_id}`,
+        });
+      }
+
+      const warnings = [];
+      const isTopup = refund.kind === "topup";
+      const note = isTopup
+        ? `${refund.order.topup_no}｜街口退款 ${refund.order.platform_order_id}`
+        : `${refund.order.order_no}｜官網商品街口退款 ${refund.order.platform_order_id}`;
+      if (isTopup) {
+        await allianceMembership
+          .adjustCumulative({
+            discordUserId: refund.order.user_id,
+            activityType: "topup",
+            mode: "subtract",
+            amount: refund.amount,
+            sourceKey: `jkopay-refund:${refund.order.platform_order_id}:${refund.order.user_id}`,
+            note,
+          })
+          .catch((error) => {
+            console.error("[JKOPAY][REFUND] 會籍累積儲值回沖失敗", error);
+            warnings.push("會籍累積儲值尚未回沖");
+          });
+      }
+      await recordAccountingLedger({
+        entry_type: isTopup ? "customer_topup_refund" : "merchandise_refund",
+        entry_label: isTopup ? "客人儲值退款" : "官網商品退款",
+        amount: -refund.amount,
+        cash_amount: -refund.amount,
+        liability_amount: isTopup ? -refund.amount : 0,
+        payment_method: "街口支付",
+        customer_id: isTopup ? refund.order.user_id : null,
+        source_table: isTopup ? "jkopay_topup_orders" : "merchandise_orders",
+        source_id: refund.order.platform_order_id,
+        dedupe_key: `jkopay-refund:${refund.order.platform_order_id}`,
+        note,
+        metadata: { refund_result: refund.refundResult },
+        created_by: interaction.user.id,
+      }).catch((error) => {
+        console.error("[JKOPAY][REFUND] 會計流水回沖失敗", error);
+        warnings.push("會計流水尚未寫入");
+      });
+      if (isTopup) {
+        await sendWalletLog(
+          refund.order.user_id,
+          "街口退款",
+          -refund.amount,
+          refund.balance,
+          `💳 街口支付退款完成｜${refund.order.topup_no}`,
+          false,
+        );
+      }
+
+      await sendJkopayRefundAudit({
+        status: "success",
+        actorId: interaction.user.id,
+        platformOrderId: refund.order.platform_order_id,
+        amount: refund.amount,
+        kind: refund.kind,
+        detail: isTopup
+          ? `已完成退款並扣回 ASD；退款後餘額 ${refund.balance.toLocaleString("zh-TW")} ASD。`
+          : `官網訂單 ${refund.order.order_no} 已更新為已退款。`,
+      }).catch((error) => {
+        console.error("[JKOPAY][REFUND] 發送成功紀錄失敗", error);
+        warnings.push("退款專區紀錄尚未送出");
+      });
+      const warningText = warnings.length
+        ? `\n\n⚠️ ${warnings.join("、")}，請查看 Railway Logs。`
+        : "";
+      return interaction.editReply({
+        content:
+          `✅ 街口退款完成${isTopup ? "並已扣回 ASD" : "，官網商品訂單已更新"}。\n\n` +
+          `訂單編號：${refund.order.platform_order_id}\n` +
+          `退款金額：NT$${refund.amount.toLocaleString("zh-TW")}\n` +
+          (isTopup
+            ? `玩家：<@${refund.order.user_id}>\n退款後餘額：${refund.balance.toLocaleString("zh-TW")} ASD`
+            : `官網訂單：${refund.order.order_no}`) +
+          warningText,
+      });
+    } catch (error) {
+      console.error("[JKOPAY][REFUND] 管理員退款失敗", error);
+      await sendJkopayRefundAudit({
+        status: "failed",
+        actorId: interaction.user.id,
+        platformOrderId: inputOrderId,
+        detail: error.message || error,
+      }).catch((auditError) =>
+        console.error("[JKOPAY][REFUND] 發送失敗紀錄失敗", auditError),
+      );
+      return interaction.editReply({
+        content: `❌ 街口退款失敗：${error.message || error}`,
+      });
+    }
   }
   if (interaction.commandName === "給與身份組") {
     await handleGiveRoleCommand(interaction);
@@ -9604,13 +10337,37 @@ const reorderInFlight = new Set();
 // ===== 完整按鈕交互處理 =====
 async function handleButtonInteraction(interaction) {
   const customId = interaction.customId;
+  if (customId.startsWith("self_service_review_skip_")) {
+    const orderId = customId.replace("self_service_review_skip_", "");
+    const { data: order, error } = await supabase
+      .from("play_orders")
+      .select("id, order_no, customer_id, status, note")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (error || !order || !String(order.note || "").includes("[SELF_SERVICE]")) {
+      return interaction.reply({ content: "❌ 找不到這張自助訂單。", flags: 64 });
+    }
+    if (interaction.user.id !== order.customer_id) {
+      return interaction.reply({ content: "❌ 只有下單者可以略過評價。", flags: 64 });
+    }
+    if (order.status !== "completed") {
+      return interaction.reply({ content: "❌ 訂單尚未完成。", flags: 64 });
+    }
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.reply({ content: "✅ 已略過評價。", flags: 64 });
+    await interaction.channel.send(
+      `✅ 訂單 ${order.order_no || order.id} 已完成，頻道將在 10 秒後關閉。`,
+    );
+    setTimeout(() => interaction.channel.delete().catch(() => null), 10_000).unref?.();
+    return;
+  }
   if (customId.startsWith("review_privacy_order_")) {
     const parts = customId.split("_");
     const anonymous = parts[3] === "anon";
     const orderId = parts[4];
     const { data: order, error } = await supabase
       .from("play_orders")
-      .select("id, customer_id")
+      .select("id, customer_id, note")
       .eq("id", orderId)
       .maybeSingle();
     if (error || !order) {
@@ -9626,7 +10383,11 @@ async function handleButtonInteraction(interaction) {
       });
     }
     return await interaction.update({
-      components: buildOrderReviewComponents(orderId, anonymous),
+      components: buildOrderReviewComponents(
+        orderId,
+        anonymous,
+        String(order.note || "").includes("[SELF_SERVICE]"),
+      ),
     });
   }
   if (customId.startsWith("review_privacy_manual_")) {
@@ -10524,6 +11285,40 @@ async function handleButtonInteraction(interaction) {
         paymentMethod.includes("儲值") ||
         paymentMethod.includes("錢包") ||
         paymentMethod.includes("餘額");
+      const isSalaryPayment = paymentMethod.includes("扣薪");
+      if (isSalaryPayment) {
+        let eligibility;
+        try {
+          eligibility = await dispatchSystem.getSalaryDeductionEligibility(
+            tipperId,
+            totalAmount,
+          );
+        } catch (error) {
+          return await interaction.editReply({
+            content: `❌ 無法使用打賞扣薪付款：${error.message || error}`,
+            components: [],
+          });
+        }
+        if (!eligibility.state.canUse) {
+          return await interaction.editReply({
+            content: `❌ 無法使用打賞扣薪付款：本筆會超過 NT$${eligibility.state.advanceLimit.toLocaleString("zh-TW")} 預支上限。`,
+            components: [],
+          });
+        }
+        await dispatchSystem.createSalaryDeductionPrompt({
+          channel: interaction.channel,
+          customerId: tipperId,
+          amount: totalAmount,
+          eligibility,
+          confirmId: `confirm_tip_salary_${tipConfirmId}`,
+          cancelId: `cancel_tip_salary_${tipConfirmId}`,
+          purpose: "打賞",
+        });
+        return await interaction.editReply({
+          content: "✅ 已送出打賞扣薪申請，請等待客服或管理員確認。",
+          components: [],
+        });
+      }
       const needManualConfirm = !isWalletPayment;
       let deductText = needManualConfirm ? "待客服確認付款" : "未自動扣款";
       if (isWalletPayment) {
@@ -10649,6 +11444,7 @@ async function handleButtonInteraction(interaction) {
             item,
             amount,
           });
+          await sendTipBroadcastSafely(tipData);
           await interaction.channel.send({
             content:
               `✅ 儲值卡打賞已完成，並已寫入薪資網\n` +
@@ -10693,6 +11489,113 @@ async function handleButtonInteraction(interaction) {
       pendingTips.delete(tipConfirmId);
       return await interaction.editReply({
         content: "❌ 已取消送出打賞",
+        components: [],
+      });
+    }
+    if (customId.startsWith("confirm_tip_salary_")) {
+      if (!isAdminOrStaff(interaction)) {
+        return await interaction.editReply({
+          content: "❌ 只有客服或管理員可以確認打賞扣薪付款。",
+        });
+      }
+      const tipId = customId.replace("confirm_tip_salary_", "");
+      const tipData = pendingTips.get(tipId);
+      if (!tipData || !String(tipData.paymentMethod || "").includes("扣薪")) {
+        return await interaction.editReply({
+          content: "❌ 這筆打賞扣薪已過期或已處理，請重新操作。",
+          components: [],
+        });
+      }
+      const tipperId = tipData.tipperId;
+      const selectedStaffIds = getTipStaffIds(tipData);
+      const selectedStaffText = formatTipStaffMentions(selectedStaffIds);
+      const legacyItem = tipData.item;
+      const legacyAmount = Number(tipData.amount);
+      let allocations = refreshTipTotals(tipData);
+      if (!allocations.length && legacyItem && legacyAmount > 0) {
+        allocations = selectedStaffIds.map((staffId) => ({
+          staffId,
+          item: legacyItem,
+          amount: legacyAmount,
+        }));
+      }
+      const totalAmount = allocations.reduce(
+        (sum, allocation) => sum + allocation.amount,
+        0,
+      );
+      if (!selectedStaffIds.length || !allocations.length || totalAmount <= 0) {
+        return await interaction.editReply({ content: "❌ 打賞資料不完整。" });
+      }
+      if (hasSelfTip(tipperId, selectedStaffIds)) {
+        return await interaction.editReply({ content: "❌ 不能打賞自己。" });
+      }
+
+      try {
+        const payment = await dispatchSystem.applySalaryDeductionPayment({
+          customerId: tipperId,
+          amount: totalAmount,
+          purpose: "使用薪水打賞",
+          commit: () =>
+            saveTipAllocations({
+              guildId: getGuildId(interaction),
+              tipperId,
+              allocations,
+              channelId: interaction.channel.id,
+            }),
+        });
+        const tipOrders = payment.result || [];
+        await sendTipWorkReportsSafely(tipOrders, { tipperId });
+        await sendTipBroadcastSafely(tipData);
+        pendingTips.delete(tipId);
+        await interaction.message.edit({ components: [] }).catch(() => {});
+        await interaction.channel.send({
+          embeds: [
+            new EmbedBuilder()
+              .setColor("#57F287")
+              .setTitle("✅ 打賞已使用員工扣薪付款")
+              .setDescription(
+                `打賞人：<@${tipperId}>\n` +
+                  `受賞陪陪：${selectedStaffText}\n` +
+                  `打賞明細：\n${allocations
+                    .map(
+                      (allocation) =>
+                        `<@${allocation.staffId}>：${allocation.item}｜${allocation.amount.toLocaleString("zh-TW")} ASD`,
+                    )
+                    .join("\n")}\n` +
+                  `扣薪總額：NT$${totalAmount.toLocaleString("zh-TW")}`,
+              )
+              .setTimestamp(),
+          ],
+        });
+        await sendTipCloseButtons(interaction.channel);
+        return await interaction.editReply({
+          content: "✅ 已確認打賞扣薪付款，EIP 扣項與打賞薪資紀錄已建立。",
+          components: [],
+        });
+      } catch (error) {
+        console.error("[打賞扣薪付款失敗]", error);
+        return await interaction.editReply({
+          content: `❌ 打賞扣薪付款失敗：${error.message || error}`,
+        });
+      }
+    }
+    if (customId.startsWith("cancel_tip_salary_")) {
+      const tipId = customId.replace("cancel_tip_salary_", "");
+      const tipData = pendingTips.get(tipId);
+      if (
+        tipData &&
+        interaction.user.id !== tipData.tipperId &&
+        !isAdminOrStaff(interaction)
+      ) {
+        return await interaction.editReply({ content: "❌ 你無法取消這筆付款。" });
+      }
+      if (tipData) {
+        tipData.paymentMethod = null;
+        setPendingTip(tipId, tipData);
+      }
+      await interaction.message.edit({ components: [] }).catch(() => {});
+      return await interaction.editReply({
+        content: "✅ 已取消員工扣薪，請重新選擇付款方式。",
         components: [],
       });
     }

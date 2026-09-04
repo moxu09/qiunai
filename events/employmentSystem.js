@@ -27,20 +27,56 @@ const FONT_PATH = path.join(
   "fonts",
   "NotoSansCJKtc-Regular.otf",
 );
-const EMPLOYMENT_CONTRACT_PATH = path.join(
-  __dirname,
-  "..",
-  "assets",
-  "employment",
-  "陪陪承攬合作契約書_v1.1.pdf",
-);
-const EMPLOYMENT_CONTRACT_FILENAME =
-  "深夜不關燈及秋奈電競_陪陪承攬合作契約書_v1.1.pdf";
-const EMPLOYMENT_CONTRACT_RETURN_NOTE =
-  "備註：請填寫並簽署後於入群後三天內發送到個人填單區以完成入職手續（無論電子簽署或紙本簽署掃描上傳皆可）";
-
 const pendingApplications = new Map();
 const processingReviews = new Set();
+
+async function hasPaidOrderAtStore({ supabase, discordUserId, guildId }) {
+  if (!supabase || !discordUserId || !guildId) {
+    throw new Error("目前無法確認申請人的消費身分，請稍後再試");
+  }
+
+  const { data, error } = await supabase
+    .from("play_orders")
+    .select("id")
+    .eq("guild_id", guildId)
+    .eq("customer_id", discordUserId)
+    .eq("paid", true)
+    .limit(1);
+
+  if (error) {
+    console.error("[入職申請] 查詢同店消費紀錄失敗", error);
+    throw new Error("目前無法確認申請人的消費身分，請稍後再試");
+  }
+
+  return Array.isArray(data) && data.length > 0;
+}
+
+async function hasActiveCompanionAtStore({
+  supabase,
+  discordUserId,
+  guildId,
+  organization,
+}) {
+  if (!supabase || !discordUserId || !guildId || !organization) {
+    throw new Error("目前無法確認申請人的陪陪身分，請稍後再試");
+  }
+
+  const staffTable = organization === "qiunai" ? "qiunai_staff" : "players";
+  let query = supabase
+    .from(staffTable)
+    .select("discord_id")
+    .eq("discord_id", discordUserId)
+    .eq("is_active", true);
+  if (staffTable === "players") query = query.eq("guild_id", guildId);
+  const { data, error } = await query.limit(1);
+
+  if (error) {
+    console.error("[入職申請] 查詢陪陪身分失敗", error);
+    throw new Error("目前無法確認申請人的陪陪身分，請稍後再試");
+  }
+
+  return Array.isArray(data) && data.length > 0;
+}
 
 const GAMES = [
   { key: "valorant", label: "Valorant", template: "competitive" },
@@ -435,9 +471,18 @@ function normalizeRoleName(value) {
     .replace(/[\s・．.]/g, "");
 }
 
-function getConfiguredRoleNames(config, gameKey, track) {
+function getConfiguredRoleNames(config, gameKey, track, platform = null, appliedItem = "") {
   const roleMap = config.examinerRoles || {};
+  if (gameKey === "other" && appliedItem) {
+    const normalizedItem = normalizeRoleName(appliedItem);
+    const matchedItem = Object.entries(config.examinerRolesByAppliedItem || {}).find(
+      ([keyword]) => normalizedItem.includes(normalizeRoleName(keyword)),
+    );
+    if (matchedItem) return matchedItem[1];
+  }
   return (
+    roleMap[`${gameKey}:${track}:${platform}`] ||
+    roleMap[`${gameKey}:*:${platform}`] ||
     roleMap[`${gameKey}:${track}`] ||
     roleMap[`${gameKey}:*`] ||
     roleMap.default ||
@@ -445,8 +490,8 @@ function getConfiguredRoleNames(config, gameKey, track) {
   );
 }
 
-function resolveExaminerRoles(guild, config, gameKey, track) {
-  const names = getConfiguredRoleNames(config, gameKey, track);
+function resolveExaminerRoles(guild, config, gameKey, track, platform = null, appliedItem = "") {
+  const names = getConfiguredRoleNames(config, gameKey, track, platform, appliedItem);
   const roles = [];
 
   for (const expected of names) {
@@ -580,6 +625,8 @@ function getEmbedData(message) {
     gameKey: footerParts[2],
     track: footerParts[3],
     platform: footerParts[4] === "none" ? null : footerParts[4],
+    appliedItem:
+      (data.fields || []).find((field) => field.name === "報考項目")?.value || "",
     fields: data.fields || [],
   };
 }
@@ -590,13 +637,58 @@ function safeFilename(value) {
     .slice(0, 60);
 }
 
-function buildApprovedEmploymentDmContent(config) {
+function buildApprovedEmploymentDmContent(config, signingInvitation) {
+  const invitation =
+    typeof signingInvitation === "string"
+      ? { required: true, url: signingInvitation }
+      : signingInvitation || {};
+  const signingText =
+    invitation.required === false
+      ? invitation.reason === "already_signed"
+        ? "系統已確認你曾在秋奈／深夜任一店完成入職文件簽署，本次不需要重複簽名。"
+        : "系統已確認你在 2026 年 9 月 1 日前已有公司員工資料存檔，本次暫不需要線上簽署。"
+      : `請先詳閱並完成線上入職契約：${invitation.url}\n` +
+        "此連結綁定你的 Discord 帳號、僅限一次使用，並於 7 日後失效。\n" +
+        "完成簽署後，第一次登入 EIP 才會正式啟用人員檔案。";
   return (
     `恭喜成功入職${config.brandName}\n\n` +
+    `${signingText}\n\n` +
     `以下為工作群連結：${config.workGuildInvite}\n` +
     "請於收到此連結48小時內入群報到\n\n" +
     `新人入職必看頻道：<#${config.newcomerChannelId}>`
   );
+}
+
+async function requestEmploymentSigningInvitation(config, applicant, reviewerId) {
+  const secret = String(process.env.EMPLOYMENT_SIGNING_API_SECRET || "").trim();
+  if (secret.length < 32) {
+    throw new Error("EMPLOYMENT_SIGNING_API_SECRET 尚未設定或長度不足");
+  }
+  const baseUrl = String(config.signingBaseUrl || "").replace(/\/$/, "");
+  const response = await fetch(
+    `${baseUrl}/api/${config.organization}/employment-signing/invite`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        discordId: applicant.id,
+        discordName: applicant.globalName || applicant.username || applicant.id,
+        invitedBy: reviewerId,
+      }),
+    },
+  );
+  const payload = await response.json().catch(() => ({}));
+  if (
+    !response.ok ||
+    !payload.invitation ||
+    (payload.invitation.required !== false && !payload.invitation.url)
+  ) {
+    throw new Error(payload.message || `簽署邀請服務回傳 ${response.status}`);
+  }
+  return payload.invitation;
 }
 
 function buildEmploymentResultNotice(reviewer, reviewerId) {
@@ -605,6 +697,10 @@ function buildEmploymentResultNotice(reviewer, reviewerId) {
     `審核官：${reviewer}（<@${reviewerId}>）\n` +
     "通過面試者會額外收到入職相關資訊，若未收到面試結果請於此通知審核官。此討論串閒置 24 小時後會自動刪除。"
   );
+}
+
+function buildExistingCompanionResultDm(result, gameLabel) {
+  return `你申請的「${gameLabel || "新項目"}」加考結果：${result}。`;
 }
 
 function buildEmploymentPdfBuffer({
@@ -854,7 +950,7 @@ function disabledComponents(message) {
   }));
 }
 
-function createEmploymentSystem(client, config) {
+function createEmploymentSystem(client, config, supabase) {
   const completedThreadDeleteTimers = new Map();
   const completedThreadIds = new Set();
   let cleanupSweepTimer = null;
@@ -998,7 +1094,7 @@ function createEmploymentSystem(client, config) {
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId("employment_start")
-          .setLabel("申請入職")
+          .setLabel("開始填寫申請")
           .setStyle(ButtonStyle.Success),
       ),
     ];
@@ -1042,6 +1138,8 @@ function createEmploymentSystem(client, config) {
       config,
       flow.gameKey,
       flow.track,
+      flow.platform,
+      flow.answers.applied_item,
     );
     const mentions = roles.map((role) => `<@&${role.id}>`);
     const examinerNotice =
@@ -1152,6 +1250,8 @@ function createEmploymentSystem(client, config) {
       config,
       record.gameKey,
       record.track,
+      record.platform,
+      record.appliedItem,
     );
     if (!canReview(interaction, roles)) {
       await interaction.reply({
@@ -1209,17 +1309,29 @@ function createEmploymentSystem(client, config) {
 
       const applicant = await client.users.fetch(record.applicantId);
       let dmDelivered = true;
+      let signingReady = result !== "通過";
       try {
-        if (result === "通過") {
-          await applicant.send({
-            content: buildApprovedEmploymentDmContent(config),
-            files: [
-              new AttachmentBuilder(EMPLOYMENT_CONTRACT_PATH, {
-                name: EMPLOYMENT_CONTRACT_FILENAME,
-              }),
-            ],
-          });
-          await applicant.send(EMPLOYMENT_CONTRACT_RETURN_NOTE);
+        const existingCompanion = await hasActiveCompanionAtStore({
+          supabase,
+          discordUserId: record.applicantId,
+          guildId: interaction.guildId || interaction.guild?.id || config.guildId,
+          organization: config.organization,
+        });
+        if (existingCompanion) {
+          signingReady = true;
+          await applicant.send(
+            buildExistingCompanionResultDm(result, game?.label || record.gameKey),
+          );
+        } else if (result === "通過") {
+          const invitation = await requestEmploymentSigningInvitation(
+            config,
+            applicant,
+            interaction.user.id,
+          );
+          signingReady = true;
+          await applicant.send(
+            buildApprovedEmploymentDmContent(config, invitation),
+          );
         } else {
           await applicant.send(
             "經綜合考量，您的資料尚不符合我方所需之職位\n" +
@@ -1250,7 +1362,11 @@ function createEmploymentSystem(client, config) {
       await interaction.editReply({
         content:
           `✅ 已完成審核並將 PDF 存入 <#${config.archiveChannelId}>。` +
-          (dmDelivered ? "申請人已收到私訊。" : "⚠️ 申請人關閉私訊，未能送達通知。"),
+          (dmDelivered
+            ? "申請人已收到私訊。"
+            : signingReady
+              ? "⚠️ 申請人關閉私訊，未能送達通知。"
+              : "⚠️ 線上契約連結建立失敗，請檢查簽署服務設定後重新發送。"),
       });
     } finally {
       processingReviews.delete(reviewKey);
@@ -1263,14 +1379,34 @@ function createEmploymentSystem(client, config) {
 
     try {
       if (customId === "employment_start") {
+        await interaction.deferReply({ flags: 64 });
+        const guildId = interaction.guildId || interaction.guild?.id || config.guildId;
+        const [isStoreCustomer, isActiveCompanion] = await Promise.all([
+          hasPaidOrderAtStore({
+            supabase,
+            discordUserId: interaction.user.id,
+            guildId,
+          }),
+          hasActiveCompanionAtStore({
+            supabase,
+            discordUserId: interaction.user.id,
+            guildId,
+            organization: config.organization,
+          }),
+        ]);
+        if (isStoreCustomer && !isActiveCompanion) {
+          await interaction.editReply({
+            content: "老闆身分不給予申請陪陪，別間店消費則不受影響",
+          });
+          return true;
+        }
         createFlow(interaction.user);
-        await interaction.reply({
+        await interaction.editReply({
           content:
             "**是否同意陪玩共同守則？**\n" +
             "**是否同意他家店主、實際負責人、共同經營者、高階管理人員或競爭敏感職務人員恕無法應徵之規定？**",
           embeds: buildRulesEmbeds(config.brandName),
           components: [buildConsentRow()],
-          flags: 64,
         });
         return true;
       }
@@ -1435,15 +1571,19 @@ function createEmploymentSystem(client, config) {
 }
 
 module.exports = {
-  EMPLOYMENT_CONTRACT_RETURN_NOTE,
   GAMES,
   buildApplicationEmbed,
   buildApprovedEmploymentDmContent,
+  buildExistingCompanionResultDm,
   buildEmploymentPdfBuffer,
   buildEmploymentResultNotice,
   buildRulesEmbeds,
   createEmploymentSystem,
   getCompletedThreadDeleteDelay,
   getApplicationFields,
+  getConfiguredRoleNames,
+  hasActiveCompanionAtStore,
+  hasPaidOrderAtStore,
   normalizeRoleName,
+  requestEmploymentSigningInvitation,
 };

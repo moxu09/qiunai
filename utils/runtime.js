@@ -49,26 +49,43 @@ function createHealthServer(healthState, options = {}) {
     throw new Error("PORT 必須是 1 到 65535 的整數");
   }
 
-  const server = http.createServer((request, response) => {
+  const server = http.createServer(async (request, response) => {
     const pathname = new URL(request.url || "/", "http://localhost").pathname;
     const snapshot = healthState.snapshot();
 
-    response.setHeader("Content-Type", "application/json; charset=utf-8");
-    response.setHeader("Cache-Control", "no-store");
-
     if (pathname === "/health") {
+      response.setHeader("Content-Type", "application/json; charset=utf-8");
+      response.setHeader("Cache-Control", "no-store");
       response.statusCode = 200;
       response.end(JSON.stringify({ ...snapshot, alive: true }));
       return;
     }
 
     if (pathname === "/ready") {
+      response.setHeader("Content-Type", "application/json; charset=utf-8");
+      response.setHeader("Cache-Control", "no-store");
       response.statusCode = snapshot.ready ? 200 : 503;
       response.end(JSON.stringify(snapshot));
       return;
     }
 
+    try {
+      if (options.requestHandler && (await options.requestHandler(request, response))) {
+        return;
+      }
+    } catch (error) {
+      console.error("[RUNTIME] HTTP 請求處理失敗", error);
+      if (!response.headersSent) {
+        response.statusCode = 500;
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+      }
+      if (!response.writableEnded) response.end(JSON.stringify({ error: "internal_error" }));
+      return;
+    }
+
     response.statusCode = 404;
+    response.setHeader("Content-Type", "application/json; charset=utf-8");
+    response.setHeader("Cache-Control", "no-store");
     response.end(JSON.stringify({ error: "not_found" }));
   });
 

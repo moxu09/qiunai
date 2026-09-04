@@ -28,6 +28,20 @@ function getTipTotalAmount(amount, staffIds = []) {
   return Number(amount || 0) * Math.max(staffIds.length, 1);
 }
 
+function getTipStaffPage(options = [], requestedPage = 0, pageSize = 25) {
+  const safePageSize = Math.max(1, Math.min(25, Number(pageSize) || 25));
+  const pageCount = Math.max(1, Math.ceil(options.length / safePageSize));
+  const page = Math.max(
+    0,
+    Math.min(pageCount - 1, Number(requestedPage) || 0),
+  );
+  return {
+    page,
+    pageCount,
+    options: options.slice(page * safePageSize, (page + 1) * safePageSize),
+  };
+}
+
 function parseTipQuantityList(value, expectedCount) {
   const quantities = String(value || "")
     .trim()
@@ -108,6 +122,7 @@ module.exports = {
   getTipAllocationTotal,
   getTipGiftByKey,
   getTipGiftSelections,
+  getTipStaffPage,
   getTipStaffIds,
   getTipTotalAmount,
   hasSelfTip,

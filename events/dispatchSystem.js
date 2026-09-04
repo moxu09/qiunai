@@ -21,13 +21,13 @@ const {
   getTopupNumberFromTopic,
 } = require("../utils/topupNumbers");
 const {
-  hasCustomerServicePointRole,
-  recordCustomerServicePoint,
-} = require("../utils/customerServicePoints");
-const {
   DEFAULT_SALARY_ADVANCE_LIMIT,
   calculateSalaryDeductionState,
 } = require("../utils/salaryDeduction");
+const {
+  GAME_OPTIONS: SELF_SERVICE_GAME_OPTIONS,
+  calculateSelfServicePrice,
+} = require("../config/selfServicePricing");
 const path = require("node:path");
 
 let supabase;
@@ -40,6 +40,33 @@ const pendingTopups = new Map();
 const processingTopups = new Set();
 const pendingServiceOrders = new Map();
 const processingSalaryPayments = new Set();
+const pendingSelfServiceOrders = new Map();
+const processingSelfServicePayments = new Set();
+const processingSelfServiceClaims = new Set();
+const processingOrderPriceAdjustments = new Set();
+const selfServiceDispatchTimers = new Map();
+
+const SELF_SERVICE_ORDER_CHANNEL_ID =
+  process.env.SELF_SERVICE_ORDER_CHANNEL_ID || "1540650652215017533";
+const SELF_SERVICE_DISPATCH_CHANNEL_ID =
+  process.env.SELF_SERVICE_DISPATCH_CHANNEL_ID || "1540653111670997092";
+const SELF_SERVICE_DISPATCH_TIMEOUT_MS = 15 * 60 * 1000;
+const QIUNAI_FEMALE_PLAYER_ROLE_ID = "1206158440280621056";
+const QIUNAI_MALE_PLAYER_ROLE_ID = "1210852757972459540";
+const SELF_SERVICE_SUCCESS_IMAGE = path.join(
+  __dirname,
+  "..",
+  "assets",
+  "panels",
+  "self-service-dispatch-success.png",
+);
+const SELF_SERVICE_FAILED_IMAGE = path.join(
+  __dirname,
+  "..",
+  "assets",
+  "panels",
+  "self-service-dispatch-failed.png",
+);
 
 const QIUNAI_MANAGEMENT_ROLE_ID = "1525881173962788954";
 
@@ -188,6 +215,7 @@ async function createSalaryDeductionPrompt({
   eligibility,
   confirmId,
   cancelId,
+  transferId = null,
   purpose = "點單",
 }) {
   const { state } = eligibility;
@@ -201,6 +229,28 @@ async function createSalaryDeductionPrompt({
       `本筆扣薪：NT$${amount.toLocaleString("zh-TW")}\n` +
       `扣除後剩餘：NT$${state.projectedBalance.toLocaleString("zh-TW")}`;
 
+  const buttons = [
+    new ButtonBuilder()
+      .setCustomId(confirmId)
+      .setLabel(state.shortage ? "確認預支" : "確認使用扣薪")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!state.canUse),
+  ];
+  if (state.shortage && transferId) {
+    buttons.push(
+      new ButtonBuilder()
+        .setCustomId(transferId)
+        .setLabel("轉帳補齊差額")
+        .setStyle(ButtonStyle.Primary),
+    );
+  }
+  buttons.push(
+    new ButtonBuilder()
+      .setCustomId(cancelId)
+      .setLabel("不使用扣薪")
+      .setStyle(ButtonStyle.Danger),
+  );
+
   await channel.send({
     content: `<@&${process.env.STAFF_ROLE}> <@${customerId}> 選擇了員工扣薪付款。`,
     embeds: [
@@ -209,21 +259,15 @@ async function createSalaryDeductionPrompt({
         .setTitle(state.shortage ? "⚠️ 薪資不足，是否確認預支" : "💼 確認使用扣薪付款")
         .setDescription(
           `${details}\n\n` +
-            `只有客服或管理員可以確認；確認後會在 ERP 新增「使用薪水${purpose}」扣項。`,
+            `只有客服或管理員可以確認；確認後會在 EIP 新增「使用薪水${purpose}」扣項。` +
+            (state.shortage && !state.canUse
+              ? `\n目前預支額已超過 NT$${state.advanceLimit.toLocaleString("zh-TW")} 上限，請改用轉帳補齊差額。`
+              : ""),
         )
         .setTimestamp(),
     ],
     components: [
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(confirmId)
-          .setLabel("確認使用扣薪")
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId(cancelId)
-          .setLabel("不使用扣薪")
-          .setStyle(ButtonStyle.Danger),
-      ),
+      new ActionRowBuilder().addComponents(...buttons),
     ],
   });
 }
@@ -249,10 +293,42 @@ async function createSalaryDeductionAdjustment(customerId, amount, note) {
     .select("id")
     .single();
   if (error || !adjustment) {
-    throw new Error(error?.message || "建立 ERP 扣項失敗");
+    throw new Error(error?.message || "建立 EIP 扣項失敗");
   }
 
   return { eligibility, adjustmentId: adjustment.id };
+}
+
+async function applySalaryDeductionPayment({
+  customerId,
+  amount,
+  purpose,
+  commit,
+}) {
+  const paymentKey = `salary:${customerId}`;
+  if (processingSalaryPayments.has(paymentKey)) {
+    throw new Error("這位員工目前有另一筆扣薪付款正在處理，請稍後再試");
+  }
+  processingSalaryPayments.add(paymentKey);
+
+  let adjustmentId = null;
+  try {
+    const adjustment = await createSalaryDeductionAdjustment(
+      customerId,
+      amount,
+      purpose,
+    );
+    adjustmentId = adjustment.adjustmentId;
+    const result = await commit();
+    return { ...adjustment, result };
+  } catch (error) {
+    if (adjustmentId) {
+      await supabase.from("qiunai_staff_bonus").delete().eq("id", adjustmentId);
+    }
+    throw error;
+  } finally {
+    processingSalaryPayments.delete(paymentKey);
+  }
 }
 
 async function applySalaryDeductionToOrders({
@@ -372,22 +448,6 @@ function getServiceName(serviceType) {
 const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 const TIP_ORDER_PANEL_CHANNEL_ID = "1531515179559551047";
-const CUSTOMER_SERVICE_POINT_ROLE_ID =
-  process.env.CUSTOMER_SERVICE_POINT_ROLE_ID || "1210642900355125288";
-const CUSTOMER_SERVICE_POINT_APP_KEY = "qiunai";
-
-async function awardCustomerServicePoint(orderId, discordId) {
-  try {
-    await recordCustomerServicePoint(supabase, {
-      appKey: CUSTOMER_SERVICE_POINT_APP_KEY,
-      orderId,
-      discordId,
-    });
-  } catch (error) {
-    console.error("[客服點數] 記錄失敗", error);
-  }
-}
-
 function getCategoryIds(value) {
   return String(value || "")
     .split(",")
@@ -574,6 +634,7 @@ const GAME_ORDER_PANELS = [
   {
     envKey: "OTHER_ORDER_CHANNEL",
     panelName: "other",
+    imageFile: "aov-pricing.png",
     title: "🌙 其他項目下單區",
     description: "請選擇你要下單的其他服務項目。",
     customId: "game_order_select_other",
@@ -581,6 +642,11 @@ const GAME_ORDER_PANELS = [
       { label: "PUBG M", value: "pubgm", description: "PUBG M" },
       { label: "NARAKA", value: "naraka", description: "NARAKA" },
       { label: "Minecraft", value: "minecraft", description: "Minecraft" },
+      {
+        label: "傳說對決",
+        value: "arena_of_valor",
+        description: "傳說對決｜娛樂／技術／大神",
+      },
       {
         label: "王者榮耀",
         value: "honor_of_kings",
@@ -828,6 +894,846 @@ async function sendGameOrderPanels() {
   }
 }
 
+function getSelfServiceGameLabel(game) {
+  return SELF_SERVICE_GAME_OPTIONS.find((item) => item.value === game)?.label || game;
+}
+
+function getSelfServiceDispatchKey(game, input) {
+  const type = String(input.serviceType || "");
+  if (game === "valorant") {
+    return type.includes("娛樂") ? "特戰英豪娛樂陪玩" : "特戰英豪技術陪玩";
+  }
+  if (game === "delta") {
+    return type.includes("娛樂") ? "三角洲行動娛樂陪玩" : `三角洲行動${type}`;
+  }
+  if (game === "apex") return `Apex${type.includes("陪玩") ? type : `${type}陪玩`}`;
+  if (game === "lol") {
+    const mode = String(input.platformOrMode || "");
+    if (/ARAM|咆哮深淵/i.test(mode)) return `ARAM${type.includes("陪玩") ? type : `${type}陪玩`}`;
+    if (/TFT|聯盟戰棋|戰棋/i.test(mode)) return "聯盟戰棋";
+    return `英雄聯盟${type.includes("陪玩") ? type : `${type}陪玩`}`;
+  }
+  if (game === "steam") return "Steam";
+  return getSelfServiceGameLabel(game);
+}
+
+function getSelfServiceDispatchRoleIds(order) {
+  const service = `${order.service || ""}｜${order.dispatch_service_key || ""}`;
+  const genderRoleIds = order.gender_preference === "女陪"
+    ? [QIUNAI_FEMALE_PLAYER_ROLE_ID]
+    : order.gender_preference === "男陪"
+      ? [QIUNAI_MALE_PLAYER_ROLE_ID]
+      : [QIUNAI_FEMALE_PLAYER_ROLE_ID, QIUNAI_MALE_PLAYER_ROLE_ID];
+  let serviceRoleIds = [];
+  if (service.includes("特戰英豪")) {
+    if (service.includes("娛樂")) serviceRoleIds = [...parseRoleIds(process.env.VALORANT_ENTERTAIN_ROLE_ID)];
+    else if (service.includes("超凡")) serviceRoleIds = ["1513615452570390708"];
+    else if (service.includes("神話")) serviceRoleIds = ["1210860675010666496"];
+    else serviceRoleIds = ["1210860797341732914"];
+  } else if (service.includes("Apex")) {
+    serviceRoleIds = [
+      service.includes("娛樂") ? "1210651796813512864" : service.includes("技術") ? "1210860572422185030" : "1210861028754333747",
+    ];
+  } else if (service.includes("英雄聯盟") || service.includes("ARAM") || service.includes("聯盟戰棋")) {
+    serviceRoleIds = [
+      service.includes("娛樂") ? "1210652274771361812" : service.includes("技術") ? "1216812087582396436" : "1284782543614378025",
+    ];
+  } else if (service.includes("Steam")) {
+    serviceRoleIds = [...parseRoleIds(process.env.STEAM_ROLE_ID)];
+  } else if (service.includes("三角洲")) {
+    const mobile = service.includes("手機");
+    if (service.includes("娛樂")) serviceRoleIds = [mobile ? "1536365672429518848" : "1212483869593567292"];
+    else if (service.includes("保底") || service.includes("猛攻")) serviceRoleIds = [mobile ? "1536365686912458752" : "1253665064477786174"];
+    else serviceRoleIds = [mobile ? "1536365687511978154" : "1229372574950100992"];
+  }
+  return {
+    genderRoleIds: [...new Set(genderRoleIds.filter(Boolean))],
+    serviceRoleIds: [...new Set(serviceRoleIds.filter(Boolean))],
+  };
+}
+
+function getSelfServiceDispatchAt(order) {
+  const match = String(order?.note || "").match(/\[DISPATCH_AT:([^\]]+)\]/);
+  const time = match ? Date.parse(match[1]) : NaN;
+  return Number.isFinite(time) ? time : Date.parse(order?.updated_at || order?.created_at || "");
+}
+
+function resolveSelfServicePlayerNumbers(candidateIds, selectedValues, requiredCount) {
+  const candidates = (candidateIds || []).map((id) => String(id || "").trim()).filter(Boolean);
+  const needCount = Number(requiredCount);
+  const numbers = (selectedValues || []).map((value) => Number(value));
+  if (
+    !Number.isInteger(needCount) ||
+    needCount < 1 ||
+    numbers.length !== needCount ||
+    new Set(numbers).size !== numbers.length ||
+    numbers.some((number) => !Number.isInteger(number) || number < 1 || number > candidates.length)
+  ) {
+    throw new Error("選擇的數字無效或人數不符");
+  }
+  return numbers.map((number) => candidates[number - 1]);
+}
+
+async function failSelfServiceDispatch(orderId, messageId = null) {
+  selfServiceDispatchTimers.delete(String(orderId));
+  const { data: order, error } = await supabase
+    .from("play_orders")
+    .update({ status: "cancelled", quote_status: "self_dispatch_failed", updated_at: new Date().toISOString() })
+    .eq("id", orderId)
+    .eq("quote_status", "self_dispatching")
+    .select()
+    .maybeSingle();
+  if (error || !order) return;
+  const dispatchChannel = await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
+  if (dispatchChannel?.isTextBased()) {
+    if (messageId) {
+      const message = await dispatchChannel.messages.fetch(messageId).catch(() => null);
+      await message?.edit({ components: [] }).catch(() => null);
+    }
+    await dispatchChannel.send({
+      content: `訂單 ${order.order_no || order.id} 派單 15 分鐘內無人扣 1，已判定失敗。`,
+      files: [{ attachment: SELF_SERVICE_FAILED_IMAGE, name: "self-service-dispatch-failed.png" }],
+    });
+  }
+  const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
+  await orderChannel?.send({
+    content: `<@${order.customer_id}> 很抱歉，這筆訂單在 15 分鐘內未湊足陪陪，已派單失敗且不會扣款。`,
+  }).catch(() => null);
+}
+
+function scheduleSelfServiceDispatchTimeout(order, messageId = null) {
+  const orderId = String(order.id);
+  const oldTimer = selfServiceDispatchTimers.get(orderId);
+  if (oldTimer) clearTimeout(oldTimer);
+  const dispatchAt = getSelfServiceDispatchAt(order);
+  const remaining = Math.max(0, dispatchAt + SELF_SERVICE_DISPATCH_TIMEOUT_MS - Date.now());
+  const timer = setTimeout(
+    () => failSelfServiceDispatch(order.id, messageId).catch((error) => console.error("[自助派單逾時]", error)),
+    remaining,
+  );
+  timer.unref?.();
+  selfServiceDispatchTimers.set(orderId, timer);
+}
+
+async function restoreSelfServiceDispatchTimers() {
+  const { data: orders, error } = await supabase
+    .from("play_orders")
+    .select("*")
+    .eq("quote_status", "self_dispatching")
+    .or("is_deleted.eq.false,is_deleted.is.null");
+  if (error) throw error;
+  for (const order of orders || []) scheduleSelfServiceDispatchTimeout(order);
+  console.log(`[自助派單] 已恢復 ${(orders || []).length} 筆 15 分鐘倒數`);
+}
+
+function buildSelfServiceTopic(customerId, orderId = "pending") {
+  return `owner:${customerId};self_service:1;order:${orderId}`;
+}
+
+function isSelfServiceOrder(order) {
+  return String(order?.note || "").includes("[SELF_SERVICE]");
+}
+
+async function sendSelfServiceOrderPanel() {
+  const channel = await client.channels
+    .fetch(SELF_SERVICE_ORDER_CHANNEL_ID)
+    .catch(() => null);
+  if (!channel?.isTextBased()) {
+    throw new Error(`找不到自助下單頻道：${SELF_SERVICE_ORDER_CHANNEL_ID}`);
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor("#7cc7ff")
+    .setTitle("🖲️ 自助下單系統")
+    .setDescription(
+      `沒有客服在線時，也能依照標準流程完成下單。\n\n` +
+        `1. 選擇遊戲並填寫需求\n` +
+        `2. 系統依現行價目表自動報價\n` +
+        `3. 系統標註性別與遊戲身分組，陪陪在 15 分鐘內扣 1\n` +
+        `4. 使用 ASD 錢包付款，核帳後自動發送報單\n\n` +
+        `目前自助核帳僅支援 ASD；匯款與刷卡會在金流串接後開放。`,
+    )
+    .setFooter({ text: "秋奈電競｜自助下單" })
+    .setTimestamp();
+  const components = [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("self_service_start")
+        .setLabel("開始自助下單")
+        .setEmoji("🛒")
+        .setStyle(ButtonStyle.Success),
+    ),
+  ];
+  const messages = await channel.messages.fetch({ limit: 30 }).catch(() => null);
+  const oldPanel = messages?.find(
+    (message) =>
+      message.author.id === client.user.id &&
+      message.embeds[0]?.title === "🖲️ 自助下單系統",
+  );
+  if (oldPanel) return oldPanel.edit({ embeds: [embed], components });
+  return channel.send({ embeds: [embed], components });
+}
+
+async function startSelfServiceOrder(interaction) {
+  const flowId = createFlowId(interaction.user.id);
+  pendingSelfServiceOrders.set(flowId, {
+    flowId,
+    customerId: interaction.user.id,
+    customerUsername: interaction.user.username,
+    guildId: interaction.guildId,
+    createdAt: Date.now(),
+  });
+  const timer = setTimeout(
+    () => pendingSelfServiceOrders.delete(flowId),
+    ORDER_FLOW_TTL_MS,
+  );
+  timer.unref?.();
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`self_service_game_${flowId}`)
+    .setPlaceholder("選擇遊戲")
+    .addOptions(SELF_SERVICE_GAME_OPTIONS);
+  return interaction.reply({
+    content: "🎮 請選擇要下單的遊戲：",
+    components: [new ActionRowBuilder().addComponents(menu)],
+    flags: 64,
+  });
+}
+
+async function openSelfServiceRequirementModal(interaction) {
+  const flowId = interaction.customId.replace("self_service_gender_", "");
+  const pending = pendingSelfServiceOrders.get(flowId);
+  if (!pending || pending.customerId !== interaction.user.id) {
+    return interaction.reply({ content: "❌ 流程已過期，請重新開始。", flags: 64 });
+  }
+  const game = pending.game;
+  pending.gender = interaction.values[0];
+  pendingSelfServiceOrders.set(flowId, pending);
+  const modal = new ModalBuilder()
+    .setCustomId(`self_service_requirement_${flowId}`)
+    .setTitle(`${getSelfServiceGameLabel(game)}自助下單`);
+  const fields = game === "delta"
+    ? [
+        ["platform_mode", "平台（僅三角洲必填）", "電腦或手機"],
+        ["service_type", "玩法 / 類型", "娛樂、機密雙護、機密雙護保底、猛攻護航…"],
+        ["rank_map", "地圖（僅三角洲必填）", "請輸入地圖"],
+        ["player_count", "需求陪陪人數", "1～8"],
+        ["quantity", "需求時數", "例如：1、1.5、2"],
+      ]
+    : game === "lol"
+      ? [
+          ["platform_mode", "模式", "召喚峽谷、ARAM 或聯盟戰棋"],
+          ["service_type", "類型", "娛樂、技術或大神"],
+          ["rank_map", "目前段位", "例如：白金、鑽石；ARAM 可填一般"],
+          ["player_count", "需求陪陪人數", "1～8"],
+          ["quantity", "時數 / 局數", "ARAM 按小時；峽谷、戰棋按局"],
+        ]
+      : game === "steam"
+        ? [
+            ["platform_mode", "遊戲名稱", "請輸入 Steam 遊戲名稱"],
+            ["service_type", "模式 / 類型", "例如：娛樂"],
+            ["rank_map", "其他需求", "沒有可填無"],
+            ["player_count", "需求陪陪人數", "1～8"],
+            ["quantity", "需求時數", "例如：1、1.5、2"],
+          ]
+        : [
+            ["platform_mode", "模式", "例如：一般、排位"],
+            ["service_type", game === "valorant" ? "陪陪等級" : "類型", game === "valorant" ? "娛樂、超凡、神話、輻能或頂輻" : "娛樂、技術或大神"],
+            ["rank_map", "目前段位", "請依價目表填寫段位"],
+            ["player_count", "需求陪陪人數", "1～8"],
+            ["quantity", "時數 / 局數", "請依價目表單位填寫"],
+          ];
+  modal.addComponents(
+    ...fields.map(([id, label, placeholder]) =>
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId(id)
+          .setLabel(label.slice(0, 45))
+          .setPlaceholder(placeholder.slice(0, 100))
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true),
+      ),
+    ),
+  );
+  return interaction.showModal(modal);
+}
+
+async function selectSelfServiceGame(interaction) {
+  const flowId = interaction.customId.replace("self_service_game_", "");
+  const pending = pendingSelfServiceOrders.get(flowId);
+  if (!pending || pending.customerId !== interaction.user.id) {
+    return interaction.update({ content: "❌ 流程已過期，請重新開始。", components: [] });
+  }
+  pending.game = interaction.values[0];
+  pendingSelfServiceOrders.set(flowId, pending);
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`self_service_gender_${flowId}`)
+    .setPlaceholder("選擇陪陪性別")
+    .addOptions([
+      { label: "女陪", value: "女陪", description: "派單時標註秋奈女陪" },
+      { label: "男陪", value: "男陪", description: "派單時標註秋奈男陪" },
+      { label: "不指定", value: "不指定", description: "男陪、女陪皆可扣 1" },
+    ]);
+  return interaction.update({
+    content: `🎮 已選擇：${getSelfServiceGameLabel(pending.game)}\n請選擇陪陪性別：`,
+    components: [new ActionRowBuilder().addComponents(menu)],
+  });
+}
+
+async function submitSelfServiceRequirement(interaction) {
+  await deferReplyOnce(interaction);
+  const flowId = interaction.customId.replace("self_service_requirement_", "");
+  const pending = pendingSelfServiceOrders.get(flowId);
+  if (!pending || pending.customerId !== interaction.user.id) {
+    return interaction.editReply({ content: "❌ 流程已過期，請重新開始。" });
+  }
+  const input = {
+    game: pending.game,
+    platformOrMode: interaction.fields.getTextInputValue("platform_mode"),
+    serviceType: interaction.fields.getTextInputValue("service_type"),
+    rankOrMap: interaction.fields.getTextInputValue("rank_map"),
+    playerCount: interaction.fields.getTextInputValue("player_count"),
+    quantity: interaction.fields.getTextInputValue("quantity"),
+  };
+  let quote;
+  try {
+    quote = calculateSelfServicePrice(input);
+  } catch (error) {
+    const reason = String(error.message || error);
+    const shouldEscalate =
+      reason.includes("沒有這個") ||
+      reason.includes("不在目前") ||
+      reason.includes("尚缺自動報價");
+    if (shouldEscalate) {
+      const guild = interaction.guild;
+      const parentId = await resolveTicketParentId(
+        guild,
+        ORDER_TICKET_CATEGORY_ID,
+        "訂單區",
+      );
+      const safeName = interaction.user.username
+        .replace(/[^a-zA-Z0-9\u4e00-\u9fa5-_]/g, "")
+        .slice(0, 20);
+      const channel = await guild.channels.create({
+        name: `待客服報價-${safeName}`.slice(0, 90),
+        type: ChannelType.GuildText,
+        parent: parentId,
+        topic: `owner:${interaction.user.id};self_service_manual_quote:1`,
+        permissionOverwrites: [
+          { id: guild.id, deny: ["ViewChannel"] },
+          { id: interaction.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles"] },
+          { id: process.env.STAFF_ROLE, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles", "ManageMessages"] },
+        ],
+      });
+      const playerCount = Number(String(input.playerCount || "").replace(/[^\d]/g, "")) || 1;
+      const manualPending = {
+        guildId: pending.guildId,
+        userId: pending.customerId,
+        username: pending.customerUsername,
+        channelId: channel.id,
+        game: getSelfServiceGameLabel(pending.game),
+        item: `${input.platformOrMode}｜${input.serviceType}`,
+        rank: input.rankOrMap,
+        playerCount,
+        gender: pending.gender || "不指定",
+        duration: input.quantity,
+        durationMinutes: 0,
+        note:
+          `[SELF_SERVICE_MANUAL] 自動報價無此組合：${reason}；` +
+          `平台/模式：${input.platformOrMode}；類型：${input.serviceType}；` +
+          `段位/地圖：${input.rankOrMap}；數量：${input.quantity}`,
+      };
+      await channel.send({
+        content: `<@${pending.customerId}> <@&${process.env.STAFF_ROLE}>`,
+        embeds: [
+          new EmbedBuilder()
+            .setColor("#ffaa00")
+            .setTitle("⚠️ 自助訂單無價格組合｜轉客服報價")
+            .setDescription(
+              `系統已保留客人填寫的資料，不需要重新填寫。\n\n` +
+                `遊戲：${manualPending.game}\n` +
+                `平台 / 模式：${input.platformOrMode}\n` +
+                `類型：${input.serviceType}\n` +
+                `段位 / 地圖：${input.rankOrMap}\n` +
+                `性別：${manualPending.gender}\n` +
+                `人數：${playerCount}\n` +
+                `時數 / 局數：${input.quantity}\n` +
+                `轉人工原因：${reason}`,
+            )
+            .setTimestamp(),
+        ],
+      });
+      pendingSelfServiceOrders.delete(flowId);
+      await createWaitingQuoteOrder(interaction, flowId, manualPending);
+      await interaction.followUp({
+        content: `✅ 這個組合沒有自動價格，已建立 <#${channel.id}> 並標註客服協助報價。`,
+        flags: 64,
+      }).catch(() => null);
+      return;
+    }
+    return interaction.editReply({
+      content: `❌ 無法自動報價：${reason}\n請依頻道內現行價目表重新填寫。`,
+    });
+  }
+  const guild = interaction.guild;
+  const parentId = await resolveTicketParentId(guild, ORDER_TICKET_CATEGORY_ID, "訂單區");
+  const safeName = interaction.user.username
+    .replace(/[^a-zA-Z0-9\u4e00-\u9fa5-_]/g, "")
+    .slice(0, 20);
+  const channel = await guild.channels.create({
+    name: `自助訂單-${safeName}`.slice(0, 90),
+    type: ChannelType.GuildText,
+    parent: parentId,
+    topic: buildSelfServiceTopic(interaction.user.id),
+    permissionOverwrites: [
+      { id: guild.id, deny: ["ViewChannel"] },
+      { id: interaction.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles"] },
+      { id: process.env.STAFF_ROLE, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory", "AttachFiles", "ManageMessages"] },
+    ],
+  });
+  const orderNo = await getNextPlayOrderNumber();
+  const gameLabel = getSelfServiceGameLabel(pending.game);
+  const service = `${gameLabel}｜${input.platformOrMode}｜${input.serviceType}`;
+  const note = `[SELF_SERVICE] 平台/模式：${input.platformOrMode}；段位/地圖：${input.rankOrMap}；單價：${quote.unitPrice}/${quote.unit}；數量：${quote.quantity}`;
+  const { data: order, error } = await supabase
+    .from("play_orders")
+    .insert({
+      guild_id: pending.guildId || process.env.GUILD_ID,
+      order_no: orderNo,
+      customer_id: pending.customerId,
+      customer_username: pending.customerUsername,
+      channel_id: channel.id,
+      source_channel_id: SELF_SERVICE_ORDER_CHANNEL_ID,
+      game: gameLabel,
+      service,
+      dispatch_service_key: getSelfServiceDispatchKey(pending.game, input),
+      order_type: "自助訂單",
+      order_item: input.serviceType,
+      rank_preference: input.rankOrMap,
+      player_count: quote.playerCount,
+      gender_preference: pending.gender || "不指定",
+      duration_text: `${quote.quantity} ${quote.unit}`,
+      note,
+      price: quote.total,
+      original_price: quote.total,
+      final_price: quote.total,
+      discount_rate: 1,
+      discount_amount: 0,
+      coupon_text: "未使用優惠券",
+      payment_method: "未選擇",
+      paid: false,
+      status: "quoted",
+      quote_status: "quoted",
+      confirmed_by_customer: false,
+    })
+    .select()
+    .single();
+  if (error || !order) {
+    await channel.delete().catch(() => null);
+    console.error("[自助下單] 建立訂單失敗", error);
+    return interaction.editReply({ content: `❌ 建立訂單失敗：${error?.message || "未知錯誤"}` });
+  }
+  pending.orderId = order.id;
+  pending.channelId = channel.id;
+  pending.input = input;
+  pending.quote = quote;
+  pendingSelfServiceOrders.set(flowId, pending);
+  await channel.setTopic(buildSelfServiceTopic(pending.customerId, order.id)).catch(() => null);
+  await channel.send({
+    content: `<@${pending.customerId}>`,
+    embeds: [
+      new EmbedBuilder()
+        .setColor("#ffd166")
+        .setTitle("💰 自動報價確認")
+        .setDescription(
+          `訂單編號：${order.order_no}\n遊戲：${gameLabel}\n平台 / 模式：${input.platformOrMode}\n類型：${input.serviceType}\n段位 / 地圖：${input.rankOrMap}\n陪陪人數：${quote.playerCount} 位\n數量：${quote.quantity} ${quote.unit}\n單價：NT$${quote.unitPrice.toLocaleString("zh-TW")} / ${quote.unit} / 位\n\n應付總額：**NT$${quote.total.toLocaleString("zh-TW")}**`,
+        )
+        .setFooter({ text: "確認後會送往自助派單廳" })
+        .setTimestamp(),
+    ],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`self_service_quote_yes_${order.id}`).setLabel("接受報價並派單").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`self_service_quote_no_${order.id}`).setLabel("不接受，取消訂單").setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`self_service_extend_${order.id}`).setLabel("我要加時").setStyle(ButtonStyle.Secondary).setDisabled(true),
+      ),
+    ],
+  });
+  return interaction.editReply({ content: `✅ 已建立臨時頻道：<#${channel.id}>` });
+}
+
+async function getSelfServiceOrder(interaction, prefix) {
+  const orderId = interaction.customId.replace(prefix, "");
+  const { data: order, error } = await supabase
+    .from("play_orders")
+    .select("*")
+    .eq("id", orderId)
+    .maybeSingle();
+  if (error || !order || !isSelfServiceOrder(order)) return null;
+  return order;
+}
+
+async function confirmSelfServiceQuote(interaction) {
+  await deferReplyOnce(interaction);
+  const order = await getSelfServiceOrder(interaction, "self_service_quote_yes_");
+  if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+  if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以確認報價。" });
+  if (order.quote_status === "self_dispatching" || order.preferred_player) {
+    return interaction.editReply({ content: "⚠️ 這張訂單已送出派單，請勿重複操作。" });
+  }
+  const dispatchAtIso = new Date().toISOString();
+  const dispatchNote = `${String(order.note || "").replace(/\[DISPATCH_AT:[^\]]+\]/g, "").trim()} [DISPATCH_AT:${dispatchAtIso}]`;
+  const { data: dispatchOrder, error } = await supabase
+    .from("play_orders")
+    .update({ status: "pending", quote_status: "self_dispatching", confirmed_by_customer: true, preferred_player: null, note: dispatchNote, updated_at: dispatchAtIso })
+    .eq("id", order.id)
+    .eq("quote_status", "quoted")
+    .select()
+    .single();
+  if (error || !dispatchOrder) return interaction.editReply({ content: "❌ 更新訂單狀態失敗。" });
+  const dispatchChannel = await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
+  if (!dispatchChannel?.isTextBased()) return interaction.editReply({ content: "❌ 找不到自助派單廳，請聯繫管理員。" });
+  const { genderRoleIds, serviceRoleIds } = getSelfServiceDispatchRoleIds(dispatchOrder);
+  const roleIds = [...new Set([...genderRoleIds, ...serviceRoleIds])];
+  const dispatchMessage = await dispatchChannel.send({
+    content: `${roleIds.map((id) => `<@&${id}>`).join(" ")} 新的自助訂單，請在 15 分鐘內按「扣 1 接單」。`,
+    embeds: [new EmbedBuilder()
+      .setColor("#7cc7ff")
+      .setTitle("🖨️ 自助派單需求")
+      .setDescription(`訂單：${dispatchOrder.order_no}\n服務：${dispatchOrder.service}\n性別：${dispatchOrder.gender_preference || "不指定"}\n段位 / 地圖：${dispatchOrder.rank_preference || "無"}\n需求：${dispatchOrder.player_count} 位\n目前：0 / ${dispatchOrder.player_count}\n訂單頻道：<#${dispatchOrder.channel_id}>\n\n15 分鐘內未湊足人數即派單失敗。`)
+      .setTimestamp()],
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`self_service_claim_${dispatchOrder.id}`).setLabel("扣 1 接單").setEmoji("1️⃣").setStyle(ButtonStyle.Success),
+    )],
+    allowedMentions: { roles: roleIds },
+  });
+  scheduleSelfServiceDispatchTimeout(dispatchOrder, dispatchMessage.id);
+  await interaction.message.edit({ components: [] }).catch(() => null);
+  await interaction.channel.send("✅ 已統一送往自助派單廳，系統會等待符合身分的陪陪扣 1；15 分鐘未湊足即自動判定失敗。");
+  return interaction.editReply({ content: "✅ 已確認報價並送出派單。" });
+}
+
+async function showSelfServiceCandidatePrompt(order, playerIds) {
+  const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
+  if (!orderChannel?.isTextBased()) return;
+  const needCount = Number(order.player_count || 1);
+  const numberOptions = playerIds.slice(0, 25).map((id, index) => ({
+    label: `${index + 1}. ${orderChannel.guild?.members?.cache?.get(id)?.displayName || `陪陪 ${index + 1}`}`.slice(0, 100),
+    description: `選擇編號 ${index + 1}`,
+    value: String(index + 1),
+  }));
+  const payload = {
+    content:
+      `<@${order.customer_id}> 已湊足人數，扣 1 仍會持續開放；請從目前候選名單選擇 ${needCount} 位陪陪：\n` +
+      `${playerIds.map((id, index) => `${index + 1}. <@${id}>`).join("\n")}\n\n` +
+      `選完後，系統會依數字判斷對應人員並請你再次確認。`,
+    components: [new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`self_customer_numbers_${order.id}`)
+        .setPlaceholder(`請依數字選擇 ${needCount} 位陪陪`)
+        .setMinValues(needCount)
+        .setMaxValues(needCount)
+        .addOptions(numberOptions),
+    )],
+  };
+  const promptKey = `candidatePrompt:${order.id}`;
+  const cachedMessageId = pendingSelfServiceOrders.get(promptKey)?.messageId;
+  const cachedMessage = cachedMessageId
+    ? await orderChannel.messages.fetch(cachedMessageId).catch(() => null)
+    : null;
+  const message = cachedMessage
+    ? await cachedMessage.edit(payload).catch(() => null)
+    : await orderChannel.send(payload).catch(() => null);
+  if (message) pendingSelfServiceOrders.set(promptKey, { messageId: message.id });
+}
+
+async function closeSelfServiceClaimButton(orderId) {
+  const dispatchChannel = await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
+  if (!dispatchChannel?.isTextBased()) return;
+  const messages = await dispatchChannel.messages.fetch({ limit: 100 }).catch(() => null);
+  const dispatchMessage = messages?.find((message) =>
+    message.components.some((row) => row.components.some(
+      (component) => component.customId === `self_service_claim_${orderId}`,
+    )),
+  );
+  await dispatchMessage?.edit({ components: [] }).catch(() => null);
+}
+
+async function claimSelfServiceOrder(interaction) {
+  await deferReplyOnce(interaction);
+  const orderId = interaction.customId.replace("self_service_claim_", "");
+  if (processingSelfServiceClaims.has(orderId)) {
+    return interaction.editReply({ content: "⚠️ 另一位陪陪正在扣 1，請稍後再試。" });
+  }
+  processingSelfServiceClaims.add(orderId);
+  try {
+    const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+    if (error || !order || !isSelfServiceOrder(order)) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+    if (!["self_dispatching", "self_choosing_open"].includes(order.quote_status)) return interaction.editReply({ content: "❌ 這張訂單已經結束派單。" });
+    if (order.quote_status === "self_dispatching" && Date.now() - getSelfServiceDispatchAt(order) >= SELF_SERVICE_DISPATCH_TIMEOUT_MS) {
+      await failSelfServiceDispatch(order.id, interaction.message?.id);
+      return interaction.editReply({ content: "❌ 已超過 15 分鐘，這張訂單派單失敗。" });
+    }
+    if (interaction.user.id === order.customer_id) return interaction.editReply({ content: "❌ 不能接自己的訂單。" });
+    let staffQuery = supabase.from("qiunai_staff").select("discord_id,is_active").eq("discord_id", interaction.user.id).eq("is_active", true).limit(1);
+    staffQuery = applyStaffGuildFilter(staffQuery);
+    const { data: staffRows, error: staffError } = await staffQuery;
+    if (staffError || !staffRows?.[0]) return interaction.editReply({ content: "❌ 只有秋奈在職陪陪可以扣 1。" });
+    const { genderRoleIds, serviceRoleIds } = getSelfServiceDispatchRoleIds(order);
+    const hasGender = genderRoleIds.some((id) => interaction.member.roles.cache.has(id));
+    const hasService = serviceRoleIds.some((id) => interaction.member.roles.cache.has(id));
+    if (!hasGender || !hasService) {
+      return interaction.editReply({ content: `❌ 你的身分組不符合這筆訂單（${order.gender_preference || "不指定"}＋指定遊戲服務）。` });
+    }
+    const playerIds = String(order.preferred_player || "").split(",").map((id) => id.trim()).filter(Boolean);
+    if (playerIds.includes(interaction.user.id)) return interaction.editReply({ content: "⚠️ 你已經扣過 1 了。" });
+    const needCount = Number(order.player_count || 1);
+    if (playerIds.length >= 25) return interaction.editReply({ content: "❌ 候選名單已達 Discord 選單上限 25 位。" });
+    playerIds.push(interaction.user.id);
+    const success = playerIds.length >= needCount;
+    const firstReady = order.quote_status === "self_dispatching" && success;
+    const { data: updated, error: updateError } = await supabase
+      .from("play_orders")
+      .update({ preferred_player: playerIds.join(","), quote_status: success ? "self_choosing_open" : "self_dispatching", updated_at: new Date().toISOString() })
+      .eq("id", order.id)
+      .eq("quote_status", order.quote_status)
+      .select()
+      .maybeSingle();
+    if (updateError || !updated) return interaction.editReply({ content: "❌ 扣 1 失敗，訂單狀態可能已更新。" });
+    await interaction.channel.send(`${interaction.user} 扣 1（${playerIds.length}/${needCount}）`);
+    if (!success) {
+      const embed = EmbedBuilder.from(interaction.message.embeds[0]).setDescription(
+        `訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n段位 / 地圖：${order.rank_preference || "無"}\n需求：${needCount} 位\n目前：${playerIds.length} / ${needCount}\n訂單頻道：<#${order.channel_id}>\n\n15 分鐘內未湊足人數即派單失敗。`,
+      );
+      await interaction.message.edit({ embeds: [embed] }).catch(() => null);
+      return interaction.editReply({ content: "✅ 扣 1 成功，正在等待其他陪陪。" });
+    }
+    if (firstReady) {
+      const timer = selfServiceDispatchTimers.get(String(order.id));
+      if (timer) clearTimeout(timer);
+      selfServiceDispatchTimers.delete(String(order.id));
+    }
+    await showSelfServiceCandidatePrompt(updated, playerIds);
+    return interaction.editReply({ content: "✅ 扣 1 成功，已加入候選名單；老闆選定前仍可繼續扣 1。" });
+  } finally {
+    processingSelfServiceClaims.delete(orderId);
+  }
+}
+
+async function selectSelfServicePlayerNumbers(interaction) {
+  await deferReplyOnce(interaction);
+  const order = await getSelfServiceOrder(interaction, "self_customer_numbers_");
+  if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+  if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以選擇陪陪。" });
+  if (!["self_choosing_open", "choosing_players"].includes(order.quote_status)) return interaction.editReply({ content: "❌ 這份數字名單已失效，請重新派單。" });
+  const candidates = String(order.preferred_player || "").split(",").map((id) => id.trim()).filter(Boolean);
+  const needCount = Number(order.player_count || 1);
+  let selectedIds;
+  try {
+    selectedIds = resolveSelfServicePlayerNumbers(candidates, interaction.values, needCount);
+  } catch {
+    return interaction.editReply({ content: "❌ 選擇的數字無效或人數不符，請重新選擇。" });
+  }
+  const selectedNumbers = interaction.values.map((value) => Number(value));
+  const { data: selectedOrder, error } = await supabase
+    .from("play_orders")
+    .update({ preferred_player: selectedIds.join(","), quote_status: "confirming_players", updated_at: new Date().toISOString() })
+    .eq("id", order.id)
+    .eq("quote_status", order.quote_status)
+    .select("id")
+    .maybeSingle();
+  if (error || !selectedOrder) return interaction.editReply({ content: "❌ 儲存數字選擇失敗，名單可能已由其他操作更新。" });
+  pendingSelfServiceOrders.set(`selection:${order.id}`, {
+    customerId: order.customer_id,
+    selectedIds,
+  });
+  pendingSelfServiceOrders.delete(`candidatePrompt:${order.id}`);
+  await interaction.message.edit({ components: [] }).catch(() => null);
+  await closeSelfServiceClaimButton(order.id);
+  const dispatchChannel = await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
+  await dispatchChannel?.send({
+    content: `${selectedIds.map((id) => `<@${id}>`).join(" ")} 接！`,
+    files: [{ attachment: SELF_SERVICE_SUCCESS_IMAGE, name: "self-service-dispatch-success.png" }],
+  }).catch(() => null);
+  await interaction.channel.send({
+    content:
+      `<@${order.customer_id}> 你選擇的編號：${selectedNumbers.join("、")}\n` +
+      `對應陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n` +
+      `請確認是否選擇以上陪陪。`,
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`self_players_confirm_${order.id}`).setLabel("確定選擇").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`self_players_reselect_${order.id}`).setLabel("重新派單").setStyle(ButtonStyle.Secondary),
+    )],
+  });
+  return interaction.editReply({ content: "✅ 已依數字找到對應陪陪，請再次確認。" });
+}
+
+async function cancelSelfServiceOrder(interaction) {
+  await deferReplyOnce(interaction);
+  const order = await getSelfServiceOrder(interaction, "self_service_quote_no_");
+  if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+  if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以取消。" });
+  await supabase.from("play_orders").update({ status: "cancelled", quote_status: "cancelled" }).eq("id", order.id).eq("paid", false);
+  await interaction.message.edit({ components: [] }).catch(() => null);
+  await interaction.editReply({ content: "✅ 已取消訂單，頻道將在 10 秒後關閉。" });
+  setTimeout(() => interaction.channel.delete().catch(() => null), 10_000).unref?.();
+}
+
+async function confirmSelfServicePlayers(interaction) {
+  await deferReplyOnce(interaction);
+  const order = await getSelfServiceOrder(interaction, "self_players_confirm_");
+  if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+  const selection = pendingSelfServiceOrders.get(`selection:${order.id}`);
+  if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以確認。" });
+  const selectedIds = selection?.customerId === interaction.user.id
+    ? selection.selectedIds
+    : String(order.preferred_player || "").split(",").filter(Boolean);
+  if (!selectedIds.length || order.quote_status !== "confirming_players") return interaction.editReply({ content: "❌ 接單名單已過期，請重新派單。" });
+  await supabase.from("play_orders").update({ preferred_player: selectedIds.join(","), quote_status: "waiting_payment", payment_method: "儲值卡" }).eq("id", order.id).eq("paid", false);
+  await interaction.message.edit({ components: [] }).catch(() => null);
+  await interaction.channel.send({
+    embeds: [new EmbedBuilder().setColor("#66ccff").setTitle("💳 付款與自動核帳").setDescription(`應付：NT$${Number(order.final_price).toLocaleString("zh-TW")}\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n按下付款後，系統會以訂單編號原子扣除 ASD、回傳明細並核對訂單狀態。`).setTimestamp()],
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`self_service_pay_wallet_${order.id}`).setLabel("使用 ASD 付款").setStyle(ButtonStyle.Success),
+    )],
+  });
+  return interaction.editReply({ content: "✅ 已確認陪陪，請先完成付款。" });
+}
+
+async function paySelfServiceOrder(interaction) {
+  await deferReplyOnce(interaction);
+  const order = await getSelfServiceOrder(interaction, "self_service_pay_wallet_");
+  if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+  if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以付款。" });
+  if (order.paid) return interaction.editReply({ content: "⚠️ 此訂單已完成付款，不會重複扣款。" });
+  if (processingSelfServicePayments.has(order.id)) return interaction.editReply({ content: "⚠️ 系統正在核帳，請勿重複點擊。" });
+  const selectedIds = String(order.preferred_player || "").split(",").filter(Boolean);
+  if (!selectedIds.length) return interaction.editReply({ content: "❌ 尚未確認陪陪。" });
+  processingSelfServicePayments.add(order.id);
+  try {
+    const result = await paymentHelpers.payOrderByWallet(order);
+    const { data: paidOrder, error } = await supabase
+      .from("play_orders")
+      .update({ assigned_player: selectedIds.join(","), preferred_player: selectedIds.join(","), payment_method: "儲值卡", status: "accepted", quote_status: "dispatched", accepted_at: new Date().toISOString() })
+      .eq("id", order.id)
+      .eq("paid", true)
+      .select()
+      .single();
+    if (error || !paidOrder) throw new Error(error?.message || "付款成功但更新派單狀態失敗");
+    for (const playerId of selectedIds) {
+      await interaction.channel.permissionOverwrites.edit(playerId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
+    }
+    await workReportSystem.sendForAcceptedOrder(paidOrder, selectedIds);
+    await sendStaffOrderControlPanel(interaction.channel, paidOrder);
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.channel.send({
+      content: `<@${order.customer_id}> ${selectedIds.map((id) => `<@${id}>`).join(" ")}`,
+      embeds: [new EmbedBuilder().setColor("#57F287").setTitle("✅ 付款明細核對完成，報單已發送").setDescription(`訂單：${order.order_no}\n扣款：${Number(result.amount).toLocaleString("zh-TW")} ASD\n剩餘：${Number(result.finalCoins).toLocaleString("zh-TW")} ASD\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n系統已將陪陪加入本頻道，並發送時間填寫報單。`).setTimestamp()],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`self_service_extend_${order.id}`).setLabel("我要加時").setStyle(ButtonStyle.Primary),
+      )],
+    });
+    pendingSelfServiceOrders.delete(`selection:${order.id}`);
+    return interaction.editReply({ content: "✅ ASD 扣款與訂單核帳完成，已發送報單。" });
+  } catch (error) {
+    console.error("[自助下單付款] 失敗", error);
+    return interaction.editReply({ content: `❌ 付款或派單失敗：${error.message || error}` });
+  } finally {
+    processingSelfServicePayments.delete(order.id);
+  }
+}
+
+async function reselectSelfServicePlayers(interaction) {
+  await deferReplyOnce(interaction);
+  const order = await getSelfServiceOrder(interaction, "self_players_reselect_");
+  if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+  if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以重新派單。" });
+  const dispatchAtIso = new Date().toISOString();
+  const dispatchNote = `${String(order.note || "").replace(/\[DISPATCH_AT:[^\]]+\]/g, "").trim()} [DISPATCH_AT:${dispatchAtIso}]`;
+  const { data: redispatchOrder, error } = await supabase
+    .from("play_orders")
+    .update({ preferred_player: null, status: "pending", quote_status: "self_dispatching", note: dispatchNote, updated_at: dispatchAtIso })
+    .eq("id", order.id)
+    .eq("paid", false)
+    .select()
+    .single();
+  if (error || !redispatchOrder) return interaction.editReply({ content: "❌ 重新派單失敗。" });
+  pendingSelfServiceOrders.delete(`selection:${order.id}`);
+  const dispatchChannel = await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
+  if (!dispatchChannel?.isTextBased()) return interaction.editReply({ content: "❌ 找不到自助派單廳。" });
+  await interaction.message.edit({ components: [] }).catch(() => null);
+  const { genderRoleIds, serviceRoleIds } = getSelfServiceDispatchRoleIds(redispatchOrder);
+  const roleIds = [...new Set([...genderRoleIds, ...serviceRoleIds])];
+  const dispatchMessage = await dispatchChannel.send({
+    content: `${roleIds.map((id) => `<@&${id}>`).join(" ")} 客人要求重新派單，請在 15 分鐘內按「扣 1 接單」。`,
+    embeds: [new EmbedBuilder().setColor("#ffd166").setTitle("🔄 自助訂單重新派單").setDescription(`訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n需求：${order.player_count} 位\n目前：0 / ${order.player_count}\n訂單頻道：<#${order.channel_id}>`).setTimestamp()],
+    components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`self_service_claim_${order.id}`).setLabel("扣 1 接單").setEmoji("1️⃣").setStyle(ButtonStyle.Success))],
+    allowedMentions: { roles: roleIds },
+  });
+  scheduleSelfServiceDispatchTimeout(redispatchOrder, dispatchMessage.id);
+  return interaction.editReply({ content: "✅ 已要求重新派單。" });
+}
+
+async function openSelfServiceExtensionModal(interaction) {
+  const order = await getSelfServiceOrder(interaction, "self_service_extend_");
+  if (!order) return interaction.reply({ content: "❌ 找不到這張自助訂單。", flags: 64 });
+  if (interaction.user.id !== order.customer_id) return interaction.reply({ content: "❌ 只有下單者可以加時。", flags: 64 });
+  if (!order.paid || !["accepted", "pending"].includes(order.status)) {
+    return interaction.reply({ content: "❌ 訂單完成付款並安排陪陪後才能加時。", flags: 64 });
+  }
+  const modal = new ModalBuilder()
+    .setCustomId(`self_service_extension_submit_${order.id}`)
+    .setTitle("自助加時 / 續單")
+    .addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId("quantity")
+        .setLabel("要增加的時數 / 局數")
+        .setPlaceholder("例如：0.5、1、2")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true),
+    ));
+  return interaction.showModal(modal);
+}
+
+async function submitSelfServiceExtension(interaction) {
+  await deferReplyOnce(interaction);
+  const order = await getSelfServiceOrder(interaction, "self_service_extension_submit_");
+  if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+  if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以加時。" });
+  const quantity = Number(String(interaction.fields.getTextInputValue("quantity") || "").replace(/[^\d.]/g, ""));
+  if (!Number.isFinite(quantity) || quantity <= 0) return interaction.editReply({ content: "❌ 請輸入大於 0 的數字。" });
+  const unitMatch = String(order.note || "").match(/單價：(\d+(?:\.\d+)?)\/(小時|局)/);
+  if (!unitMatch) return interaction.editReply({ content: "❌ 找不到原始自動報價單位，請聯繫客服處理。" });
+  const unitPrice = Number(unitMatch[1]);
+  const unit = unitMatch[2];
+  const amount = unitPrice * quantity * Number(order.player_count || 1);
+  if (!Number.isInteger(amount)) return interaction.editReply({ content: "❌ 加時金額不是整數，請改用可整除的數量。" });
+  const staffId = String(order.assigned_player || "").split(",").filter(Boolean)[0] || null;
+  const { data: extension, error } = await supabase.from("order_extensions").insert({
+    order_id: order.id,
+    order_no: order.order_no || null,
+    customer_id: order.customer_id,
+    channel_id: order.channel_id || interaction.channel.id,
+    staff_id: staffId,
+    extension_text: `${quantity} ${unit}`,
+    amount,
+    payment_method: "儲值卡",
+    paid: false,
+    status: "waiting_wallet_confirm",
+    applied_to_salary: false,
+    note: "自助下單自動計價加時",
+  }).select().single();
+  if (error || !extension) return interaction.editReply({ content: `❌ 建立加時失敗：${error?.message || "未知錯誤"}` });
+  await interaction.channel.send({
+    content: `<@${order.customer_id}>`,
+    embeds: [new EmbedBuilder().setColor("#ffd166").setTitle("➕ 自助加時報價").setDescription(`增加：${quantity} ${unit}\n陪陪：${order.player_count} 位\n單價：NT$${unitPrice.toLocaleString("zh-TW")} / ${unit} / 位\n應付：**${amount.toLocaleString("zh-TW")} ASD**`).setTimestamp()],
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`confirm_extension_wallet_${extension.id}`).setLabel("確認 ASD 付款").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`cancel_extension_wallet_${extension.id}`).setLabel("取消").setStyle(ButtonStyle.Danger),
+    )],
+  });
+  return interaction.editReply({ content: "✅ 已建立自助加時，請確認 ASD 付款。" });
+}
+
 async function sendTipOrderPanel() {
   const channel = await client.channels
     .fetch(TIP_ORDER_PANEL_CHANNEL_ID)
@@ -946,7 +1852,7 @@ async function handleGameOrderSelect(interaction) {
     });
   }
 
-  if (gameKey === "other" && ["honor_of_kings", "identity_v"].includes(value)) {
+  if (gameKey === "other" && ["arena_of_valor", "honor_of_kings", "identity_v"].includes(value)) {
     const flowId = createFlowId(interaction.user.id);
     const gameLabel = findOptionLabel("other", value);
 
@@ -960,7 +1866,13 @@ async function handleGameOrderSelect(interaction) {
     setTimeout(() => pendingPanelOrders.delete(flowId), ORDER_FLOW_TTL_MS);
 
     const options =
-      value === "honor_of_kings"
+      value === "arena_of_valor"
+        ? [
+            { label: "娛樂", value: "entertain", description: "傳說對決｜娛樂" },
+            { label: "技術", value: "skill", description: "傳說對決｜技術" },
+            { label: "大神", value: "god", description: "傳說對決｜大神" },
+          ]
+        : value === "honor_of_kings"
         ? [
             {
               label: "娛樂",
@@ -1017,6 +1929,7 @@ async function handleOtherGameStyleSelect(interaction) {
   const labels = {
     entertain: "娛樂",
     skill: "技術",
+    god: "大神",
     rank_4: "四階",
     rank_5: "五階",
     rank_6: "六階",
@@ -2392,7 +3305,9 @@ async function createTopupTicket(interaction) {
         .setColor("#ffd166")
         .setTitle("💳 儲值頻道")
         .setDescription(
-          `儲值編號：${topupNo}\n請點擊下方按鈕填寫儲值資料。`,
+          `儲值編號：${topupNo}\n` +
+            `請點擊下方按鈕填寫儲值資料，再選擇「街口支付」。\n\n` +
+            `使用街口支付完成付款後，系統會自動核帳並將 ASD 存入錢包。`,
         ),
     ],
     components: [row],
@@ -3420,6 +4335,11 @@ function getOrderItemOptions(game) {
         label: "王者榮耀",
         value: "王者榮耀",
         description: "王者榮耀",
+      },
+      {
+        label: "傳說對決",
+        value: "傳說對決",
+        description: "傳說對決",
       },
       {
         label: "第五人格",
@@ -4747,10 +5667,6 @@ async function submitStaffQuotePrice(interaction) {
     });
   }
 
-  if (hasCustomerServicePointRole(interaction, CUSTOMER_SERVICE_POINT_ROLE_ID)) {
-    await awardCustomerServicePoint(order.id, interaction.user.id);
-  }
-
   await interaction.channel.send({
     embeds: [
       new EmbedBuilder()
@@ -5238,14 +6154,6 @@ async function handleQuotePaymentMethodSelect(interaction) {
         order.customer_id,
         amount,
       );
-      if (!eligibility.state.canUse) {
-        return interaction.editReply({
-          content:
-            `❌ 無法使用扣薪付款：每人最多預支 NT$${eligibility.state.advanceLimit.toLocaleString("zh-TW")}。\n` +
-            `本筆確認後會預支 NT$${eligibility.state.projectedAdvance.toLocaleString("zh-TW")}，已超過上限。`,
-        });
-      }
-
       await createSalaryDeductionPrompt({
         channel: interaction.channel,
         customerId: order.customer_id,
@@ -5253,6 +6161,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
         eligibility,
         confirmId: `salary_quote_confirm_${order.id}`,
         cancelId: `salary_quote_cancel_${order.id}`,
+        transferId: `salary_quote_transfer_${order.id}`,
       });
       return interaction.editReply({
         content: "✅ 已送出扣薪確認，請等待客服或管理員處理。",
@@ -5420,7 +6329,7 @@ async function handleSalaryQuoteConfirm(interaction) {
           .setTitle("✅ 扣薪付款完成")
           .setDescription(
             `<@${order.customer_id}> 已使用薪資支付 NT$${amount.toLocaleString("zh-TW")}。\n` +
-              `ERP 已新增扣項：使用薪水點單\n` +
+              `EIP 已新增扣項：使用薪水點單\n` +
               `由 <@${interaction.user.id}> 確認。`,
           )
           .setTimestamp(),
@@ -5428,12 +6337,12 @@ async function handleSalaryQuoteConfirm(interaction) {
     });
     await sendCustomerFinalConfirm(interaction.channel, paidOrder);
     return interaction.editReply({
-      content: "✅ 已確認扣薪付款，ERP 扣項已建立。",
+      content: "✅ 已確認扣薪付款，EIP 扣項已建立。",
     });
   } catch (err) {
     return interaction.editReply({
       content: paymentCompleted
-        ? `⚠️ 扣薪與 ERP 扣項已完成，但通知訊息發送失敗：${err.message || err}`
+        ? `⚠️ 扣薪與 EIP 扣項已完成，但通知訊息發送失敗：${err.message || err}`
         : `❌ 扣薪付款失敗：${err.message || err}`,
     });
   }
@@ -5465,6 +6374,104 @@ async function handleSalaryQuoteCancel(interaction) {
   return interaction.editReply({
     content: "✅ 已取消扣薪付款，請員工重新選擇付款方式。",
   });
+}
+
+async function handleSalaryQuoteTransfer(interaction) {
+  await deferReplyOnce(interaction);
+  if (!canApproveSalaryDeduction(interaction)) {
+    return interaction.editReply({ content: "❌ 只有客服或管理員可以選擇差額轉帳。" });
+  }
+
+  const orderId = interaction.customId.replace("salary_quote_transfer_", "");
+  const { data: order, error } = await supabase
+    .from("play_orders")
+    .select("*")
+    .eq("id", orderId)
+    .maybeSingle();
+  if (error || !order || order.paid) {
+    return interaction.editReply({ content: "❌ 找不到未付款的訂單。" });
+  }
+
+  const amount = Number(order.final_price || order.price || 0);
+  const eligibility = await getSalaryDeductionEligibility(order.customer_id, amount);
+  const salaryAmount = Math.min(amount, Math.max(0, eligibility.state.availableBefore));
+  const transferAmount = amount - salaryAmount;
+  if (transferAmount <= 0) {
+    return interaction.editReply({ content: "❌ 目前薪資已足夠，請直接按確認使用扣薪。" });
+  }
+
+  await supabase
+    .from("play_orders")
+    .update({ payment_method: "扣薪＋轉帳", status: "waiting_payment" })
+    .eq("id", order.id)
+    .eq("paid", false);
+  await interaction.message.edit({ components: [] }).catch(() => null);
+  await sendBankTransferInfo(interaction.channel);
+  await interaction.channel.send({
+    content:
+      `<@${order.customer_id}> 本筆將從薪資扣除 NT$${salaryAmount.toLocaleString("zh-TW")}，` +
+      `請另行轉帳 NT$${transferAmount.toLocaleString("zh-TW")}。\n` +
+      `收到轉帳明細後，請客服確認差額已入帳。`,
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`salary_quote_split_confirm_${order.id}_${salaryAmount}`)
+          .setLabel("確認差額已入帳")
+          .setStyle(ButtonStyle.Success),
+      ),
+    ],
+  });
+  return interaction.editReply({ content: "✅ 已改為扣薪加轉帳補齊差額。" });
+}
+
+async function handleSalaryQuoteSplitConfirm(interaction) {
+  await deferReplyOnce(interaction);
+  if (!canApproveSalaryDeduction(interaction)) {
+    return interaction.editReply({ content: "❌ 只有客服或管理員可以確認差額入帳。" });
+  }
+  const match = interaction.customId.match(/^salary_quote_split_confirm_(.+)_(\d+(?:\.\d+)?)$/);
+  if (!match) return interaction.editReply({ content: "❌ 差額付款資料錯誤。" });
+  const [, orderId, salaryText] = match;
+  const salaryAmount = Number(salaryText);
+  const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+  if (error || !order || order.paid) return interaction.editReply({ content: "❌ 找不到未付款的訂單。" });
+  const amount = Number(order.final_price || order.price || 0);
+  if (salaryAmount < 0 || salaryAmount >= amount) return interaction.editReply({ content: "❌ 差額付款金額錯誤。" });
+
+  let paidOrder;
+  if (salaryAmount > 0) {
+    const result = await applySalaryDeductionToOrders({
+      customerId: order.customer_id,
+      amount: salaryAmount,
+      orderIds: [order.id],
+      finalStatus: "waiting_confirm",
+    });
+    paidOrder = result.orders[0];
+    const { data } = await supabase.from("play_orders").update({ payment_method: "扣薪＋轉帳" }).eq("id", order.id).select("*").single();
+    paidOrder = data || paidOrder;
+  } else {
+    const { data, error: updateError } = await supabase
+      .from("play_orders")
+      .update({ payment_method: "轉帳補齊差額", paid: true, paid_at: new Date().toISOString(), status: "waiting_confirm" })
+      .eq("id", order.id)
+      .eq("paid", false)
+      .select("*")
+      .single();
+    if (updateError) throw updateError;
+    paidOrder = data;
+  }
+
+  await interaction.message.edit({ components: [] }).catch(() => null);
+  await interaction.channel.send({
+    embeds: [new EmbedBuilder().setColor("#57F287").setTitle("✅ 扣薪＋轉帳付款完成").setDescription(
+      `<@${order.customer_id}> 本筆共 NT$${amount.toLocaleString("zh-TW")}。\n` +
+      `薪資扣除：NT$${salaryAmount.toLocaleString("zh-TW")}\n` +
+      `轉帳補齊：NT$${(amount - salaryAmount).toLocaleString("zh-TW")}\n` +
+      `確認客服：<@${interaction.user.id}>`,
+    ).setTimestamp()],
+  });
+  await sendCustomerFinalConfirm(interaction.channel, paidOrder);
+  return interaction.editReply({ content: "✅ 已確認差額入帳並完成付款。" });
 }
 async function sendCustomerFinalConfirm(channel, order) {
   const preferredText = buildPreferredPlayerText(order.preferred_player);
@@ -6512,7 +7519,7 @@ async function handleSalaryExtensionConfirm(interaction) {
               `加時內容：${extension.extension_text}\n` +
               `加時金額：NT$${amount.toLocaleString("zh-TW")}\n` +
               `付款方式：員工扣薪\n` +
-              `秋奈 ERP 已新增扣項：使用薪水續單\n` +
+              `秋奈 EIP 已新增扣項：使用薪水續單\n` +
               `確認客服：<@${interaction.user.id}>` +
               (salaryResult
                 ? `\n\n已更新薪資網金額：NT$${salaryResult.oldPrice.toLocaleString("zh-TW")} → NT$${salaryResult.newPrice.toLocaleString("zh-TW")}`
@@ -6522,12 +7529,12 @@ async function handleSalaryExtensionConfirm(interaction) {
       ],
     });
     return interaction.editReply({
-      content: "✅ 已確認續單扣薪付款並建立秋奈 ERP 扣項。",
+      content: "✅ 已確認續單扣薪付款並建立秋奈 EIP 扣項。",
     });
   } catch (err) {
     return interaction.editReply({
       content: paymentCompleted
-        ? `⚠️ 續單扣薪與 ERP 扣項已完成，但通知失敗：${err.message || err}`
+        ? `⚠️ 續單扣薪與 EIP 扣項已完成，但通知失敗：${err.message || err}`
         : `❌ 續單扣薪付款失敗：${err.message || err}`,
     });
   } finally {
@@ -6913,6 +7920,20 @@ function canEditOrderPrice(interaction) {
       interaction.member.roles.cache.has(process.env.CUSTOMER_SERVICE_ROLE_ID))
   );
 }
+
+function isWalletPaymentMethod(paymentMethod) {
+  const value = String(paymentMethod || "");
+  return value.includes("儲值卡") || value.includes("錢包") || value.includes("餘額") || value.includes("ASD");
+}
+
+function getPaidOrderPriceAdjustment(oldPrice, newPrice) {
+  const oldAmount = Number(oldPrice);
+  const newAmount = Number(newPrice);
+  if (!Number.isFinite(oldAmount) || !Number.isFinite(newAmount) || oldAmount < 0 || newAmount < 0) {
+    throw new Error("訂單金額格式錯誤");
+  }
+  return { oldAmount, newAmount, difference: newAmount - oldAmount };
+}
 // ===== 開啟更改訂單金額視窗 =====
 async function openChangeOrderPriceModal(interaction) {
   if (!canEditOrderPrice(interaction)) {
@@ -7131,6 +8152,15 @@ async function submitTopupForm(interaction) {
         description: "顯示刷卡付款連結",
         value: "刷卡",
       },
+      ...(paymentHelpers.jkopayEnabled
+        ? [
+            {
+              label: "街口支付",
+              description: "完成付款後自動儲值 ASD",
+              value: "街口支付",
+            },
+          ]
+        : []),
       {
         label: "美金轉帳",
         description: "請等待客服提供帳號",
@@ -7183,6 +8213,64 @@ async function handleTopupPaymentMethodSelect(interaction) {
   const method = interaction.values[0];
 
   const { amount, note, topupNo } = pending;
+
+  if (method === "街口支付") {
+    if (!paymentHelpers.createJkopayTopup) {
+      return interaction.editReply({
+        content: "❌ 街口支付尚未完成設定，請聯繫客服。",
+        components: [],
+      });
+    }
+    try {
+      const payment = await paymentHelpers.createJkopayTopup({
+        userId: interaction.user.id,
+        amount,
+        topupNo,
+        channelId: interaction.channelId,
+      });
+      pendingTopups.delete(topupId);
+
+      const embed = new EmbedBuilder()
+        .setColor("#00B900")
+        .setTitle("街口支付｜ASD 儲值")
+        .setDescription(
+          `<@${interaction.user.id}> 請點擊下方按鈕完成付款。\n\n` +
+            `儲值編號：${topupNo}\n` +
+            `付款金額：NT$${amount.toLocaleString("zh-TW")}\n` +
+            `入帳數量：${amount.toLocaleString("zh-TW")} ASD\n\n` +
+            `付款完成後系統會自動查帳及儲值，不需要上傳付款截圖。`,
+        )
+        .setFooter({ text: "付款連結逾時後，可重新填寫儲值資料取得新連結" })
+        .setTimestamp();
+      if (payment.qrImg) embed.setImage(payment.qrImg);
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel("前往街口付款")
+          .setEmoji("💳")
+          .setStyle(ButtonStyle.Link)
+          .setURL(payment.paymentUrl),
+      );
+      const message = await interaction.channel.send({
+        embeds: [embed],
+        components: [row],
+      });
+      await paymentHelpers.attachJkopayPaymentMessage?.(
+        payment.platformOrderId,
+        message.id,
+      );
+      return interaction.editReply({
+        content: "✅ 街口付款單已建立，請使用頻道中的按鈕完成付款。",
+        components: [],
+      });
+    } catch (error) {
+      console.error("[JKOPAY] 建立儲值付款失敗", error);
+      return interaction.editReply({
+        content: `❌ 街口付款單建立失敗：${error.message || error}`,
+        components: [],
+      });
+    }
+  }
 
   pendingTopups.delete(topupId);
 
@@ -7571,6 +8659,49 @@ async function submitChangeOrderPrice(interaction) {
     });
   }
 
+  const oldPrice = Number(order.final_price ?? order.price ?? 0);
+  const adjustment = getPaidOrderPriceAdjustment(oldPrice, newPrice);
+  if (adjustment.difference === 0) {
+    return interaction.editReply({ content: "⚠️ 新金額與目前訂單金額相同，沒有需要調整的差額。" });
+  }
+
+  const orderChannel = await client.channels
+    .fetch(order.channel_id)
+    .catch(() => null);
+
+  if (!orderChannel) {
+    return interaction.editReply({ content: "❌ 找不到訂單臨時頻道" });
+  }
+
+  if (order.paid && isWalletPaymentMethod(order.payment_method)) {
+    const actionLabel = adjustment.difference > 0 ? "補扣" : "退回";
+    const difference = Math.abs(adjustment.difference);
+    await orderChannel.send({
+      content: `<@${order.customer_id}> 客服已修改訂單金額，請確認 ASD 差額調整。`,
+      embeds: [new EmbedBuilder()
+        .setColor(adjustment.difference > 0 ? "#ffaa00" : "#57F287")
+        .setTitle("💰 訂單金額差額確認")
+        .setDescription(
+          `訂單編號：${order.order_no || order.id}\n` +
+          `原金額：NT$${oldPrice.toLocaleString("zh-TW")}\n` +
+          `新金額：NT$${newPrice.toLocaleString("zh-TW")}\n` +
+          `${actionLabel}差額：${difference.toLocaleString("zh-TW")} ASD\n\n` +
+          `只會調整上述差額，不會重複扣除原訂單金額。`,
+        )
+        .setFooter({ text: `由 ${interaction.user.username} 修改` })
+        .setTimestamp()],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`confirm_order_price_adjustment_${order.id}_${oldPrice}_${newPrice}`)
+          .setLabel(adjustment.difference > 0 ? "確認補扣差額" : "確認退回差額")
+          .setStyle(adjustment.difference > 0 ? ButtonStyle.Danger : ButtonStyle.Success),
+      )],
+    });
+    return interaction.editReply({
+      content: `✅ 已請闆闆確認${actionLabel} ${difference.toLocaleString("zh-TW")} ASD；確認前訂單金額不會先變更。`,
+    });
+  }
+
   const { data: updated, error: updateError } = await supabase
     .from("play_orders")
     .update({
@@ -7594,16 +8725,6 @@ async function submitChangeOrderPrice(interaction) {
     return interaction.editReply({
       content:
         "⚠️ 原訂單金額已更新，但陪陪填單同步失敗，請查看 Railway Logs。",
-    });
-  }
-
-  const orderChannel = await client.channels
-    .fetch(order.channel_id)
-    .catch(() => null);
-
-  if (!orderChannel) {
-    return interaction.editReply({
-      content: "❌ 找不到訂單臨時頻道",
     });
   }
 
@@ -7670,6 +8791,136 @@ async function submitChangeOrderPrice(interaction) {
   return interaction.editReply({
     content: `✅ 已將訂單金額改為 NT$${newPrice}`,
   });
+}
+
+async function confirmPaidWalletPriceAdjustment(interaction) {
+  await deferReplyOnce(interaction);
+  const reconcileMatch = interaction.customId.match(/^confirm_order_paid_gap_(.+)_(\d+)_(\d+)$/);
+  const match = reconcileMatch || interaction.customId.match(/^confirm_order_price_adjustment_(.+)_(\d+)_(\d+)$/);
+  if (!match) return interaction.editReply({ content: "❌ 差額調整資料格式錯誤。" });
+  const [, orderId, expectedPriceText, newPriceText] = match;
+  const isExistingPaidGap = Boolean(reconcileMatch);
+  const operationKey = `${isExistingPaidGap ? "gap" : "edit"}:${orderId}:${expectedPriceText}:${newPriceText}`;
+  if (processingOrderPriceAdjustments.has(operationKey)) {
+    return interaction.editReply({ content: "⚠️ 這筆差額正在處理，請勿重複點擊。" });
+  }
+  processingOrderPriceAdjustments.add(operationKey);
+  try {
+    const { data: order, error } = await supabase
+      .from("play_orders")
+      .select("*")
+      .eq("id", orderId)
+      .maybeSingle();
+    if (error || !order) return interaction.editReply({ content: "❌ 找不到這張訂單。" });
+    if (interaction.user.id !== order.customer_id) {
+      return interaction.editReply({ content: "❌ 只有下單的闆闆可以確認差額調整。" });
+    }
+    if (!order.paid || !isWalletPaymentMethod(order.payment_method)) {
+      return interaction.editReply({ content: "❌ 這張訂單不是已付款的 ASD 訂單，無法自動調整。" });
+    }
+    const expectedPrice = Number(expectedPriceText);
+    const newPrice = Number(newPriceText);
+    const currentPrice = Number(order.final_price ?? order.price ?? 0);
+    if ((!isExistingPaidGap && currentPrice !== expectedPrice) || (isExistingPaidGap && currentPrice !== newPrice)) {
+      await interaction.message.edit({ components: [] }).catch(() => null);
+      return interaction.editReply({ content: "❌ 訂單金額已再次變更，這個確認按鈕已失效。" });
+    }
+    const { difference } = getPaidOrderPriceAdjustment(
+      isExistingPaidGap ? expectedPrice : currentPrice,
+      newPrice,
+    );
+    if (!difference) {
+      await interaction.message.edit({ components: [] }).catch(() => null);
+      return interaction.editReply({ content: "⚠️ 訂單已是這個金額，不會重複調整。" });
+    }
+    if (difference > 0) {
+      const user = await paymentHelpers.getUser(order.customer_id);
+      if (Number(user.coins || 0) < difference) {
+        return interaction.editReply({
+          content: `❌ ASD 餘額不足。目前：${Number(user.coins || 0).toLocaleString("zh-TW")} ASD，需要補扣：${difference.toLocaleString("zh-TW")} ASD。`,
+        });
+      }
+    }
+
+    const finalCoins = await paymentHelpers.changeCoins(order.customer_id, -difference);
+    let updated = order;
+    if (!isExistingPaidGap) {
+      const { data, error: updateError } = await supabase
+        .from("play_orders")
+        .update({ price: newPrice, final_price: newPrice, updated_at: new Date().toISOString() })
+        .eq("id", order.id)
+        .eq("final_price", currentPrice)
+        .select()
+        .maybeSingle();
+      if (updateError || !data) {
+        await paymentHelpers.changeCoins(order.customer_id, difference).catch(() => null);
+        throw new Error(updateError?.message || "訂單金額已被其他操作變更，錢包異動已撤銷");
+      }
+      updated = data;
+    }
+
+    const actionLabel = difference > 0 ? "訂單補扣" : "訂單退款";
+    await paymentHelpers.sendWalletLog(
+      order.customer_id,
+      actionLabel,
+      -difference,
+      finalCoins,
+      `訂單 ${order.order_no || order.id}｜${isExistingPaidGap ? "補齊既有未扣差額" : `金額由 NT$${currentPrice} 調整為 NT$${newPrice}`}`,
+    );
+    await paymentHelpers.recordAccountingLedger?.({
+      entry_type: "customer_spend_wallet_adjustment",
+      entry_label: difference > 0 ? "客人補款" : "客人退款",
+      amount: difference,
+      revenue_amount: difference,
+      liability_amount: -difference,
+      payment_method: "儲值卡 / 錢包",
+      customer_id: order.customer_id,
+      order_id: String(order.id),
+      order_no: order.order_no || null,
+      source_table: "play_orders",
+      source_id: String(order.id),
+      dedupe_key: `play_orders:${order.id}:price_adjustment:${interaction.id}`,
+      note: isExistingPaidGap
+        ? `補齊訂單未扣差額 NT$${Math.abs(difference)}`
+        : `訂單金額由 NT$${currentPrice} 調整為 NT$${newPrice}`,
+    }).catch((ledgerError) => console.error("[修改金額帳務明細] 寫入失敗", ledgerError));
+    await paymentHelpers.recordSpendActivity?.({
+      userId: order.customer_id,
+      amount: difference,
+      sourceKey: `order-price-adjustment:${interaction.id}`,
+      note: `訂單 ${order.order_no || order.id} 金額差額調整`,
+    }).catch((activityError) => console.error("[修改金額聯盟累積消費] 更新失敗", activityError));
+    await paymentHelpers.checkAndUpgradeVip?.(
+      order.customer_id,
+      "spend",
+      difference,
+      order.guild_id || process.env.GUILD_ID,
+      order.channel_id || null,
+    ).catch((vipError) => console.error("[修改金額累積消費] 更新失敗", vipError));
+    await workReportSystem.syncAcceptedOrder(updated).catch((syncError) =>
+      console.error("[修改金額同步填單失敗]", syncError),
+    );
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.channel.send({
+      embeds: [new EmbedBuilder()
+        .setColor("#57F287")
+        .setTitle(difference > 0 ? "✅ 訂單差額補扣完成" : "✅ 訂單差額退款完成")
+        .setDescription(
+          `訂單：${order.order_no || order.id}\n` +
+          `原已扣金額：NT$${(isExistingPaidGap ? expectedPrice : currentPrice).toLocaleString("zh-TW")}\n` +
+          `新金額：NT$${newPrice.toLocaleString("zh-TW")}\n` +
+          `${difference > 0 ? "已補扣" : "已退回"}：${Math.abs(difference).toLocaleString("zh-TW")} ASD\n` +
+          `目前餘額：${Number(finalCoins).toLocaleString("zh-TW")} ASD`,
+        )
+        .setTimestamp()],
+    });
+    return interaction.editReply({ content: "✅ 差額與訂單金額已同步完成。" });
+  } catch (error) {
+    console.error("[已付款訂單修改金額] 失敗", error);
+    return interaction.editReply({ content: `❌ 差額調整失敗：${error.message || error}` });
+  } finally {
+    processingOrderPriceAdjustments.delete(operationKey);
+  }
 }
 // 接單
 async function acceptPlayOrder(interaction) {
@@ -8431,6 +9682,11 @@ function getServiceKeywordFromPending(pending = {}) {
   }
 
   if (pending.category === "other") {
+    if (text.includes("傳說對決")) {
+      if (text.includes("大神")) return "傳說對決大神";
+      if (text.includes("技術")) return "傳說對決技術";
+      if (text.includes("娛樂")) return "傳說對決娛樂";
+    }
     if (text.includes("王者榮耀")) {
       if (text.includes("技術")) return "王者榮耀技術";
       if (text.includes("娛樂")) return "王者榮耀娛樂";
@@ -8479,6 +9735,9 @@ function matchAllowedServiceName(allowedServices, targetService) {
   const group = getServiceGroupName(target);
 
   const serviceAliases = {
+    傳說對決娛樂: "aov_entertain",
+    傳說對決技術: "aov_skill",
+    傳說對決大神: "aov_god",
     王者榮耀娛樂: "hok_entertain",
     王者榮耀技術: "hok_skill",
     第五人格娛樂: "identity_v_entertain",
@@ -9766,10 +11025,6 @@ async function createPlayOrderFromServicePending(pending, channelId) {
     throw new Error(error?.message || "建立訂單失敗");
   }
 
-  if (pending.quotedBy) {
-    await awardCustomerServicePoint(data.id, pending.quotedBy);
-  }
-
   return data;
 }
 function clonePendingForValorantSplit(
@@ -10041,16 +11296,6 @@ async function handleServicePaymentMethodSelect(interaction) {
         pending.customerId,
         amount,
       );
-      if (!eligibility.state.canUse) {
-        pending.paymentMethod = null;
-        pendingServiceOrders.set(flowId, pending);
-        return interaction.editReply({
-          content:
-            `❌ 無法使用扣薪付款：每人最多預支 NT$${eligibility.state.advanceLimit.toLocaleString("zh-TW")}。\n` +
-            `本筆確認後會預支 NT$${eligibility.state.projectedAdvance.toLocaleString("zh-TW")}，已超過上限。`,
-        });
-      }
-
       await createSalaryDeductionPrompt({
         channel: interaction.channel,
         customerId: pending.customerId,
@@ -10058,6 +11303,7 @@ async function handleServicePaymentMethodSelect(interaction) {
         eligibility,
         confirmId: `salary_service_confirm_${flowId}`,
         cancelId: `salary_service_cancel_${flowId}`,
+        transferId: `salary_service_transfer_${flowId}`,
       });
       return interaction.editReply({
         content: "✅ 已送出扣薪確認，請等待客服或管理員處理。",
@@ -10259,14 +11505,14 @@ async function handleSalaryServiceConfirm(interaction) {
           .setTitle("✅ 扣薪付款完成")
           .setDescription(
             `<@${pending.customerId}> 已使用薪資支付 NT$${amount.toLocaleString("zh-TW")}。\n` +
-              `ERP 已新增扣項：使用薪水點單\n` +
+              `EIP 已新增扣項：使用薪水點單\n` +
               `由 <@${interaction.user.id}> 確認，系統已自動派單。`,
           )
           .setTimestamp(),
       ],
     });
     return interaction.editReply({
-      content: "✅ 已確認扣薪付款、建立 ERP 扣項並完成派單。",
+      content: "✅ 已確認扣薪付款、建立 EIP 扣項並完成派單。",
     });
   } catch (err) {
     if (!paymentCompleted && createdOrderIds.length) {
@@ -10281,7 +11527,7 @@ async function handleSalaryServiceConfirm(interaction) {
     }
     return interaction.editReply({
       content: paymentCompleted
-        ? `⚠️ 扣薪與 ERP 扣項已完成，但派單通知發送失敗，請客服人工確認：${err.message || err}`
+        ? `⚠️ 扣薪與 EIP 扣項已完成，但派單通知發送失敗，請客服人工確認：${err.message || err}`
         : `❌ 扣薪付款失敗：${err.message || err}`,
     });
   }
@@ -10314,6 +11560,147 @@ async function handleSalaryServiceCancel(interaction) {
   return interaction.editReply({
     content: "✅ 已取消扣薪付款，請員工重新選擇付款方式。",
   });
+}
+
+async function handleSalaryServiceTransfer(interaction) {
+  await deferReplyOnce(interaction);
+  if (!canApproveSalaryDeduction(interaction)) {
+    return interaction.editReply({ content: "❌ 只有客服或管理員可以選擇差額轉帳。" });
+  }
+  const flowId = interaction.customId.replace("salary_service_transfer_", "");
+  const pending = pendingServiceOrders.get(flowId);
+  if (!pending || pending.paymentMethod !== "扣薪") {
+    return interaction.editReply({ content: "❌ 這筆扣薪付款已過期或已處理。" });
+  }
+  const amount = getServiceFinalPrice(pending);
+  const eligibility = await getSalaryDeductionEligibility(pending.customerId, amount);
+  const salaryAmount = Math.min(amount, Math.max(0, eligibility.state.availableBefore));
+  const transferAmount = amount - salaryAmount;
+  if (transferAmount <= 0) {
+    return interaction.editReply({ content: "❌ 目前薪資已足夠，請直接按確認使用扣薪。" });
+  }
+
+  pending.paymentMethod = "扣薪＋轉帳";
+  pending.salarySplit = { salaryAmount, transferAmount };
+  pendingServiceOrders.set(flowId, pending);
+  await interaction.message.edit({ components: [] }).catch(() => null);
+  await sendBankTransferInfo(interaction.channel);
+  await interaction.channel.send({
+    content:
+      `<@${pending.customerId}> 本筆將從薪資扣除 NT$${salaryAmount.toLocaleString("zh-TW")}，` +
+      `請另行轉帳 NT$${transferAmount.toLocaleString("zh-TW")}。\n` +
+      `收到轉帳明細後，請客服確認差額已入帳。`,
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`salary_service_split_confirm_${flowId}`)
+          .setLabel("確認差額已入帳並派單")
+          .setStyle(ButtonStyle.Success),
+      ),
+    ],
+  });
+  return interaction.editReply({ content: "✅ 已改為扣薪加轉帳補齊差額。" });
+}
+
+async function handleSalaryServiceSplitConfirm(interaction) {
+  await deferReplyOnce(interaction);
+  if (!canApproveSalaryDeduction(interaction)) {
+    return interaction.editReply({ content: "❌ 只有客服或管理員可以確認差額入帳。" });
+  }
+  const flowId = interaction.customId.replace("salary_service_split_confirm_", "");
+  const pending = pendingServiceOrders.get(flowId);
+  if (!pending || pending.paymentMethod !== "扣薪＋轉帳" || !pending.salarySplit) {
+    return interaction.editReply({ content: "❌ 這筆差額付款已過期或已處理。" });
+  }
+
+  const amount = getServiceFinalPrice(pending);
+  const salaryAmount = Number(pending.salarySplit.salaryAmount || 0);
+  const transferAmount = amount - salaryAmount;
+  if (salaryAmount < 0 || transferAmount <= 0) {
+    return interaction.editReply({ content: "❌ 差額付款金額錯誤。" });
+  }
+
+  let createdOrderIds = [];
+  let paymentCompleted = false;
+  try {
+    const serviceTypes = Array.isArray(pending.serviceTypes) ? pending.serviceTypes : [];
+    const isValorantSplit =
+      pending.category === "valorant" &&
+      serviceTypes.includes("娛樂") &&
+      serviceTypes.includes("技術") &&
+      pending.quoteParts;
+    let orders;
+    if (isValorantSplit) {
+      const orderGroup = await createValorantSplitOrdersFromPending(pending, interaction.channel.id);
+      orders = orderGroup.orders;
+    } else {
+      orders = [await createPlayOrderFromServicePending(pending, interaction.channel.id)];
+    }
+    createdOrderIds = orders.map((order) => order.id);
+    await recordServiceUsedCoupon(pending, orders.length > 1 ? orders : orders[0]);
+
+    let paidOrders;
+    if (salaryAmount > 0) {
+      const result = await applySalaryDeductionToOrders({
+        customerId: pending.customerId,
+        amount: salaryAmount,
+        orderIds: createdOrderIds,
+        finalStatus: "pending",
+        quoteStatus: "dispatched",
+      });
+      const { data, error } = await supabase
+        .from("play_orders")
+        .update({ payment_method: "扣薪＋轉帳" })
+        .in("id", createdOrderIds)
+        .select("*");
+      if (error) throw error;
+      paidOrders = data?.length ? data : result.orders;
+    } else {
+      const paidAt = new Date().toISOString();
+      const { data, error } = await supabase
+        .from("play_orders")
+        .update({
+          payment_method: "轉帳補齊差額",
+          paid: true,
+          paid_at: paidAt,
+          status: "pending",
+          quote_status: "dispatched",
+          updated_at: paidAt,
+        })
+        .in("id", createdOrderIds)
+        .eq("paid", false)
+        .select("*");
+      if (error || data?.length !== createdOrderIds.length) {
+        throw new Error(error?.message || "訂單付款狀態已變更");
+      }
+      paidOrders = data;
+    }
+    paymentCompleted = true;
+
+    for (const paidOrder of paidOrders) {
+      if (paymentHelpers.countOrderVipSpentOnce) {
+        await paymentHelpers.countOrderVipSpentOnce(paidOrder, "扣薪加轉帳付款完成");
+      }
+      await sendOrderToStaffChannel(paidOrder);
+      await sendStaffOrderControlPanel(interaction.channel, paidOrder);
+    }
+    pendingServiceOrders.delete(flowId);
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.channel.send({
+      embeds: [new EmbedBuilder().setColor("#57F287").setTitle("✅ 扣薪＋轉帳付款完成").setDescription(
+        `<@${pending.customerId}> 本筆共 NT$${amount.toLocaleString("zh-TW")}。\n` +
+        `薪資扣除：NT$${salaryAmount.toLocaleString("zh-TW")}\n` +
+        `轉帳補齊：NT$${transferAmount.toLocaleString("zh-TW")}\n` +
+        `確認客服：<@${interaction.user.id}>，系統已自動派單。`,
+      ).setTimestamp()],
+    });
+    return interaction.editReply({ content: "✅ 已確認差額入帳、建立 EIP 扣項並完成派單。" });
+  } catch (err) {
+    if (!paymentCompleted && createdOrderIds.length) {
+      await supabase.from("play_orders").update({ status: "cancelled", updated_at: new Date().toISOString() }).in("id", createdOrderIds).eq("paid", false);
+    }
+    return interaction.editReply({ content: `❌ 差額付款完成失敗：${err.message || err}` });
+  }
 }
 async function handleServiceConfirmWallet(interaction) {
   await interaction.deferReply({
@@ -11025,6 +12412,38 @@ async function handleDispatchInteraction(interaction) {
 
   if (interaction.isButton()) {
     // ===== 陪玩控制 =====
+    if (interaction.customId === "self_service_start") {
+      await startSelfServiceOrder(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_quote_yes_")) {
+      await confirmSelfServiceQuote(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_quote_no_")) {
+      await cancelSelfServiceOrder(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_claim_")) {
+      await claimSelfServiceOrder(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_players_confirm_")) {
+      await confirmSelfServicePlayers(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_players_reselect_")) {
+      await reselectSelfServicePlayers(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_pay_wallet_")) {
+      await paySelfServiceOrder(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_extend_")) {
+      await openSelfServiceExtensionModal(interaction);
+      return true;
+    }
     if (interaction.customId === "open_topup_modal") {
       await openTopupModal(interaction);
       return true;
@@ -11113,12 +12532,28 @@ async function handleDispatchInteraction(interaction) {
       await handleSalaryQuoteConfirm(interaction);
       return true;
     }
+    if (interaction.customId.startsWith("salary_quote_split_confirm_")) {
+      await handleSalaryQuoteSplitConfirm(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("salary_quote_transfer_")) {
+      await handleSalaryQuoteTransfer(interaction);
+      return true;
+    }
     if (interaction.customId.startsWith("salary_quote_cancel_")) {
       await handleSalaryQuoteCancel(interaction);
       return true;
     }
     if (interaction.customId.startsWith("salary_service_confirm_")) {
       await handleSalaryServiceConfirm(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("salary_service_split_confirm_")) {
+      await handleSalaryServiceSplitConfirm(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("salary_service_transfer_")) {
+      await handleSalaryServiceTransfer(interaction);
       return true;
     }
     if (interaction.customId.startsWith("salary_service_cancel_")) {
@@ -11173,6 +12608,14 @@ async function handleDispatchInteraction(interaction) {
     }
     if (interaction.customId.startsWith("change_order_price_")) {
       await openChangeOrderPriceModal(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("confirm_order_price_adjustment_")) {
+      await confirmPaidWalletPriceAdjustment(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("confirm_order_paid_gap_")) {
+      await confirmPaidWalletPriceAdjustment(interaction);
       return true;
     }
     if (interaction.customId.startsWith("save_order_note_")) {
@@ -11284,6 +12727,14 @@ async function handleDispatchInteraction(interaction) {
     }
   }
   if (interaction.isModalSubmit()) {
+    if (interaction.customId.startsWith("self_service_requirement_")) {
+      await submitSelfServiceRequirement(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_extension_submit_")) {
+      await submitSelfServiceExtension(interaction);
+      return true;
+    }
     if (interaction.customId.startsWith("submit_staff_edit_order_")) {
       await submitStaffEditOrder(interaction);
       return true;
@@ -11326,6 +12777,18 @@ async function handleDispatchInteraction(interaction) {
     }
   }
   if (interaction.isStringSelectMenu()) {
+    if (interaction.customId.startsWith("self_customer_numbers_")) {
+      await selectSelfServicePlayerNumbers(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_game_")) {
+      await selectSelfServiceGame(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_gender_")) {
+      await openSelfServiceRequirementModal(interaction);
+      return true;
+    }
     if (interaction.customId.startsWith("game_order_select_")) {
       await handleGameOrderSelect(interaction);
       return true;
@@ -11441,11 +12904,17 @@ module.exports = {
   handleDispatchInteraction,
   sendPlayerPanel,
   sendGameOrderPanels,
+  sendSelfServiceOrderPanel,
+  restoreSelfServiceDispatchTimers,
   sendTipOrderPanel,
   startNewOrderFlow,
   sendDailyPlayerSummary,
   getNewOrderGameOptions,
   getOrderItemOptions,
+  getSelfServiceDispatchRoleIds,
+  getSelfServiceDispatchAt,
+  resolveSelfServicePlayerNumbers,
+  getPaidOrderPriceAdjustment,
   shouldPreserveDispatchedOrder,
   deferReplyOnce,
   submitTopupForm,
@@ -11464,4 +12933,7 @@ module.exports = {
     workReportSystem?.startCrownReminderScheduler(),
   sendTipWorkReports: (orders, payload) =>
     workReportSystem?.sendForCompletedTipOrders(orders, payload),
+  getSalaryDeductionEligibility,
+  createSalaryDeductionPrompt,
+  applySalaryDeductionPayment,
 };

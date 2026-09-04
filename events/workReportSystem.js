@@ -8,6 +8,7 @@ const {
   TextInputStyle,
   PermissionFlagsBits,
   UserSelectMenuBuilder,
+  ChannelType,
 } = require("discord.js");
 const { getOrderCommissionBase } = require("../utils/salaryCommission");
 const { ORDER_FLOW_TTL_MS } = require("../utils/orderFlow");
@@ -35,6 +36,32 @@ function normalizeStaffLookup(value) {
     .replace(/^@/, "")
     .replace(/\s+/g, " ")
     .toLocaleLowerCase("zh-TW");
+}
+
+function reportChannelToken(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("zh-TW")
+    .replace(/^填單專區[-_－—\s]*/u, "")
+    .replace(/^𝓐𝓢[.．\s]*/u, "")
+    .split(/[|｜]/u)
+    .at(-1)
+    .replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+function getStaffReportChannelName(staff) {
+  const raw =
+    staff?.display_name ||
+    staff?.discord_name ||
+    staff?.real_name ||
+    staff?.name ||
+    staff?.discord_id;
+  const shortName = String(raw || "陪陪")
+    .replace(/^𝓐𝓢[.．\s]*/u, "")
+    .split(/[|｜]/u)
+    .at(-1)
+    .trim();
+  return `填單專區-${shortName || staff?.discord_id || "陪陪"}`.slice(0, 100);
 }
 
 function splitStaffLookupInput(value) {
@@ -157,11 +184,12 @@ function isGiftOrderType(value) {
 }
 
 function shouldAutomaticallyFinalizeWorkReport(appKey, meta, isComplete) {
-  return (
-    appKey === "qiunai" &&
-    Boolean(isComplete) &&
-    meta?.sourceKind === "bot_order"
-  );
+  // 無論來源是機器人訂單或人工報單，完成報時後都必須交由 EIP 審核。
+  // 保留參數是為了相容既有呼叫與測試介面。
+  void appKey;
+  void meta;
+  void isComplete;
+  return false;
 }
 
 function parseCrownDurationHours(value) {
@@ -331,6 +359,123 @@ function createWorkReportSystem({
   const pendingManualReports = new Map();
   let crownReminderTimer = null;
 
+  async function ensureStaffReportChannel(staff) {
+    const staffId = String(staff?.discord_id || "").trim();
+    if (!staffId) throw new Error("員工資料缺少 Discord ID");
+
+    for (const guild of client.guilds.cache.values()) {
+      await guild.channels.fetch().catch(() => null);
+    }
+    const staffTokens = [
+      staff.display_name,
+      staff.discord_name,
+      staff.real_name,
+      staff.name,
+    ]
+      .map(reportChannelToken)
+      .filter(Boolean);
+    const namedMatches = client.channels.cache.filter(
+      (channel) =>
+        channel.type === ChannelType.GuildText &&
+        String(channel.name || "").startsWith("填單專區-") &&
+        staffTokens.includes(reportChannelToken(channel.name)),
+    );
+    let channel = namedMatches.find(
+      (candidate) => candidate.permissionOverwrites.cache.has(staffId),
+    );
+    if (!channel && namedMatches.size === 1) channel = namedMatches.first();
+
+    if (!channel) {
+      let staffQuery = supabase.from(staffTable).select("*");
+      if (staffTable === "players") staffQuery = staffQuery.eq("guild_id", guildId);
+      const { data: staffRows, error } = await staffQuery;
+      if (error) throw error;
+      const knownChannels = (staffRows || [])
+        .map((row) => ({
+          row,
+          channel: client.channels.cache.get(
+            parseChannelId(row.report_channel_id || row.salary_channel_id),
+          ),
+        }))
+        .filter(({ channel: item }) => item?.type === ChannelType.GuildText);
+      const genderText = String(staff.gender || "");
+      let genderKey = genderText.includes("女") ? "女陪" : genderText.includes("男") ? "男陪" : "";
+      const employeeGuild = knownChannels.reduce((counts, item) => {
+        counts.set(item.channel.guild, (counts.get(item.channel.guild) || 0) + 1);
+        return counts;
+      }, new Map());
+      const targetGuild = [...employeeGuild.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+      if (!targetGuild) throw new Error(`無法判斷陪陪 <@${staffId}> 的員工群`);
+      if (!genderKey) {
+        const member = await targetGuild.members.fetch(staffId).catch(() => null);
+        const roleNames = member?.roles.cache.map((role) => role.name).join(" ") || "";
+        genderKey = roleNames.includes("女陪") ? "女陪" : roleNames.includes("男陪") ? "男陪" : "";
+      }
+      const reportCategoryIds = new Set(
+        knownChannels.map(({ channel: item }) => item.parentId).filter(Boolean),
+      );
+      const categories = targetGuild.channels.cache
+        .filter(
+          (item) =>
+            item.type === ChannelType.GuildCategory &&
+            reportCategoryIds.has(item.id) &&
+            (!genderKey || String(item.name || "").includes(genderKey)) &&
+            item.children.cache.size < 50,
+        )
+        .sort((a, b) => a.children.cache.size - b.children.cache.size);
+      const category = categories.first();
+      if (!category) throw new Error(`找不到可建立陪陪 <@${staffId}> 填單區的分類`);
+      const template = knownChannels.find(
+        ({ channel: item }) => item.parentId === category.id,
+      );
+      if (!template) throw new Error(`找不到填單區權限範本：${category.name}`);
+      const permissionOverwrites = template.channel.permissionOverwrites.cache
+        .filter((overwrite) => overwrite.id !== String(template.row.discord_id || ""))
+        .map((overwrite) => ({
+          id: overwrite.id,
+          type: overwrite.type,
+          allow: overwrite.allow.bitfield,
+          deny: overwrite.deny.bitfield,
+        }));
+      permissionOverwrites.push({
+        id: staffId,
+        type: 1,
+        allow: PermissionFlagsBits.ViewChannel,
+        deny: 0n,
+      });
+      channel = await targetGuild.channels.create({
+        name: getStaffReportChannelName(staff),
+        type: ChannelType.GuildText,
+        parent: category.id,
+        permissionOverwrites,
+        reason: `自動補建 ${staffId} 的填單區`,
+      });
+    }
+
+    if (!channel.permissionOverwrites.cache.has(staffId)) {
+      await channel.permissionOverwrites.edit(
+        staffId,
+        { ViewChannel: true },
+        { reason: `自動補上 ${staffId} 的填單區權限` },
+      );
+    }
+
+    const updatePayload =
+      staffTable === "qiunai_staff"
+        ? { salary_channel_id: channel.id }
+        : { report_channel_id: channel.id, salary_channel_id: channel.id };
+    let updateQuery = supabase
+      .from(staffTable)
+      .update(updatePayload)
+      .eq("discord_id", staffId);
+    if (staffTable === "players") updateQuery = updateQuery.eq("guild_id", guildId);
+    const { error: updateError } = await updateQuery;
+    if (updateError) throw updateError;
+    Object.assign(staff, updatePayload);
+    console.log(`[報單自動修復] ${staffId} 已綁定填單區 ${channel.id}`);
+    return channel;
+  }
+
   function readCrownMeta(order) {
     try {
       const parsed = JSON.parse(order?.note || "{}");
@@ -465,11 +610,6 @@ function createWorkReportSystem({
       }
       const staff = uniqueMatches[0].staff;
       const staffId = String(staff.discord_id || "").trim();
-      if (!staff.report_channel_id && !staff.salary_channel_id) {
-        throw new Error(
-          `${lookup} 已有員工資料，但尚未填寫個人填單區／薪資頻道 ID。`,
-        );
-      }
       selectedIds.push(staffId);
     }
 
@@ -494,11 +634,22 @@ function createWorkReportSystem({
     const channelId = parseChannelId(
       staff?.report_channel_id || staff?.salary_channel_id,
     );
-    if (!channelId)
-      throw new Error(`陪陪 <@${report.staff_id}> 尚未設定個人薪資頻道 ID`);
-    const channel = await client.channels.fetch(channelId);
-    if (!channel?.isTextBased())
-      throw new Error(`找不到陪陪 <@${report.staff_id}> 的填單頻道`);
+    let channelWasRepaired = false;
+    let channel = channelId
+      ? await client.channels.fetch(channelId).catch(() => null)
+      : null;
+    if (!channel?.isTextBased()) {
+      console.warn(`[報單自動修復] 陪陪 ${report.staff_id} 缺少有效填單區，開始修復`);
+      try {
+        channel = await ensureStaffReportChannel(staff);
+        channelWasRepaired = true;
+      } catch (error) {
+        throw new Error(
+          `陪陪 <@${report.staff_id}> 缺少有效填單區，且自動補建失敗：${error?.message || error}`,
+          { cause: error },
+        );
+      }
+    }
 
     const isGift = isGiftOrderType(report.order_type);
     const isCrown = String(report.service_name || "").includes("冠名單｜");
@@ -579,6 +730,11 @@ function createWorkReportSystem({
           ),
       ],
       components,
+    }).catch((error) => {
+      throw new Error(
+        `陪陪 <@${report.staff_id}> 的報單${channelWasRepaired ? "重新" : ""}發送失敗：${error?.message || error}`,
+        { cause: error },
+      );
     });
   }
 
@@ -798,11 +954,10 @@ function createWorkReportSystem({
 
   async function sendForCompletedTipOrders(orders, payload = {}) {
     const reports = [];
+    const failures = [];
     for (const order of (orders || []).filter(Boolean)) {
       const staffId = String(order.discord_id || order.assigned_player || "");
       if (!staffId) continue;
-      const staff = await findStaff(staffId);
-      if (!staff) throw new Error(`找不到陪陪 <@${staffId}> 的員工資料`);
       const report = {
         id: order.id,
         staff_id: staffId,
@@ -816,8 +971,21 @@ function createWorkReportSystem({
         ),
         expected_duration_minutes: 0,
       };
-      await sendReportCard(report, staff);
-      reports.push(report);
+      try {
+        const staff = await findStaff(staffId);
+        if (!staff) throw new Error(`找不到陪陪 <@${staffId}> 的員工資料`);
+        await sendReportCard(report, staff);
+        reports.push(report);
+      } catch (error) {
+        failures.push(error);
+        console.error(`[打賞報單] 陪陪 ${staffId} 發送失敗`, error);
+      }
+    }
+    if (failures.length) {
+      throw new AggregateError(
+        failures,
+        `${failures.length} 筆打賞報單未能發送；其餘報單已繼續處理`,
+      );
     }
     return reports;
   }

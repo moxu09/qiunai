@@ -1,5 +1,9 @@
 module.exports = {
+  organization: "qiunai",
   brandName: "秋奈電競",
+  signingBaseUrl:
+    process.env.EMPLOYMENT_SIGNING_BASE_URL ||
+    "https://qiunai.wearestilllhere.com",
   panelChannelId: "1525790871432204340",
   reviewChannelId: "1525790900062523513",
   archiveChannelId: "1530899091243143218",
@@ -7,6 +11,31 @@ module.exports = {
   newcomerChannelId: "1524701867790307338",
   examinerRoles: {
     default: ["〢・遊戲審核官"],
-    "other:other": ["〢・陪聊審核官"],
+    "valorant:entertainment": ["〢・Valorant娛樂審核官"],
+    "valorant:technical": ["〢・Valorant技術審核官"],
+    "apex:entertainment": ["〢・Apex娛樂審核官"],
+    "apex:technical": ["〢・Apex技術審核官"],
+    "lol:entertainment": ["〢・LOL娛樂審核官"],
+    "lol:technical": ["〢・LOL技術審核官"],
+    "tft:entertainment": ["〢・TFT娛樂審核官"],
+    "tft:technical": ["〢・TFT技術審核官"],
+    "overwatch:entertainment": ["〢・Overwatch娛樂審核官"],
+    "overwatch:technical": ["〢・Overwatch技術審核官"],
+    "delta:*:pc": ["〢・三角洲審核官"],
+    "delta:*:mobile": ["〢・三角洲M審核官"],
+    "naraka:*": ["〢・NARAKA審核官"],
+    "honor_of_kings:*": ["〢・王者榮耀審核官"],
+    "cs2:*": ["〢・CS2 審核官"],
+    "other:other": ["〢・遊戲審核官"],
+  },
+  examinerRolesByAppliedItem: {
+    "傳說對決": ["〢・傳說審核官"],
+    "PUBG": ["〢・PUBG娛樂審核官"],
+    "NARAKA": ["〢・NARAKA審核官"],
+    "歌手": ["〢・歌手審核官"],
+    "唱歌": ["〢・歌手審核官"],
+    "點歌": ["〢・歌手審核官"],
+    "陪聊": ["〢・陪聊審核官"],
+    "語音聊天": ["〢・陪聊審核官"],
   },
 };

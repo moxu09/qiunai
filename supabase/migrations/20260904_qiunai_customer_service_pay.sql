@@ -1,0 +1,2 @@
+-- Canonical migration is maintained with the Qiunai EIP deployment.
+-- Apply: qiunai-salary-app/supabase/migrations/20260904_qiunai_customer_service_pay.sql

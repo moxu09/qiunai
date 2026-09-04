@@ -15,7 +15,11 @@ const {
   shouldPublishReview,
 } = require("../utils/reviews");
 const { parseAllowedServices } = require("../utils/services");
-const { getManualCommissionRate, getOrderCommissionBase } = require("../utils/salaryCommission");
+const {
+  chooseHigherCommission,
+  getManualCommissionRate,
+  getOrderCommissionBase,
+} = require("../utils/salaryCommission");
 const {
   buildTopupTopic,
   getNextTopupNumber,
@@ -23,14 +27,225 @@ const {
   normalizeTopupNumber,
 } = require("../utils/topupNumbers");
 const {
+  buildJkopayRefundPayload,
+  buildPlatformOrderId,
+  isAllowedCallbackIp,
+  normalizeJkopayRefundOrderId,
+  normalizeJkopayPlatformOrderId,
+  parseCallbackIps,
+  signJkopayPayload,
+} = require("../utils/jkopay");
+const {
+  QIUNAI_CUSTOMER_SERVICE_IDS,
+  calculateCustomerServiceReceptionPay,
+  getSeptemberShiftCommissionRate,
   hasCustomerServicePointRole,
+  recordCustomerServiceReception,
   recordCustomerServicePoint,
 } = require("../utils/customerServicePoints");
+const { calculateSelfServicePrice } = require("../config/selfServicePricing");
+const {
+  getSelfServiceDispatchAt,
+  getSelfServiceDispatchRoleIds,
+  resolveSelfServicePlayerNumbers,
+  getPaidOrderPriceAdjustment,
+} = require("../events/dispatchSystem");
+
+test("自助下單依現行價目表計算多人與時數", () => {
+  assert.deepEqual(
+    calculateSelfServicePrice({
+      game: "apex",
+      platformOrMode: "排位",
+      serviceType: "技術",
+      rankOrMap: "白金",
+      playerCount: "2",
+      quantity: "1.5",
+    }),
+    { unitPrice: 310, total: 930, unit: "小時", quantity: 1.5, playerCount: 2 },
+  );
+  assert.equal(
+    calculateSelfServicePrice({
+      game: "delta",
+      platformOrMode: "手機",
+      serviceType: "猛攻護航保底",
+      rankOrMap: "航天基地",
+      playerCount: "1",
+      quantity: "2",
+    }).total,
+    2200,
+  );
+});
+
+test("街口支付依官方規格使用 HMAC-SHA256 簽章", () => {
+  const payload =
+    '{"platform_order_id":"demo-order-001","store_id":"35f12dff-1581-11e9-a054-00505684fd45","currency": "TWD","total_price":10,"final_price":10,"unredeem":10,"result_display_url":"https://display.com","result_url":"https://result-callback.xxx/xxx"}';
+  const secret =
+    "r0odDC1e9LHXDmxuvmOv9bgaWLf2CXB2c4gMheoFucVKNMi1K0Id9zwRHJF1r-kdtAKriKgb11VDlo7Kb8R-FQ";
+  assert.equal(
+    signJkopayPayload(payload, secret),
+    "3577609b058ab85c2d0a00a5421a991979ed6b9f549476e9a82476dc1b70d876",
+  );
+});
+
+test("街口付款單沿用唯一儲值編號並限制 callback IP", () => {
+  assert.equal(buildPlatformOrderId("TOP-0000000123"), "QIUNAI-TOP-0000000123");
+  assert.throws(() => buildPlatformOrderId("TOP-123"), /格式錯誤/);
+  const allowed = parseCallbackIps("125.227.158.50, 35.194.172.6");
+  assert.equal(isAllowedCallbackIp("::ffff:125.227.158.50", allowed), true);
+  assert.equal(isAllowedCallbackIp("203.0.113.10", allowed), false);
+});
+
+test("街口退款接受秋奈儲值單與官網商品單並建立整筆退款 payload", () => {
+  assert.equal(
+    normalizeJkopayPlatformOrderId("top-0000000123"),
+    "QIUNAI-TOP-0000000123",
+  );
+  assert.deepEqual(buildJkopayRefundPayload("QIUNAI-TOP-0000000123", 100), {
+    platform_order_id: "QIUNAI-TOP-0000000123",
+    refund_amount: 100,
+  });
+  assert.equal(
+    normalizeJkopayRefundOrderId("wash-1788518426000-a1b2c3d4e5"),
+    "WASH-1788518426000-A1B2C3D4E5",
+  );
+  assert.deepEqual(buildJkopayRefundPayload("WASH-1788518426000-A1B2C3D4E5", 490), {
+    platform_order_id: "WASH-1788518426000-A1B2C3D4E5",
+    refund_amount: 490,
+  });
+  assert.throws(() => buildJkopayRefundPayload("WASH-123", 100), /格式錯誤/);
+  assert.throws(
+    () => buildJkopayRefundPayload("QIUNAI-TOP-0000000123", 0),
+    /金額錯誤/,
+  );
+});
+
+test("秋奈儲值主面板與付款選單都明確顯示街口支付", () => {
+  const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
+  const dispatchSource = fs.readFileSync(
+    path.join(__dirname, "..", "events", "dispatchSystem.js"),
+    "utf8",
+  );
+  assert.match(indexSource, /建立儲值單｜支援街口支付/);
+  assert.match(indexSource, /使用街口支付，付款完成後系統會自動核帳/);
+  assert.match(dispatchSource, /label: "街口支付"/);
+  assert.match(dispatchSource, /完成付款後自動儲值 ASD/);
+  assert.match(indexSource, /\.setName\("街口退款"\)/);
+  assert.match(indexSource, /refundPayment/);
+  assert.match(indexSource, /1545380103675052092/);
+  assert.match(indexSource, /sendJkopayRefundPanel/);
+  assert.match(indexSource, /sendJkopayRefundAudit/);
+  assert.match(indexSource, /\.setName\("街口查詢"\)/);
+  assert.match(indexSource, /inquirePayment/);
+  assert.match(indexSource, /sendJkopayInquiryAudit/);
+  assert.match(indexSource, /Inquiry 結果/);
+  assert.match(indexSource, /interaction\.channelId !== JKOPAY_REFUND_CHANNEL_ID/);
+  const jkopaySource = fs.readFileSync(
+    path.join(__dirname, "..", "utils", "jkopay.js"),
+    "utf8",
+  );
+  assert.match(jkopaySource, /unredeem: 0/);
+  assert.match(jkopaySource, /\[JKOPAY\]\[INQUIRY\]\[REQUEST\]/);
+  assert.match(jkopaySource, /\/payments\/jkopay\/gateway\/refund/);
+  const refundMigration = fs.readFileSync(
+    path.join(
+      __dirname,
+      "..",
+      "supabase",
+      "migrations",
+      "20260904_jkopay_topup_refund.sql",
+    ),
+    "utf8",
+  );
+  assert.match(refundMigration, /prepare_jkopay_topup_refund/);
+  assert.match(refundMigration, /complete_jkopay_topup_refund/);
+  assert.match(refundMigration, /JKOPAY_ASD_BALANCE_INSUFFICIENT/);
+});
+
+test("自助下單拒絕價目表沒有的組合與非整數局數", () => {
+  assert.throws(
+    () => calculateSelfServicePrice({ game: "lol", platformOrMode: "召喚峽谷", serviceType: "娛樂", rankOrMap: "鑽石", playerCount: "1", quantity: "1" }),
+    /沒有這個段位與類型/,
+  );
+  assert.throws(
+    () => calculateSelfServicePrice({ game: "lol", platformOrMode: "聯盟戰棋", serviceType: "技術", rankOrMap: "翡翠", playerCount: "1", quantity: "1.5" }),
+    /局數必須是整數/,
+  );
+});
+
+test("自助派單同時標註性別與所選遊戲身分組", () => {
+  assert.deepEqual(
+    getSelfServiceDispatchRoleIds({
+      gender_preference: "女陪",
+      service: "英雄聯盟｜召喚峽谷｜娛樂",
+      dispatch_service_key: "英雄聯盟娛樂陪玩",
+    }),
+    {
+      genderRoleIds: ["1206158440280621056"],
+      serviceRoleIds: ["1210652274771361812"],
+    },
+  );
+  assert.deepEqual(
+    getSelfServiceDispatchRoleIds({
+      gender_preference: "不指定",
+      service: "Apex｜排位｜大神",
+      dispatch_service_key: "Apex大神陪玩",
+    }).genderRoleIds,
+    ["1206158440280621056", "1210852757972459540"],
+  );
+});
+
+test("自助派單 15 分鐘倒數使用固定派單時間，不受後續扣 1 更新影響", () => {
+  assert.equal(
+    getSelfServiceDispatchAt({
+      note: "[SELF_SERVICE] [DISPATCH_AT:2026-09-04T05:00:00.000Z]",
+      updated_at: "2026-09-04T05:10:00.000Z",
+    }),
+    Date.parse("2026-09-04T05:00:00.000Z"),
+  );
+});
+
+test("自助派單湊足後依客人選擇的數字對應陪陪", () => {
+  assert.deepEqual(
+    resolveSelfServicePlayerNumbers(["陪陪甲", "陪陪乙", "陪陪丙"], ["2", "1"], 2),
+    ["陪陪乙", "陪陪甲"],
+  );
+  assert.throws(
+    () => resolveSelfServicePlayerNumbers(["陪陪甲", "陪陪乙"], ["1", "1"], 2),
+    /數字無效或人數不符/,
+  );
+  assert.throws(
+    () => resolveSelfServicePlayerNumbers(["陪陪甲", "陪陪乙"], ["3"], 1),
+    /數字無效或人數不符/,
+  );
+});
+
+test("自助派單湊足需求人數後仍持續開放扣 1，直到客人選定", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "events", "dispatchSystem.js"),
+    "utf8",
+  );
+  assert.match(source, /\["self_dispatching", "self_choosing_open"\]\.includes\(order\.quote_status\)/);
+  assert.match(source, /quote_status: success \? "self_choosing_open" : "self_dispatching"/);
+  assert.match(source, /老闆選定前仍可繼續扣 1/);
+  assert.match(source, /content: `\$\{selectedIds\.map\(\(id\) => `<@\$\{id\}>`\)\.join\(" "\)\} 接！`/);
+  assert.doesNotMatch(source, /playerIds\.length >= needCount\) return interaction\.editReply\(\{ content: "❌ 這張訂單人數已滿/);
+});
+
+test("自助下單無價格組合會保留資料並轉客服報價", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "events", "dispatchSystem.js"),
+    "utf8",
+  );
+  assert.match(source, /自助訂單無價格組合｜轉客服報價/);
+  assert.match(source, /createWaitingQuoteOrder\(interaction, flowId, manualPending\)/);
+  assert.match(source, /<@&\$\{process\.env\.STAFF_ROLE\}>/);
+});
 const {
   buildTipAllocations,
   formatTipStaffMentions,
   getTipAllocationTotal,
   getTipGiftByKey,
+  getTipStaffPage,
   getTipStaffIds,
   getTipTotalAmount,
   hasSelfTip,
@@ -43,10 +258,35 @@ test("tips cannot target the tipper", () => {
   assert.equal(hasSelfTip("", ["200"]), false);
 });
 
+test("tip staff choices are paged into Discord-safe groups of 25", () => {
+  const options = Array.from({ length: 63 }, (_, index) => ({ value: String(index) }));
+  const first = getTipStaffPage(options, 0);
+  const last = getTipStaffPage(options, 99);
+  assert.equal(first.page, 0);
+  assert.equal(first.pageCount, 3);
+  assert.equal(first.options.length, 25);
+  assert.equal(last.page, 2);
+  assert.equal(last.options.length, 13);
+});
+
 test("manual commission overrides and coupon salary uses the original price", () => {
   assert.equal(getManualCommissionRate("manager_95"), 95);
   assert.equal(getOrderCommissionBase({ price: 500, final_price: 400, discount_amount: 100 }), 500);
   assert.equal(getOrderCommissionBase({ final_price: 400 }), 400);
+  assert.deepEqual(
+    chooseHigherCommission(
+      { rate: 95, level: "主管津貼 95%" },
+      { rate: 90, level: "活動抽成 90%" },
+    ),
+    { rate: 95, level: "主管津貼 95%" },
+  );
+  assert.deepEqual(
+    chooseHigherCommission(
+      { rate: 85, level: "個人檔位 85%" },
+      { rate: 90, level: "活動抽成 90%" },
+    ),
+    { rate: 90, level: "活動抽成 90%" },
+  );
 });
 
 test("topup numbers use a validated ten-digit sequence", async () => {
@@ -84,6 +324,67 @@ test("customer service points require the configured role and are idempotent per
   assert.equal(upsertCall.row.points, 1);
   assert.deepEqual(upsertCall.options, { onConflict: "app_key,order_id", ignoreDuplicates: true });
 });
+
+test("客服接待件數只由手動指令計薪，且九月輪班客服為 85%", async () => {
+  assert.equal(calculateCustomerServiceReceptionPay(3), 30);
+  assert.throws(() => calculateCustomerServiceReceptionPay(0), /大於 0/);
+  assert.equal(QIUNAI_CUSTOMER_SERVICE_IDS.length, 6);
+  assert.equal(
+    getSeptemberShiftCommissionRate(
+      "808875987034308618",
+      "2026-09-01T00:00:00+08:00",
+    ),
+    85,
+  );
+  assert.equal(
+    getSeptemberShiftCommissionRate(
+      "607493124746379274",
+      "2026-09-04T00:00:00+08:00",
+    ),
+    null,
+  );
+
+  const calls = [];
+  const supabase = {
+    from(table) {
+      if (table === "customer_service_order_points") {
+        return {
+          insert(row) {
+            calls.push({ table, row });
+            return {
+              select: () => ({
+                single: async () => ({ data: { id: 1 }, error: null }),
+              }),
+            };
+          },
+        };
+      }
+      return {
+        insert: async (row) => {
+          calls.push({ table, row });
+          return { error: null };
+        },
+      };
+    },
+  };
+  const result = await recordCustomerServiceReception(supabase, {
+    appKey: "qiunai",
+    interactionId: "interaction-1",
+    discordId: "808875987034308618",
+    staffName: "兜兜",
+    count: 3,
+    recordedBy: "admin-1",
+    servedAt: "2026-09-04T00:00:00.000Z",
+  });
+  assert.deepEqual(result, {
+    count: 3,
+    amount: 30,
+    orderId: "manual:interaction-1",
+  });
+  assert.equal(calls[0].row.points, 3);
+  assert.equal(calls[0].row.order_id, "manual:interaction-1");
+  assert.equal(calls[1].row.amount, 30);
+});
 const {
   buildTipBroadcastContent,
   splitTipBroadcastAllocations,
@@ -118,14 +419,14 @@ test("work reports accept raw channel IDs and Discord channel URLs", () => {
   );
 });
 
-test("normal Qiunai bot orders finalize without manual approval", () => {
+test("all completed work reports require EIP approval", () => {
   assert.equal(
     shouldAutomaticallyFinalizeWorkReport(
       "qiunai",
       { sourceKind: "bot_order" },
       true,
     ),
-    true,
+    false,
   );
   assert.equal(
     shouldAutomaticallyFinalizeWorkReport(
@@ -231,6 +532,45 @@ test("多人打賞播報拆成每位陪陪各自一筆", () => {
     [["staff-a", 2], ["staff-b", 1]],
   );
 });
+
+test("舊版儲值卡打賞付款完成後也會執行公開播報", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  const start = source.indexOf('if (customId.startsWith("confirm_tip_submit_"))');
+  const end = source.indexOf("// ===== 客人取消送出打賞 =====", start);
+  assert.ok(start >= 0 && end > start, "找不到舊版打賞確認流程");
+  assert.match(
+    source.slice(start, end),
+    /sendTipBroadcastSafely\(tipData\)/,
+  );
+});
+
+test("多人打賞報單會逐位處理並在最後彙整失敗", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "events", "workReportSystem.js"),
+    "utf8",
+  );
+  const start = source.indexOf("async function sendForCompletedTipOrders");
+  const end = source.indexOf("async function createAdditionalReport", start);
+  assert.ok(start >= 0 && end > start, "找不到打賞報單發送流程");
+  const block = source.slice(start, end);
+  assert.match(block, /const failures = \[\]/);
+  assert.match(block, /catch \(error\)/);
+  assert.match(block, /if \(failures\.length\)/);
+});
+
+test("缺少填單區時會自動補建、寫回 EIP 並再送出報單", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "events", "workReportSystem.js"),
+    "utf8",
+  );
+  assert.match(source, /async function ensureStaffReportChannel/);
+  assert.match(source, /自動補建 .* 的填單區/);
+  assert.match(source, /channel = await ensureStaffReportChannel\(staff\)/);
+  assert.doesNotMatch(source, /尚未填寫個人填單區／薪資頻道 ID/);
+});
 const { ORDER_FLOW_TTL_MS } = require("../utils/orderFlow");
 const {
   isCouponInventoryItem,
@@ -264,13 +604,17 @@ const {
 } = require("../runtime/commandRegistry");
 const { runStartupGroup } = require("../runtime/startupOrchestrator");
 const {
-  EMPLOYMENT_CONTRACT_RETURN_NOTE,
   GAMES,
   buildApprovedEmploymentDmContent,
   buildEmploymentPdfBuffer,
   buildEmploymentResultNotice,
+  buildExistingCompanionResultDm,
+  createEmploymentSystem,
   getCompletedThreadDeleteDelay,
   getApplicationFields,
+  getConfiguredRoleNames,
+  hasActiveCompanionAtStore,
+  hasPaidOrderAtStore,
   normalizeRoleName,
 } = require("../events/employmentSystem");
 const { formatComplaintSender } = require("../events/complaintSystem");
@@ -321,7 +665,7 @@ test("salary deduction uses net commissioned salary and caps advances at 1000", 
   assert.equal(overLimit.canUse, false);
 });
 
-test("Qiunai salary deduction covers quote, service, and extension payments", () => {
+test("Qiunai salary deduction covers quote, service, extension, and tip payments", () => {
   const source = fs.readFileSync(
     path.join(__dirname, "..", "events", "dispatchSystem.js"),
     "utf8",
@@ -333,6 +677,17 @@ test("Qiunai salary deduction covers quote, service, and extension payments", ()
   assert.match(source, /salary_service_confirm_/);
   assert.match(source, /salary_extension_confirm_/);
   assert.match(source, /使用薪水續單/);
+  assert.match(source, /setLabel\(state\.shortage \? "確認預支"/);
+  assert.match(source, /setLabel\("轉帳補齊差額"\)/);
+  assert.match(source, /salary_quote_split_confirm_/);
+  assert.match(source, /salary_service_split_confirm_/);
+  const indexSource = fs.readFileSync(
+    path.join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  assert.match(indexSource, /value: "員工扣薪"/);
+  assert.match(indexSource, /confirm_tip_salary_/);
+  assert.match(indexSource, /使用薪水打賞/);
 });
 
 test("new order command categories include Apex and other service items", () => {
@@ -349,6 +704,13 @@ test("new order command categories include Apex and other service items", () => 
   );
   assert.ok(
     getOrderItemOptions("其他").some((option) => option.value === "自訂需求"),
+  );
+  assert.ok(
+    getOrderItemOptions("其他").some((option) => option.value === "傳說對決"),
+  );
+  assert.equal(
+    fs.existsSync(path.join(__dirname, "..", "assets", "panels", "aov-pricing.png")),
+    true,
   );
 });
 
@@ -371,6 +733,23 @@ test("edited dispatched orders keep their progress when the customer reconfirms"
     shouldPreserveDispatchedOrder({ assigned_player: null, status: "quoted" }),
     false,
   );
+});
+
+test("paid wallet order price edits charge or refund only the difference", () => {
+  assert.deepEqual(getPaidOrderPriceAdjustment(500, 650), {
+    oldAmount: 500,
+    newAmount: 650,
+    difference: 150,
+  });
+  assert.equal(getPaidOrderPriceAdjustment(500, 350).difference, -150);
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "events", "dispatchSystem.js"),
+    "utf8",
+  );
+  assert.match(source, /confirm_order_price_adjustment_/);
+  assert.match(source, /confirm_order_paid_gap_/);
+  assert.match(source, /只會調整上述差額，不會重複扣除原訂單金額/);
+  assert.match(source, /changeCoins\(order\.customer_id, -difference\)/);
 });
 
 test("salary deduction buttons never defer an interaction twice", async () => {
@@ -923,6 +1302,131 @@ test("employment applications expose ten games and complete field schemas", () =
   assert.equal(normalizeRoleName("｜｜・遊戲審核官"), "遊戲審核官");
 });
 
+test("employment applications mention only the examiner role matching game, track, platform, or item", () => {
+  const config = require("../config/employment");
+  assert.deepEqual(
+    getConfiguredRoleNames(config, "valorant", "technical"),
+    ["〢・Valorant技術審核官"],
+  );
+  assert.deepEqual(
+    getConfiguredRoleNames(config, "delta", "entertainment", "mobile"),
+    ["〢・三角洲M審核官"],
+  );
+  assert.deepEqual(
+    getConfiguredRoleNames(config, "other", "other", null, "傳說對決陪玩"),
+    ["〢・傳說審核官"],
+  );
+  assert.deepEqual(
+    getConfiguredRoleNames(config, "other", "other", null, "PUBG M 娛樂"),
+    ["〢・PUBG娛樂審核官"],
+  );
+});
+
+test("employment applications block only customers with paid orders in the same store", async () => {
+  const filters = [];
+  const supabase = {
+    from(table) {
+      assert.equal(table, "play_orders");
+      return {
+        select() { return this; },
+        eq(column, value) { filters.push([column, value]); return this; },
+        async limit() { return { data: [{ id: "paid-order" }], error: null }; },
+      };
+    },
+  };
+
+  assert.equal(await hasPaidOrderAtStore({
+    supabase,
+    discordUserId: "123456789012345678",
+    guildId: "qiunai-guild",
+  }), true);
+  assert.deepEqual(filters, [
+    ["guild_id", "qiunai-guild"],
+    ["customer_id", "123456789012345678"],
+    ["paid", true],
+  ]);
+});
+
+test("paid customers receive the owner restriction when starting an application", async () => {
+  const replies = [];
+  const supabase = {
+    from(table) {
+      return {
+        select() { return this; },
+        eq() { return this; },
+        async limit() {
+          return {
+            data: table === "play_orders" ? [{ id: "paid-order" }] : [],
+            error: null,
+          };
+        },
+      };
+    },
+  };
+  const system = createEmploymentSystem(
+    {},
+    { brandName: "秋奈電競", organization: "qiunai" },
+    supabase,
+  );
+  const handled = await system.handleInteraction({
+    customId: "employment_start",
+    guildId: "qiunai-guild",
+    user: { id: "123456789012345678" },
+    async deferReply(payload) { replies.push(["defer", payload]); },
+    async editReply(payload) { replies.push(["edit", payload]); },
+  });
+
+  assert.equal(handled, true);
+  assert.equal(replies[0][1].flags, 64);
+  assert.equal(
+    replies[1][1].content,
+    "老闆身分不給予申請陪陪，別間店消費則不受影響",
+  );
+});
+
+test("paid active companions can still start an employment assessment", async () => {
+  const replies = [];
+  const supabase = {
+    from(table) {
+      return {
+        select() { return this; },
+        eq() { return this; },
+        async limit() {
+          return {
+            data:
+              table === "play_orders"
+                ? [{ id: "paid-order" }]
+                : [{ discord_id: "123456789012345678" }],
+            error: null,
+          };
+        },
+      };
+    },
+  };
+  assert.equal(
+    await hasActiveCompanionAtStore({
+      supabase,
+      discordUserId: "123456789012345678",
+      guildId: "qiunai-guild",
+      organization: "qiunai",
+    }),
+    true,
+  );
+  const system = createEmploymentSystem(
+    {},
+    { brandName: "秋奈電競", organization: "qiunai" },
+    supabase,
+  );
+  await system.handleInteraction({
+    customId: "employment_start",
+    guildId: "qiunai-guild",
+    user: { id: "123456789012345678" },
+    async deferReply(payload) { replies.push(["defer", payload]); },
+    async editReply(payload) { replies.push(["edit", payload]); },
+  });
+  assert.match(replies[1][1].content, /是否同意陪玩共同守則/);
+});
+
 test("completed employment threads delete after 24 hours of inactivity", () => {
   const hour = 60 * 60 * 1000;
   assert.equal(getCompletedThreadDeleteDelay(0, 23 * hour), hour);
@@ -941,18 +1445,28 @@ test("employment result notice does not reveal pass or fail", () => {
   assert.doesNotMatch(notice, /結果：通過|結果：不通過/);
 });
 
-test("approved employment DM includes deadlines and bundled contract", () => {
-  const content = buildApprovedEmploymentDmContent({
-    brandName: "深夜不關燈",
-    workGuildInvite: "https://discord.gg/example",
-    newcomerChannelId: "123456789012345678",
-  });
+test("existing companions taking a new assessment only receive the result", () => {
+  const passed = buildExistingCompanionResultDm("通過", "Apex");
+  const rejected = buildExistingCompanionResultDm("不通過", "英雄聯盟");
+  assert.equal(passed, "你申請的「Apex」加考結果：通過。");
+  assert.equal(rejected, "你申請的「英雄聯盟」加考結果：不通過。");
+  assert.doesNotMatch(`${passed}\n${rejected}`, /工作群|新人|簽署|入職/);
+});
+
+test("approved employment DM includes deadlines and online signing link", () => {
+  const content = buildApprovedEmploymentDmContent(
+    {
+      brandName: "深夜不關燈",
+      workGuildInvite: "https://discord.gg/example",
+      newcomerChannelId: "123456789012345678",
+    },
+    "https://salary.example/employment-sign/test-token",
+  );
   assert.match(content, /48小時內入群報到/);
   assert.match(content, /新人入職必看頻道/);
-  assert.equal(
-    EMPLOYMENT_CONTRACT_RETURN_NOTE,
-    "備註：請填寫並簽署後於入群後三天內發送到個人填單區以完成入職手續（無論電子簽署或紙本簽署掃描上傳皆可）",
-  );
+  assert.match(content, /線上入職契約/);
+  assert.match(content, /salary\.example\/employment-sign\/test-token/);
+  assert.match(content, /第一次登入 EIP 才會正式啟用/);
   const contract = fs.readFileSync(
     path.join(
       __dirname,
@@ -964,6 +1478,25 @@ test("approved employment DM includes deadlines and bundled contract", () => {
   );
   assert.equal(contract.subarray(0, 4).toString(), "%PDF");
   assert.ok(contract.length > 300_000);
+});
+
+test("既有員工與跨店已簽署人員不會收到重複簽署連結", () => {
+  const config = {
+    brandName: "秋奈電競",
+    workGuildInvite: "https://discord.gg/example",
+    newcomerChannelId: "123456789012345678",
+  };
+  const crossStore = buildApprovedEmploymentDmContent(config, {
+    required: false,
+    reason: "already_signed",
+  });
+  const legacy = buildApprovedEmploymentDmContent(config, {
+    required: false,
+    reason: "legacy_staff",
+  });
+  assert.match(crossStore, /任一店完成入職文件簽署/);
+  assert.match(legacy, /2026 年 9 月 1 日前已有公司員工資料/);
+  assert.doesNotMatch(`${crossStore}\n${legacy}`, /employment-sign\//);
 });
 
 test("employment PDF generation returns a valid Chinese PDF", async () => {

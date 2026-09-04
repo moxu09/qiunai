@@ -26,7 +26,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: "金流",
-    commands: ["發錢", "扣錢", "發紅包"],
+    commands: ["發錢", "扣錢", "街口查詢", "街口退款", "發紅包"],
   },
   {
     title: "訂單與客服",
