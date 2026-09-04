@@ -129,6 +129,21 @@ function getValorantExpectedUnit(input) {
   return rank === "gold" || level === "entertain" ? "小時" : "局";
 }
 
+function getValorantCompanionOptions(targetRankText) {
+  const rank = match(targetRankText, RANK_ALIASES.valorant);
+  const labels = {
+    entertain: "娛樂",
+    ascendant: "超凡",
+    immortal: "神話",
+    radiant: "輻能",
+    topRadiant: "頂輻",
+  };
+  return Object.keys(PRICES.valorant?.[rank] || {}).map((value) => ({
+    label: labels[value],
+    value: labels[value],
+  }));
+}
+
 function calculateSelfServicePrice(input) {
   const game = normalize(input.game);
   const count = positiveNumber(input.playerCount, "陪陪人數");
@@ -209,4 +224,9 @@ function calculateSelfServicePrice(input) {
   throw new Error("不支援的遊戲");
 }
 
-module.exports = { GAME_OPTIONS, calculateSelfServicePrice, getValorantExpectedUnit };
+module.exports = {
+  GAME_OPTIONS,
+  calculateSelfServicePrice,
+  getValorantCompanionOptions,
+  getValorantExpectedUnit,
+};

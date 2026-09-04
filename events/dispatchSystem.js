@@ -27,6 +27,7 @@ const {
 const {
   GAME_OPTIONS: SELF_SERVICE_GAME_OPTIONS,
   calculateSelfServicePrice,
+  getValorantCompanionOptions,
   getValorantExpectedUnit,
 } = require("../config/selfServicePricing");
 const path = require("node:path");
@@ -1200,6 +1201,23 @@ async function openSelfServiceRequirementModal(interaction) {
   const game = pending.game;
   pending.gender = interaction.values[0];
   pendingSelfServiceOrders.set(flowId, pending);
+  if (game === "valorant") {
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`self_service_valorant_target_${flowId}`)
+      .setPlaceholder("選擇要打的段位")
+      .addOptions([
+        { label: "黃金含以下", value: "黃金以下" },
+        { label: "白金", value: "白金" },
+        { label: "鑽石", value: "鑽石" },
+        { label: "超凡", value: "超凡" },
+        { label: "神話 1～2", value: "神話1至2" },
+        { label: "神話 3", value: "神話3" },
+      ]);
+    return interaction.update({
+      content: "🎯 請先選擇要打的段位：",
+      components: [new ActionRowBuilder().addComponents(menu)],
+    });
+  }
   const modal = new ModalBuilder()
     .setCustomId(`self_service_requirement_${flowId}`)
     .setTitle(`${getSelfServiceGameLabel(game)}自助下單`);
@@ -1227,14 +1245,7 @@ async function openSelfServiceRequirementModal(interaction) {
             ["player_count", "需求陪陪人數", "1～8"],
             ["quantity", "需求時數", "例如：1、1.5、2"],
           ]
-        : game === "valorant"
-          ? [
-              ["platform_mode", "模式", "例如：一般、排位"],
-              ["service_type", "要打的段位", "黃金以下、白金、鑽石、超凡、神話1～3"],
-              ["rank_map", "需求的陪陪段位", "娛樂、超凡、神話、輻能或頂輻"],
-              ["player_count", "需求陪陪人數", "1～8"],
-            ]
-          : [
+        : [
             ["platform_mode", "模式", "例如：一般、排位"],
             ["service_type", "類型", "娛樂、技術或大神"],
             ["rank_map", "目前段位", "請依價目表填寫段位"],
@@ -1253,6 +1264,63 @@ async function openSelfServiceRequirementModal(interaction) {
       ),
     ),
   );
+  return interaction.showModal(modal);
+}
+
+async function selectSelfServiceValorantTarget(interaction) {
+  const flowId = interaction.customId.replace("self_service_valorant_target_", "");
+  const pending = pendingSelfServiceOrders.get(flowId);
+  if (!pending || pending.customerId !== interaction.user.id) {
+    return interaction.update({ content: "❌ 流程已過期，請重新開始。", components: [] });
+  }
+  pending.serviceType = interaction.values[0];
+  pendingSelfServiceOrders.set(flowId, pending);
+  const options = getValorantCompanionOptions(pending.serviceType);
+  if (!options.length) {
+    return interaction.update({ content: "❌ 此段位目前沒有可選擇的陪陪段位。", components: [] });
+  }
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`self_service_valorant_companion_${flowId}`)
+    .setPlaceholder("選擇需求的陪陪段位")
+    .addOptions(options.map((option) => ({
+      ...option,
+      description: `${pending.serviceType}可選擇的陪陪段位`,
+    })));
+  return interaction.update({
+    content: `🎯 要打的段位：${pending.serviceType}\n請選擇需求的陪陪段位：`,
+    components: [new ActionRowBuilder().addComponents(menu)],
+  });
+}
+
+async function selectSelfServiceValorantCompanion(interaction) {
+  const flowId = interaction.customId.replace("self_service_valorant_companion_", "");
+  const pending = pendingSelfServiceOrders.get(flowId);
+  if (!pending || pending.customerId !== interaction.user.id || !pending.serviceType) {
+    return interaction.reply({ content: "❌ 流程已過期，請重新開始。", flags: 64 });
+  }
+  pending.rankOrMap = interaction.values[0];
+  pendingSelfServiceOrders.set(flowId, pending);
+  const modal = new ModalBuilder()
+    .setCustomId(`self_service_requirement_${flowId}`)
+    .setTitle("特戰英豪自助下單")
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("platform_mode")
+          .setLabel("模式")
+          .setPlaceholder("例如：一般、排位")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true),
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("player_count")
+          .setLabel("需求陪陪人數")
+          .setPlaceholder("1～8")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true),
+      ),
+    );
   return interaction.showModal(modal);
 }
 
@@ -1288,8 +1356,14 @@ async function submitSelfServiceRequirement(interaction) {
   const input = {
     game: pending.game,
     platformOrMode: interaction.fields.getTextInputValue("platform_mode"),
-    serviceType: interaction.fields.getTextInputValue("service_type"),
-    rankOrMap: interaction.fields.getTextInputValue("rank_map"),
+    serviceType:
+      pending.game === "valorant"
+        ? pending.serviceType
+        : interaction.fields.getTextInputValue("service_type"),
+    rankOrMap:
+      pending.game === "valorant"
+        ? pending.rankOrMap
+        : interaction.fields.getTextInputValue("rank_map"),
     playerCount: interaction.fields.getTextInputValue("player_count"),
     quantity:
       pending.game === "valorant"
@@ -13127,6 +13201,14 @@ async function handleDispatchInteraction(interaction) {
     }
     if (interaction.customId.startsWith("self_service_gender_")) {
       await openSelfServiceRequirementModal(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_valorant_target_")) {
+      await selectSelfServiceValorantTarget(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_valorant_companion_")) {
+      await selectSelfServiceValorantCompanion(interaction);
       return true;
     }
     if (interaction.customId.startsWith("game_order_select_")) {

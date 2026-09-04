@@ -45,6 +45,7 @@ const {
 } = require("../utils/customerServicePoints");
 const {
   calculateSelfServicePrice,
+  getValorantCompanionOptions,
   getValorantExpectedUnit,
 } = require("../config/selfServicePricing");
 const {
@@ -58,6 +59,18 @@ const {
 } = require("../events/dispatchSystem");
 
 test("自助下單依現行價目表計算多人與時數", () => {
+  assert.deepEqual(
+    getValorantCompanionOptions("黃金以下").map(({ value }) => value),
+    ["娛樂", "超凡", "神話", "輻能", "頂輻"],
+  );
+  assert.deepEqual(
+    getValorantCompanionOptions("超凡").map(({ value }) => value),
+    ["娛樂", "神話", "輻能", "頂輻"],
+  );
+  assert.deepEqual(
+    getValorantCompanionOptions("神話1至2").map(({ value }) => value),
+    ["輻能", "頂輻"],
+  );
   assert.equal(
     getValorantExpectedUnit({ serviceType: "黃金以下", rankOrMap: "頂輻" }),
     "小時",
@@ -300,11 +313,19 @@ test("自助下單無價格組合會保留資料並轉客服報價", () => {
   assert.match(source, /await sendSelfServiceDispatch\(dispatchOrder\)/);
   assert.match(source, /款項先前已完成核帳，不會重複扣款/);
   assert.match(source, /workReportSystem\.sendForAcceptedOrder\(acceptedOrder, selectedIds\)/);
-  assert.match(source, /\["service_type", "要打的段位"/);
-  assert.match(source, /\["rank_map", "需求的陪陪段位"/);
+  assert.match(source, /setPlaceholder\("選擇要打的段位"\)/);
+  assert.match(source, /setPlaceholder\("選擇需求的陪陪段位"\)/);
   assert.match(source, /此組合只能輸入時數，請再輸入一次/);
   assert.match(source, /此組合只能輸入局數，請再輸入一次/);
   assert.match(source, /self_service_quantity_submit_/);
+  assert.match(source, /self_service_valorant_target_/);
+  assert.match(source, /self_service_valorant_companion_/);
+  const indexSource = fs.readFileSync(
+    path.join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  assert.match(indexSource, /customId\.startsWith\("self_service_valorant_target_"\)/);
+  assert.match(indexSource, /customId\.startsWith\("self_service_valorant_companion_"\)/);
 });
 const {
   buildTipAllocations,

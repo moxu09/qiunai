@@ -7743,6 +7743,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (
         interaction.customId.startsWith("self_service_game_") ||
         interaction.customId.startsWith("self_service_gender_") ||
+        interaction.customId.startsWith("self_service_valorant_target_") ||
+        interaction.customId.startsWith("self_service_valorant_companion_") ||
         interaction.customId.startsWith("self_customer_numbers_") ||
         interaction.customId.startsWith("new_order_game_") ||
         interaction.customId.startsWith("new_order_item_") ||
