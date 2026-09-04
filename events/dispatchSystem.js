@@ -25,8 +25,10 @@ const {
   calculateSalaryDeductionState,
 } = require("../utils/salaryDeduction");
 const {
+  DELTA_SERVICE_OPTIONS,
   GAME_OPTIONS: SELF_SERVICE_GAME_OPTIONS,
   calculateSelfServicePrice,
+  getDeltaFixedPlayerCount,
   getValorantCompanionOptions,
   getValorantExpectedUnit,
 } = require("../config/selfServicePricing");
@@ -1224,9 +1226,12 @@ async function openSelfServiceRequirementModal(interaction) {
   const fields = game === "delta"
     ? [
         ["platform_mode", "平台（僅三角洲必填）", "電腦或手機"],
-        ["service_type", "玩法 / 類型", "娛樂、機密雙護、機密雙護保底、猛攻護航…"],
+        [
+          "service_type",
+          "項目（請輸入完整名稱）",
+          DELTA_SERVICE_OPTIONS.map(({ value }) => value).join("、"),
+        ],
         ["rank_map", "地圖（僅三角洲必填）", "請輸入地圖"],
-        ["player_count", "需求陪陪人數", "1～8"],
         ["quantity", "需求時數", "例如：1、1.5、2"],
       ]
     : game === "lol"
@@ -1364,7 +1369,10 @@ async function submitSelfServiceRequirement(interaction) {
       pending.game === "valorant"
         ? pending.rankOrMap
         : interaction.fields.getTextInputValue("rank_map"),
-    playerCount: interaction.fields.getTextInputValue("player_count"),
+    playerCount:
+      pending.game === "delta"
+        ? null
+        : interaction.fields.getTextInputValue("player_count"),
     quantity:
       pending.game === "valorant"
         ? null
@@ -1391,7 +1399,59 @@ async function submitSelfServiceRequirement(interaction) {
       ],
     });
   }
+  if (pending.game === "delta") {
+    const deltaService = DELTA_SERVICE_OPTIONS.find(
+      ({ value }) => value === String(input.serviceType || "").trim(),
+    );
+    if (!deltaService) {
+      return interaction.editReply({
+        content:
+          "❌ 三角洲項目必須輸入完整字符，請重新開始並輸入以下其中一項：\n" +
+          DELTA_SERVICE_OPTIONS.map(({ value }) => `・${value}`).join("\n"),
+      });
+    }
+    const fixedPlayerCount = getDeltaFixedPlayerCount(input.serviceType);
+    if (fixedPlayerCount) {
+      input.playerCount = String(fixedPlayerCount);
+      return finalizeSelfServiceRequirement(interaction, flowId, pending, input);
+    }
+    pending.input = input;
+    pendingSelfServiceOrders.set(flowId, pending);
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`self_service_delta_players_${flowId}`)
+      .setPlaceholder("選擇需求陪陪人數")
+      .addOptions(
+        Array.from({ length: 8 }, (_, index) => ({
+          label: `${index + 1} 位`,
+          value: String(index + 1),
+        })),
+      );
+    return interaction.editReply({
+      content:
+        `✅ 已收到三角洲需求。\n` +
+        `項目：${input.serviceType}\n\n` +
+        "請選擇需求陪陪人數；雙護項目會由系統自動固定為 2 位。",
+      components: [new ActionRowBuilder().addComponents(menu)],
+    });
+  }
   return finalizeSelfServiceRequirement(interaction, flowId, pending, input);
+}
+
+async function selectSelfServiceDeltaPlayers(interaction) {
+  const flowId = interaction.customId.replace("self_service_delta_players_", "");
+  const pending = pendingSelfServiceOrders.get(flowId);
+  if (!pending || pending.customerId !== interaction.user.id || !pending.input) {
+    return interaction.update({ content: "❌ 流程已過期，請重新開始。", components: [] });
+  }
+  pending.input.playerCount = interaction.values[0];
+  pendingSelfServiceOrders.set(flowId, pending);
+  await interaction.deferUpdate();
+  return finalizeSelfServiceRequirement(
+    interaction,
+    flowId,
+    pending,
+    pending.input,
+  );
 }
 
 async function openSelfServiceQuantityModal(interaction) {
@@ -13209,6 +13269,10 @@ async function handleDispatchInteraction(interaction) {
     }
     if (interaction.customId.startsWith("self_service_valorant_companion_")) {
       await selectSelfServiceValorantCompanion(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_delta_players_")) {
+      await selectSelfServiceDeltaPlayers(interaction);
       return true;
     }
     if (interaction.customId.startsWith("game_order_select_")) {

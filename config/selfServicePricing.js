@@ -99,6 +99,23 @@ const PRICES = {
   },
 };
 
+const DELTA_SERVICE_OPTIONS = [
+  { label: "娛樂陪玩", value: "娛樂陪玩", key: "entertain", price: 280 },
+  { label: "機密雙護", value: "機密雙護", key: "secret", price: 600 },
+  { label: "機密雙護保底", value: "機密雙護保底", key: "secret_guaranteed", price: 800 },
+  { label: "猛攻護航", value: "猛攻護航", key: "assault", price: 700 },
+  { label: "猛攻護航保底", value: "猛攻護航保底", key: "assault_guaranteed", price: 1100 },
+];
+
+function getDeltaServiceOption(value) {
+  const target = String(value || "").trim();
+  return DELTA_SERVICE_OPTIONS.find((option) => option.value === target) || null;
+}
+
+function getDeltaFixedPlayerCount(value) {
+  return getDeltaServiceOption(value)?.value.includes("雙護") ? 2 : null;
+}
+
 function positiveNumber(value, label) {
   const number = Number(String(value || "").replace(/[^\d.]/g, ""));
   if (!Number.isFinite(number) || number <= 0) {
@@ -166,17 +183,14 @@ function calculateSelfServicePrice(input) {
       ["mobile", ["手機", "手機版", "mobile"]],
     ]);
     if (!platform) throw new Error("三角洲平台請填電腦或手機");
-    const mode = match(input.serviceType, [
-      ["entertain", ["娛樂", "娛樂陪玩", "一般陪玩"]],
-      ["secret", ["機密雙護", "雙護"]],
-      ["secret_guaranteed", ["機密雙護保底", "雙護保底"]],
-      ["assault", ["猛攻護航", "猛攻"]],
-      ["assault_guaranteed", ["猛攻護航保底", "猛攻保底"]],
-    ]);
-    const price = { entertain: 280, secret: 600, secret_guaranteed: 800, assault: 700, assault_guaranteed: 1100 }[mode];
-    if (!price) throw new Error("三角洲類型請依價目表填寫娛樂、機密雙護或猛攻護航（可加保底）");
+    const serviceOption = getDeltaServiceOption(input.serviceType);
+    if (!serviceOption) {
+      throw new Error(
+        `三角洲項目請輸入完整名稱：${DELTA_SERVICE_OPTIONS.map(({ value }) => value).join("、")}`,
+      );
+    }
     if (!String(input.rankOrMap || "").trim()) throw new Error("三角洲必須填寫地圖");
-    return { unitPrice: price, total: price * quantity * count, unit: "小時", quantity, playerCount: count, platform };
+    return { unitPrice: serviceOption.price, total: serviceOption.price * quantity * count, unit: "小時", quantity, playerCount: count, platform };
   }
 
   if (game === "lol") {
@@ -225,8 +239,10 @@ function calculateSelfServicePrice(input) {
 }
 
 module.exports = {
+  DELTA_SERVICE_OPTIONS,
   GAME_OPTIONS,
   calculateSelfServicePrice,
+  getDeltaFixedPlayerCount,
   getValorantCompanionOptions,
   getValorantExpectedUnit,
 };

@@ -44,7 +44,9 @@ const {
   recordCustomerServicePoint,
 } = require("../utils/customerServicePoints");
 const {
+  DELTA_SERVICE_OPTIONS,
   calculateSelfServicePrice,
+  getDeltaFixedPlayerCount,
   getValorantCompanionOptions,
   getValorantExpectedUnit,
 } = require("../config/selfServicePricing");
@@ -59,6 +61,24 @@ const {
 } = require("../events/dispatchSystem");
 
 test("自助下單依現行價目表計算多人與時數", () => {
+  assert.deepEqual(
+    DELTA_SERVICE_OPTIONS.map(({ value }) => value),
+    ["娛樂陪玩", "機密雙護", "機密雙護保底", "猛攻護航", "猛攻護航保底"],
+  );
+  assert.equal(getDeltaFixedPlayerCount("機密雙護"), 2);
+  assert.equal(getDeltaFixedPlayerCount("機密雙護保底"), 2);
+  assert.equal(getDeltaFixedPlayerCount("猛攻護航"), null);
+  assert.throws(
+    () => calculateSelfServicePrice({
+      game: "delta",
+      platformOrMode: "手機",
+      serviceType: "雙護",
+      rankOrMap: "航天基地",
+      playerCount: "2",
+      quantity: "1",
+    }),
+    /請輸入完整名稱/,
+  );
   assert.deepEqual(
     getValorantCompanionOptions("黃金以下").map(({ value }) => value),
     ["娛樂", "超凡", "神話", "輻能", "頂輻"],
@@ -320,12 +340,16 @@ test("自助下單無價格組合會保留資料並轉客服報價", () => {
   assert.match(source, /self_service_quantity_submit_/);
   assert.match(source, /self_service_valorant_target_/);
   assert.match(source, /self_service_valorant_companion_/);
+  assert.match(source, /項目（請輸入完整名稱）/);
+  assert.match(source, /self_service_delta_players_/);
+  assert.match(source, /雙護項目會由系統自動固定為 2 位/);
   const indexSource = fs.readFileSync(
     path.join(__dirname, "..", "index.js"),
     "utf8",
   );
   assert.match(indexSource, /customId\.startsWith\("self_service_valorant_target_"\)/);
   assert.match(indexSource, /customId\.startsWith\("self_service_valorant_companion_"\)/);
+  assert.match(indexSource, /customId\.startsWith\("self_service_delta_players_"\)/);
 });
 const {
   buildTipAllocations,
