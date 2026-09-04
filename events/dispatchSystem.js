@@ -1074,7 +1074,47 @@ function buildSelfServiceTopic(customerId, orderId = "pending") {
 }
 
 function isSelfServiceOrder(order) {
-  return String(order?.note || "").includes("[SELF_SERVICE]");
+  return /\[SELF_SERVICE(?:_MANUAL)?\]/.test(String(order?.note || ""));
+}
+
+function isManualQuoteSelfServiceOrder(order) {
+  return String(order?.note || "").includes("[SELF_SERVICE_MANUAL]");
+}
+
+async function sendSelfServiceDispatch(order) {
+  const dispatchChannel = await client.channels
+    .fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID)
+    .catch(() => null);
+  if (!dispatchChannel?.isTextBased()) {
+    throw new Error("找不到自助派單廳，請聯繫管理員。");
+  }
+  const { genderRoleIds, serviceRoleIds } =
+    getSelfServiceDispatchRoleIds(order);
+  const roleIds = [...new Set([...genderRoleIds, ...serviceRoleIds])];
+  const dispatchMessage = await dispatchChannel.send({
+    content: `${roleIds.map((id) => `<@&${id}>`).join(" ")} 新的自助訂單，請在 15 分鐘內按「扣 1 接單」。`,
+    embeds: [
+      new EmbedBuilder()
+        .setColor("#7cc7ff")
+        .setTitle("🖨️ 自助派單需求")
+        .setDescription(
+          `訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n段位 / 地圖：${order.rank_preference || "無"}\n需求：${order.player_count} 位\n目前：0 / ${order.player_count}\n訂單頻道：<#${order.channel_id}>\n\n15 分鐘內未湊足人數即派單失敗。`,
+        )
+        .setTimestamp(),
+    ],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`self_service_claim_${order.id}`)
+          .setLabel("扣 1 接單")
+          .setEmoji("1️⃣")
+          .setStyle(ButtonStyle.Success),
+      ),
+    ],
+    allowedMentions: { roles: roleIds },
+  });
+  scheduleSelfServiceDispatchTimeout(order, dispatchMessage.id);
+  return dispatchMessage;
 }
 
 async function sendSelfServiceOrderPanel() {
@@ -1433,23 +1473,12 @@ async function confirmSelfServiceQuote(interaction) {
     .select()
     .single();
   if (error || !dispatchOrder) return interaction.editReply({ content: "❌ 更新訂單狀態失敗。" });
-  const dispatchChannel = await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
-  if (!dispatchChannel?.isTextBased()) return interaction.editReply({ content: "❌ 找不到自助派單廳，請聯繫管理員。" });
-  const { genderRoleIds, serviceRoleIds } = getSelfServiceDispatchRoleIds(dispatchOrder);
-  const roleIds = [...new Set([...genderRoleIds, ...serviceRoleIds])];
-  const dispatchMessage = await dispatchChannel.send({
-    content: `${roleIds.map((id) => `<@&${id}>`).join(" ")} 新的自助訂單，請在 15 分鐘內按「扣 1 接單」。`,
-    embeds: [new EmbedBuilder()
-      .setColor("#7cc7ff")
-      .setTitle("🖨️ 自助派單需求")
-      .setDescription(`訂單：${dispatchOrder.order_no}\n服務：${dispatchOrder.service}\n性別：${dispatchOrder.gender_preference || "不指定"}\n段位 / 地圖：${dispatchOrder.rank_preference || "無"}\n需求：${dispatchOrder.player_count} 位\n目前：0 / ${dispatchOrder.player_count}\n訂單頻道：<#${dispatchOrder.channel_id}>\n\n15 分鐘內未湊足人數即派單失敗。`)
-      .setTimestamp()],
-    components: [new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`self_service_claim_${dispatchOrder.id}`).setLabel("扣 1 接單").setEmoji("1️⃣").setStyle(ButtonStyle.Success),
-    )],
-    allowedMentions: { roles: roleIds },
-  });
-  scheduleSelfServiceDispatchTimeout(dispatchOrder, dispatchMessage.id);
+  try {
+    await sendSelfServiceDispatch(dispatchOrder);
+  } catch (dispatchError) {
+    console.error("[自助派單] 發送失敗", dispatchError);
+    return interaction.editReply({ content: `❌ ${dispatchError.message || dispatchError}` });
+  }
   await interaction.message.edit({ components: [] }).catch(() => null);
   await interaction.channel.send("✅ 已統一送往自助派單廳；任何有意願的成員都能填寫備註並扣 1，15 分鐘未湊足即自動判定失敗。");
   return interaction.editReply({ content: "✅ 已確認報價並送出派單。" });
@@ -1676,6 +1705,57 @@ async function confirmSelfServicePlayers(interaction) {
     ? selection.selectedIds
     : String(order.preferred_player || "").split(",").filter(Boolean);
   if (!selectedIds.length || order.quote_status !== "confirming_players") return interaction.editReply({ content: "❌ 接單名單已過期，請重新派單。" });
+  if (order.paid) {
+    const { data: acceptedOrder, error } = await supabase
+      .from("play_orders")
+      .update({
+        assigned_player: selectedIds.join(","),
+        preferred_player: selectedIds.join(","),
+        status: "accepted",
+        quote_status: "dispatched",
+        accepted_at: new Date().toISOString(),
+      })
+      .eq("id", order.id)
+      .eq("paid", true)
+      .eq("quote_status", "confirming_players")
+      .select()
+      .single();
+    if (error || !acceptedOrder) {
+      return interaction.editReply({ content: "❌ 確認陪陪失敗，請稍後再試。" });
+    }
+    for (const playerId of selectedIds) {
+      await interaction.channel.permissionOverwrites.edit(playerId, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+      });
+    }
+    await workReportSystem.sendForAcceptedOrder(acceptedOrder, selectedIds);
+    await sendStaffOrderControlPanel(interaction.channel, acceptedOrder);
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.channel.send({
+      content: `<@${order.customer_id}> ${selectedIds.map((id) => `<@${id}>`).join(" ")}`,
+      embeds: [
+        new EmbedBuilder()
+          .setColor("#57F287")
+          .setTitle("✅ 已確認陪陪，報單已發送")
+          .setDescription(
+            `訂單：${order.order_no}\n款項先前已完成核帳，不會重複扣款。\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n系統已將陪陪加入本頻道，並發送時間填寫報單。`,
+          )
+          .setTimestamp(),
+      ],
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`self_service_extend_${order.id}`)
+            .setLabel("我要加時")
+            .setStyle(ButtonStyle.Primary),
+        ),
+      ],
+    });
+    pendingSelfServiceOrders.delete(`selection:${order.id}`);
+    return interaction.editReply({ content: "✅ 已確認陪陪並發送報單，不會重複扣款。" });
+  }
   await supabase.from("play_orders").update({ preferred_player: selectedIds.join(","), quote_status: "waiting_payment", payment_method: "儲值卡" }).eq("id", order.id).eq("paid", false);
   await interaction.message.edit({ components: [] }).catch(() => null);
   await interaction.channel.send({
@@ -5605,23 +5685,30 @@ async function sendStaffQuotePanel(order) {
     return;
   }
 
-  const row = new ActionRowBuilder().addComponents(
+  const controls = [
     new ButtonBuilder()
       .setCustomId(`staff_quote_price_${order.id}`)
       .setLabel("客服填寫金額")
       .setEmoji("💰")
       .setStyle(ButtonStyle.Primary),
-    new ButtonBuilder()
-      .setCustomId(`dispatch_assign_players_${order.id}`)
-      .setLabel("客服選擇陪陪")
-      .setEmoji("🌟")
-      .setStyle(ButtonStyle.Secondary),
+  ];
+  if (!isManualQuoteSelfServiceOrder(order)) {
+    controls.push(
+      new ButtonBuilder()
+        .setCustomId(`dispatch_assign_players_${order.id}`)
+        .setLabel("客服選擇陪陪")
+        .setEmoji("🌟")
+        .setStyle(ButtonStyle.Secondary),
+    );
+  }
+  controls.push(
     new ButtonBuilder()
       .setCustomId(`staff_edit_order_${order.id}`)
       .setLabel("修改訂單內容")
       .setEmoji("🛠️")
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(ButtonStyle.Secondary),
   );
+  const row = new ActionRowBuilder().addComponents(...controls);
   await channel.send({
     content:
       `<@&${process.env.STAFF_ROLE}> 有新的需求等待報價。\n` +
@@ -6779,6 +6866,54 @@ async function handleCustomerConfirmOrder(interaction) {
     return interaction.editReply({
       content: "✅ 已確認修改後的訂單內容正確",
     });
+  }
+
+  if (isManualQuoteSelfServiceOrder(order)) {
+    if (order.quote_status === "self_dispatching" || order.preferred_player) {
+      return interaction.editReply({
+        content: "⚠️ 這張訂單已送出自助派單，請勿重複操作。",
+      });
+    }
+    const dispatchAtIso = new Date().toISOString();
+    const dispatchNote = `${stripSelfServiceClaimNotes(
+      String(order.note || "").replace(/\[DISPATCH_AT:[^\]]+\]/g, ""),
+    )} [DISPATCH_AT:${dispatchAtIso}]`.trim();
+    const { data: dispatchOrder, error: dispatchUpdateError } = await supabase
+      .from("play_orders")
+      .update({
+        status: "pending",
+        quote_status: "self_dispatching",
+        confirmed_by_customer: true,
+        preferred_player: null,
+        note: dispatchNote,
+        updated_at: dispatchAtIso,
+      })
+      .eq("id", order.id)
+      .eq("paid", true)
+      .select()
+      .single();
+    if (dispatchUpdateError || !dispatchOrder) {
+      console.error("[客服報價自助派單] 更新訂單失敗", dispatchUpdateError);
+      return interaction.editReply({ content: "❌ 送出自助派單失敗，請稍後再試。" });
+    }
+    try {
+      await sendSelfServiceDispatch(dispatchOrder);
+    } catch (dispatchError) {
+      console.error("[客服報價自助派單] 發送失敗", dispatchError);
+      await supabase
+        .from("play_orders")
+        .update({ quote_status: "waiting_confirm", updated_at: new Date().toISOString() })
+        .eq("id", order.id)
+        .eq("quote_status", "self_dispatching");
+      return interaction.editReply({
+        content: `❌ ${dispatchError.message || dispatchError}`,
+      });
+    }
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.channel.send(
+      "✅ 客服報價款項已完成核帳，訂單已送往自助派單廳；老闆選定陪陪後會直接發送報單，不會再次扣款。",
+    );
+    return interaction.editReply({ content: "✅ 已確認並送出自助派單。" });
   }
 
   const { data: updatedOrder, error: updateError } = await supabase

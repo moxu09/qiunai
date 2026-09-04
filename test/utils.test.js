@@ -270,6 +270,10 @@ test("自助下單無價格組合會保留資料並轉客服報價", () => {
   assert.match(source, /自助訂單無價格組合｜轉客服報價/);
   assert.match(source, /createWaitingQuoteOrder\(interaction, flowId, manualPending\)/);
   assert.match(source, /<@&\$\{process\.env\.STAFF_ROLE\}>/);
+  assert.match(source, /isManualQuoteSelfServiceOrder\(order\)/);
+  assert.match(source, /await sendSelfServiceDispatch\(dispatchOrder\)/);
+  assert.match(source, /款項先前已完成核帳，不會重複扣款/);
+  assert.match(source, /workReportSystem\.sendForAcceptedOrder\(acceptedOrder, selectedIds\)/);
 });
 const {
   buildTipAllocations,
