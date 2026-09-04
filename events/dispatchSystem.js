@@ -1208,6 +1208,11 @@ async function openSelfServiceRequirementModal(interaction) {
       .setCustomId(`self_service_valorant_target_${flowId}`)
       .setPlaceholder("選擇要打的段位")
       .addOptions([
+        {
+          label: "娛樂／N/A／無段位",
+          value: "娛樂",
+          description: "包含 N/A、無或其他未列出的段位",
+        },
         { label: "黃金含以下", value: "黃金以下" },
         { label: "白金", value: "白金" },
         { label: "鑽石", value: "鑽石" },

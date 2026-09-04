@@ -135,7 +135,7 @@ function calculateTablePrice(game, rankText, typeText, quantity, playerCount) {
 }
 
 function getValorantExpectedUnit(input) {
-  const rank = match(input.serviceType, RANK_ALIASES.valorant);
+  const rank = match(input.serviceType, RANK_ALIASES.valorant) || "gold";
   const level = match(input.rankOrMap, [
     ["entertain", ["娛樂", "娛樂陪玩"]],
     ["ascendant", ["超凡", "超凡陪"]],
@@ -147,7 +147,7 @@ function getValorantExpectedUnit(input) {
 }
 
 function getValorantCompanionOptions(targetRankText) {
-  const rank = match(targetRankText, RANK_ALIASES.valorant);
+  const rank = match(targetRankText, RANK_ALIASES.valorant) || "gold";
   const labels = {
     entertain: "娛樂",
     ascendant: "超凡",
@@ -218,7 +218,7 @@ function calculateSelfServicePrice(input) {
   }
 
   if (game === "valorant") {
-    const rank = match(input.serviceType, RANK_ALIASES.valorant);
+    const rank = match(input.serviceType, RANK_ALIASES.valorant) || "gold";
     const level = match(input.rankOrMap, [
       ["entertain", ["娛樂", "娛樂陪玩"]],
       ["ascendant", ["超凡", "超凡陪"]],
@@ -227,7 +227,6 @@ function calculateSelfServicePrice(input) {
       ["topRadiant", ["頂輻", "頂輻陪"]],
     ]);
     const price = PRICES.valorant?.[rank]?.[level];
-    if (!rank) throw new Error("要打的段位不在目前價目表範圍內");
     if (!level) throw new Error("需求的陪陪段位請填：娛樂、超凡、神話、輻能或頂輻");
     if (!price) throw new Error("目前價目表沒有這個特戰段位與陪陪等級組合");
     const [unitPrice, unit] = price;

@@ -84,6 +84,10 @@ test("自助下單依現行價目表計算多人與時數", () => {
     ["娛樂", "超凡", "神話", "輻能", "頂輻"],
   );
   assert.deepEqual(
+    getValorantCompanionOptions("N/A").map(({ value }) => value),
+    ["娛樂", "超凡", "神話", "輻能", "頂輻"],
+  );
+  assert.deepEqual(
     getValorantCompanionOptions("超凡").map(({ value }) => value),
     ["娛樂", "神話", "輻能", "頂輻"],
   );
@@ -102,6 +106,21 @@ test("自助下單依現行價目表計算多人與時數", () => {
   assert.equal(
     getValorantExpectedUnit({ serviceType: "超凡", rankOrMap: "頂輻" }),
     "局",
+  );
+  assert.equal(
+    getValorantExpectedUnit({ serviceType: "N/A", rankOrMap: "頂輻" }),
+    "小時",
+  );
+  assert.deepEqual(
+    calculateSelfServicePrice({
+      game: "valorant",
+      platformOrMode: "一般",
+      serviceType: "未列出的娛樂段位",
+      rankOrMap: "娛樂",
+      playerCount: "1",
+      quantity: "1",
+    }),
+    { unitPrice: 250, total: 250, unit: "小時", quantity: 1, playerCount: 1 },
   );
   assert.deepEqual(
     calculateSelfServicePrice({
