@@ -4170,6 +4170,19 @@ async function handleJkopayServicePaid({ payment, transaction }) {
           staffId: String(item.staffId || ""),
           item: String(item.item || "打賞"),
           amount: Number(item.amount || 0),
+          lines: Array.isArray(item.lines)
+            ? item.lines.map((line) => ({
+                key: String(line.key || line.name || ""),
+                name: String(line.name || "打賞"),
+                price: Number(line.price || 0),
+                customPrice: Boolean(line.customPrice),
+                quantity: Number(line.quantity || 1),
+                subtotal: Number(
+                  line.subtotal ||
+                    Number(line.price || 0) * Number(line.quantity || 1),
+                ),
+              }))
+            : [],
         }))
         .filter((item) => item.staffId && item.amount > 0)
     : [];

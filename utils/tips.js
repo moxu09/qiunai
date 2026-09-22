@@ -82,6 +82,41 @@ function getTipGiftSelections(tipData = {}) {
 }
 
 function buildTipAllocations(tipData = {}) {
+  if (
+    (!Array.isArray(tipData.gifts) || !tipData.gifts.length) &&
+    Array.isArray(tipData.allocations) &&
+    tipData.allocations.length
+  ) {
+    return tipData.allocations
+      .map((allocation) => {
+        const staffId = String(allocation.staffId || "").trim();
+        const lines = Array.isArray(allocation.lines)
+          ? allocation.lines
+              .map((line) => ({
+                key: String(line.key || line.name || ""),
+                name: String(line.name || "打賞"),
+                price: Number(line.price || 0),
+                customPrice: Boolean(line.customPrice),
+                quantity: Number(line.quantity || 1),
+                subtotal: Number(
+                  line.subtotal || Number(line.price || 0) * Number(line.quantity || 1),
+                ),
+              }))
+              .filter((line) => line.name && line.subtotal > 0)
+          : [];
+        return {
+          staffId,
+          lines,
+          item:
+            lines.map((line) => `${line.name}×${line.quantity}`).join("、") ||
+            String(allocation.item || "打賞"),
+          amount:
+            lines.reduce((sum, line) => sum + line.subtotal, 0) ||
+            Number(allocation.amount || 0),
+        };
+      })
+      .filter((allocation) => allocation.staffId && allocation.amount > 0);
+  }
   const staffIds = getTipStaffIds(tipData);
   const gifts = getTipGiftSelections(tipData);
   const sharedQuantities = Array.isArray(tipData.sharedQuantities)

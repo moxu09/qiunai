@@ -1012,6 +1012,37 @@ test("秋奈固定打賞商品都有播報圖片與專屬文案", () => {
   }
 });
 
+test("街口水果糖付款完成後保留商品 key，公開播報會附上專屬圖片", () => {
+  const allocations = buildTipAllocations({
+    allocations: [
+      {
+        staffId: "259579586453569536",
+        item: "水果糖×1",
+        amount: 230,
+        lines: [
+          {
+            key: "tip_230_fruit_candy",
+            name: "水果糖",
+            price: 230,
+            quantity: 1,
+            subtotal: 230,
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal(allocations[0].lines[0].key, "tip_230_fruit_candy");
+  assert.equal(
+    tipBroadcasts[allocations[0].lines[0].key].imageFile,
+    "tip_230_fruit_candy.png",
+  );
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  assert.match(source, /lines: Array\.isArray\(item\.lines\)/);
+});
+
 test("打賞播報可依老闆選擇顯示帳號或匿名", () => {
   const common = {
     description: "商品介紹",
