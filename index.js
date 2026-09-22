@@ -7674,17 +7674,38 @@ function getEmploymentGenderFromMember(member) {
   return null;
 }
 
+async function syncQiunaiStaffGenderFromMember(member) {
+  if (String(member?.guild?.id || "") !== QIUNAI_STAFF_GUILD_ID) return false;
+  const gender = getEmploymentGenderFromMember(member);
+  if (!gender) return false;
+  const { data: staff, error: readError } = await supabase
+    .from(STAFF_TABLE)
+    .select("discord_id, gender")
+    .eq("discord_id", String(member.id))
+    .maybeSingle();
+  if (readError) throw readError;
+  if (!staff || String(staff.gender || "") === gender) return false;
+  const { error: updateError } = await supabase
+    .from(STAFF_TABLE)
+    .update({ gender, updated_at: new Date().toISOString() })
+    .eq("discord_id", String(member.id));
+  if (updateError) throw updateError;
+  console.log(`[員工性別同步] <@${member.id}> 已依 Discord 身分組更新為 ${gender}`);
+  return true;
+}
+
 function retrySignedEmploymentForMember(member) {
   if (String(member.guild.id) !== QIUNAI_STAFF_GUILD_ID) return;
   const discordId = String(member.id);
   if (signedEmploymentMemberTasks.has(discordId)) {
     return signedEmploymentMemberTasks.get(discordId);
   }
-  const task = processSignedEmploymentReportChannels({
-    discordId,
-    genderOverride: getEmploymentGenderFromMember(member),
-    reuseSignedAcrossOrganizations: true,
-  })
+  const task = syncQiunaiStaffGenderFromMember(member)
+    .then(() => processSignedEmploymentReportChannels({
+      discordId,
+      genderOverride: getEmploymentGenderFromMember(member),
+      reuseSignedAcrossOrganizations: true,
+    }))
     .finally(() => {
       signedEmploymentMemberTasks.delete(discordId);
     });

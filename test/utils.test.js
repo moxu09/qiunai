@@ -785,6 +785,23 @@ test("多人完成訂單會逐位補建秋奈薪資報單，不會被單一既�
   assert.match(block, /if \(!salaryRow\)/);
 });
 
+test("秋奈員工 Discord 性別身分組變更會同步 EIP 官網資料", () => {
+  const source = require("node:fs").readFileSync(
+    require("node:path").join(__dirname, "..", "index.js"),
+    "utf8",
+  );
+  assert.match(source, /async function syncQiunaiStaffGenderFromMember/);
+  assert.match(source, /\.update\(\{ gender, updated_at:/);
+  assert.match(
+    source,
+    /client\.on\(Events\.GuildMemberUpdate[\s\S]*handleSignedEmploymentMemberEvent\(newMember\)/,
+  );
+  assert.match(
+    source,
+    /syncQiunaiStaffGenderFromMember\(member\)[\s\S]*processSignedEmploymentReportChannels/,
+  );
+});
+
 test("topup numbers use a validated ten-digit sequence", async () => {
   const topic = buildTopupTopic("123", "TOP-0000000001");
   assert.equal(topic, "owner:123;topup_no:TOP-0000000001");
