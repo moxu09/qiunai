@@ -1,4 +1,7 @@
 node_modules
+.git
+.railway
+.DS_Store
 coverage
 test
 *.log

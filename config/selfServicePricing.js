@@ -4,6 +4,7 @@ const GAME_OPTIONS = [
   { label: "Apex", value: "apex", description: "Apex Legends" },
   { label: "英雄聯盟", value: "lol", description: "峽谷 / ARAM / 聯盟戰棋" },
   { label: "Steam", value: "steam", description: "Steam 遊戲陪玩" },
+  { label: "語音聊天", value: "voice_chat", description: "語音陪伴 / 聊天服務" },
 ];
 
 function normalize(value) {
@@ -63,6 +64,27 @@ const RANK_ALIASES = {
   ],
 };
 
+const VALORANT_COMPANION_ALIASES = [
+  ["gold", ["黃金以下", "金牌以下", "黃金", "金牌"]],
+  ["platinum", ["白金"]],
+  ["diamond", ["鑽石"]],
+  ["ascendant", ["超凡", "超凡陪"]],
+  ["immortal", ["神話", "神話陪"]],
+  ["radiant", ["輻能", "輻能陪"]],
+  ["topRadiant", ["頂輻", "頂輻陪"]],
+  ["entertain", ["娛樂", "娛樂陪玩"]],
+];
+
+const VALORANT_RANKED_COMPANIONS = [
+  { key: "gold", label: "黃金含以下" },
+  { key: "platinum", label: "白金" },
+  { key: "diamond", label: "鑽石" },
+  { key: "ascendant", label: "超凡" },
+  { key: "immortal", label: "神話" },
+  { key: "radiant", label: "輻能" },
+  { key: "topRadiant", label: "頂輻" },
+];
+
 const PRICES = {
   valorant: {
     gold: { entertain: [250, "小時"], ascendant: [260, "小時"], immortal: [270, "小時"], radiant: [300, "小時"], topRadiant: [330, "小時"] },
@@ -98,6 +120,32 @@ const PRICES = {
     grandmaster: { skill: 350 },
   },
 };
+
+const VALORANT_PRICING_2026_10_EFFECTIVE_AT = Date.parse("2026-09-30T16:00:00.000Z");
+const VALORANT_PRICES_2026_10 = {
+  gold: { entertain: [280, "小時"], ascendant: [300, "小時"], immortal: [320, "小時"], radiant: [340, "小時"], topRadiant: [360, "小時"] },
+  platinum: { entertain: [300, "小時"], ascendant: [240, "局"], immortal: [250, "局"], radiant: [260, "局"], topRadiant: [280, "局"] },
+  diamond: { entertain: [320, "小時"], ascendant: [260, "局"], immortal: [270, "局"], radiant: [280, "局"], topRadiant: [300, "局"] },
+  ascendant: { entertain: [350, "小時"], immortal: [290, "局"], radiant: [300, "局"], topRadiant: [340, "局"] },
+  immortal12: { radiant: [330, "局"], topRadiant: [360, "局"] },
+  immortal3: { radiant: [350, "局"], topRadiant: [385, "局"] },
+};
+
+function getPricingTimestamp(value = new Date()) {
+  if (value instanceof Date) return value.getTime();
+  const timestamp = typeof value === "number" ? value : Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : Date.now();
+}
+
+function isOctoberValorantPricingActive(value = new Date()) {
+  return getPricingTimestamp(value) >= VALORANT_PRICING_2026_10_EFFECTIVE_AT;
+}
+
+function getActiveValorantPrices(value = new Date()) {
+  return isOctoberValorantPricingActive(value)
+    ? VALORANT_PRICES_2026_10
+    : PRICES.valorant;
+}
 
 const DELTA_SERVICE_OPTIONS = [
   { label: "娛樂陪玩", value: "娛樂陪玩", key: "entertain", price: 280 },
@@ -136,29 +184,27 @@ function calculateTablePrice(game, rankText, typeText, quantity, playerCount) {
 
 function getValorantExpectedUnit(input) {
   const rank = match(input.serviceType, RANK_ALIASES.valorant) || "gold";
-  const level = match(input.rankOrMap, [
-    ["entertain", ["娛樂", "娛樂陪玩"]],
-    ["ascendant", ["超凡", "超凡陪"]],
-    ["immortal", ["神話", "神話陪"]],
-    ["radiant", ["輻能", "輻能陪"]],
-    ["topRadiant", ["頂輻", "頂輻陪"]],
-  ]);
+  const level = match(input.rankOrMap, VALORANT_COMPANION_ALIASES);
   return rank === "gold" || level === "entertain" ? "小時" : "局";
 }
 
-function getValorantCompanionOptions(targetRankText) {
+function getValorantCompanionOptions(targetRankText, pricingDate) {
   const rank = match(targetRankText, RANK_ALIASES.valorant) || "gold";
-  const labels = {
-    entertain: "娛樂",
-    ascendant: "超凡",
-    immortal: "神話",
-    radiant: "輻能",
-    topRadiant: "頂輻",
-  };
-  return Object.keys(PRICES.valorant?.[rank] || {}).map((value) => ({
-    label: labels[value],
-    value: labels[value],
-  }));
+  const minimumIndex = {
+    gold: 0,
+    platinum: 1,
+    diamond: 2,
+    ascendant: 3,
+    immortal12: 4,
+    immortal3: 4,
+  }[rank] ?? 0;
+  const options = VALORANT_RANKED_COMPANIONS.slice(minimumIndex).map(
+    ({ label }) => ({ label, value: label }),
+  );
+  if (getActiveValorantPrices(pricingDate)?.[rank]?.entertain) {
+    options.unshift({ label: "娛樂", value: "娛樂" });
+  }
+  return options;
 }
 
 function calculateSelfServicePrice(input) {
@@ -168,6 +214,13 @@ function calculateSelfServicePrice(input) {
     throw new Error("陪陪人數限 1 至 8 位整數");
   }
   const quantity = positiveNumber(input.quantity, "時數／局數");
+
+  if (game === "voicechat") {
+    if (!Number.isInteger(quantity * 2)) {
+      throw new Error("語音聊天時數請以 0.5 小時為單位");
+    }
+    throw new Error("語音聊天尚缺自動報價，已轉客服正式報價");
+  }
 
   if (game === "apex") {
     return { ...calculateTablePrice("apex", input.rankOrMap, input.serviceType, quantity, count), quantity, playerCount: count };
@@ -219,15 +272,29 @@ function calculateSelfServicePrice(input) {
 
   if (game === "valorant") {
     const rank = match(input.serviceType, RANK_ALIASES.valorant) || "gold";
-    const level = match(input.rankOrMap, [
-      ["entertain", ["娛樂", "娛樂陪玩"]],
-      ["ascendant", ["超凡", "超凡陪"]],
-      ["immortal", ["神話", "神話陪"]],
-      ["radiant", ["輻能", "輻能陪"]],
-      ["topRadiant", ["頂輻", "頂輻陪"]],
-    ]);
-    const price = PRICES.valorant?.[rank]?.[level];
-    if (!level) throw new Error("需求的陪陪段位請填：娛樂、超凡、神話、輻能或頂輻");
+    const level = match(input.rankOrMap, VALORANT_COMPANION_ALIASES);
+    if (!level) {
+      throw new Error(
+        "需求的陪陪段位請選擇與要打的段位同階或更高段位",
+      );
+    }
+    if (level !== "entertain") {
+      const minimumIndex = {
+        gold: 0,
+        platinum: 1,
+        diamond: 2,
+        ascendant: 3,
+        immortal12: 4,
+        immortal3: 4,
+      }[rank] ?? 0;
+      const companionIndex = VALORANT_RANKED_COMPANIONS.findIndex(
+        (item) => item.key === level,
+      );
+      if (companionIndex < minimumIndex) {
+        throw new Error("需求的陪陪段位不可低於要打的段位");
+      }
+    }
+    const price = getActiveValorantPrices(input.pricingDate)?.[rank]?.[level];
     if (!price) throw new Error("目前價目表沒有這個特戰段位與陪陪等級組合");
     const [unitPrice, unit] = price;
     if (unit === "局" && !Number.isInteger(quantity)) throw new Error("局數必須是整數");
@@ -237,6 +304,73 @@ function calculateSelfServicePrice(input) {
   throw new Error("不支援的遊戲");
 }
 
+function getCompanyAiPricingCatalog() {
+  return {
+    source: "秋奈自助下單現行價目表",
+    currency: "NTD",
+    formula: "總價 = 單價 × 時數或局數 × 陪陪人數",
+    valorant: {
+      targetRankRules: {
+        gold: "要打的段位為黃金含以下；娛樂或此級距使用小時計價",
+        platinum: "要打的段位為白金",
+        diamond: "要打的段位為鑽石",
+        ascendant: "要打的段位為超凡",
+        immortal12: "要打的段位為神話 1 至 2",
+        immortal3: "要打的段位為神話 3",
+      },
+      companionLevelKeys: {
+        entertain: "娛樂",
+        gold: "黃金含以下",
+        platinum: "白金",
+        diamond: "鑽石",
+        ascendant: "超凡",
+        immortal: "神話",
+        radiant: "輻能",
+        topRadiant: "頂輻",
+      },
+      selectionRule:
+        "需求的陪陪段位最低可與要打的段位同階，不可低於；現行價目表沒有金額的同階組合會轉 AI 輔助與客服正式報價。",
+      effectiveVersion: isOctoberValorantPricingActive() ? "2026-10-01" : "current",
+      prices: getActiveValorantPrices(),
+    },
+    apex: {
+      unit: "小時",
+      typeKeys: { entertain: "娛樂", skill: "技術", god: "大神" },
+      prices: PRICES.apex,
+    },
+    lol: {
+      summonRift: {
+        unit: "局",
+        typeKeys: { entertain: "娛樂", skill: "技術", god: "大神" },
+        prices: PRICES.lol,
+      },
+      aram: {
+        unit: "小時",
+        prices: { entertain: 260, skill: 340, god: 400 },
+      },
+      tft: {
+        unit: "局",
+        typeKeys: { entertain: "娛樂", skill: "技術" },
+        prices: PRICES.tft,
+      },
+    },
+    delta: {
+      unit: "小時",
+      services: DELTA_SERVICE_OPTIONS.map(({ value, price }) => ({
+        name: value,
+        price,
+        fixedPlayerCount: value.includes("雙護") ? 2 : null,
+      })),
+    },
+    steam: { unit: "小時", price: 260 },
+    voiceChat: {
+      unit: "小時",
+      minimumBillingUnit: 0.5,
+      pricing: "由客服依聊天需求正式報價",
+    },
+  };
+}
+
 module.exports = {
   DELTA_SERVICE_OPTIONS,
   GAME_OPTIONS,
@@ -244,4 +378,8 @@ module.exports = {
   getDeltaFixedPlayerCount,
   getValorantCompanionOptions,
   getValorantExpectedUnit,
+  getCompanyAiPricingCatalog,
+  getActiveValorantPrices,
+  isOctoberValorantPricingActive,
+  VALORANT_PRICING_2026_10_EFFECTIVE_AT,
 };

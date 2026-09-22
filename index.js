@@ -1,3 +1,4 @@
+const { memberHasRole, interactionHasPermission } = require("./utils/interactionPermissions");
 require("dotenv").config();
 const fs = require("node:fs/promises");
 const { createHash } = require("node:crypto");
@@ -30,13 +31,31 @@ const {
 } = require("./utils/dailySelfCheck");
 const { createClient } = require("@supabase/supabase-js");
 const { createAccountingLedger } = require("./utils/accounting");
+const { createCompanyAi, isDirectBotMention } = require("./utils/companyAi");
+const {
+  getCompanyAiPricingCatalog,
+} = require("./config/selfServicePricing");
 const { createAllianceMembership } = require("./utils/allianceMembership");
 const { createJkopayService } = require("./utils/jkopay");
 const {
   createDeviceAuditReviewerSync,
 } = require("./utils/deviceAuditReviewers");
+const {
+  provisionSignedEmploymentReportChannels,
+} = require("./utils/employmentReportChannels");
 const { parseAllowedServices } = require("./utils/services");
 const { ORDER_FLOW_TTL_MS } = require("./utils/orderFlow");
+const { scheduleChannelDeletion } = require("./utils/channelCleanup");
+const {
+  buildDiscordArchiveHtml,
+  classifyOrderArchive,
+  fetchAllChannelMessages,
+} = require("./utils/orderArchive");
+const { canOperateTipFlow } = require("./utils/tipFlowAccess");
+const {
+  getStaffSearchLabel,
+  resolveStaffSearchInput,
+} = require("./utils/staffSearch");
 const {
   buildTopupTopic,
   getNextTopupNumber,
@@ -47,6 +66,7 @@ const {
   recordCustomerServiceReception,
 } = require("./utils/customerServicePoints");
 const {
+  DAILY_CHECKIN_REWARD,
   createSupabaseDailyCheckinClaimer,
 } = require("./utils/dailyCheckin");
 const {
@@ -54,10 +74,24 @@ const {
   shouldCreateChatDrop,
 } = require("./utils/randomEvents");
 const {
+  formatInventoryItemTitle,
+  groupInventoryItems,
+} = require("./utils/inventory");
+const {
+  getLatestRaffleTicketSummary,
+} = require("./utils/raffleTickets");
+const {
+  buildPaymentMethodButtonRows,
+  ensurePaymentMethodEmojis,
+  getCanonicalPaymentOptions,
+  getPaymentMethodSelection,
+} = require("./utils/paymentMethodEmojis");
+const {
   isCouponInventoryItem,
   parseVipCouponReward,
   qualifiesForVipLevel,
 } = require("./utils/vipRewards");
+const { createVipRewardCoordinator } = require("./utils/vipRewardDelivery");
 const {
   buildRedPacketShares,
   getPendingRedPacketPrefix,
@@ -69,6 +103,19 @@ const TIP_GIFTS = require("./config/tipGifts");
 const TIP_BROADCASTS = require("./config/tipBroadcasts");
 const CROWN_PACKAGES = require("./config/crownPackages");
 const employmentConfig = require("./config/employment");
+const JKOPAY_METHOD = "街口支付";
+const JKOPAY_QR_CODE_PATH = path.join(
+  __dirname,
+  "assets",
+  "payments",
+  "jkopay-deepnight.png",
+);
+const BANK_TRANSFER_QR_CODE_PATH = path.join(
+  __dirname,
+  "assets",
+  "payments",
+  "bank-transfer-line-bank.png",
+);
 const complaintConfig = require("./config/complaint");
 const {
   createEmploymentSystem,
@@ -128,6 +175,16 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
+const companyAi = createCompanyAi({
+  supabase,
+  organization: "qiunai",
+  companyName: "秋奈電競陪玩",
+  staffTable: "qiunai_staff",
+  orderTable: "qiunai_salary_orders",
+  bonusTable: "qiunai_staff_bonus",
+  orderAmountField: "order_amount",
+  pricingCatalog: getCompanyAiPricingCatalog(),
+});
 const { recordAccountingLedger } = createAccountingLedger(supabase, {
   appKey: process.env.ACCOUNTING_APP_KEY || "qiunai",
 });
@@ -136,7 +193,10 @@ const allianceMembership = createAllianceMembership(
   process.env.GUILD_ID,
 );
 const STAFF_TABLE = "qiunai_staff";
+const QIUNAI_WATER_BLUE = "#7CC7FF";
 const CURRENT_GUILD_ID = null;
+const QIUNAI_STAFF_GUILD_ID =
+  process.env.STAFF_GUILD_ID || "1513174069087047731";
 const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 const REVIEW_SHOWCASE_CHANNEL_ID = "1206157728532271185";
@@ -171,6 +231,9 @@ jkopayService = createJkopayService({
   supabase,
   client,
   onPaid: handleJkopayTopupPaid,
+  onServicePaid: handleJkopayServicePaid,
+  onValidateServiceRefund: validateJkopayServiceRefund,
+  onServiceRefunded: handleJkopayServiceRefunded,
 });
 const shutdownRuntime = installProcessHandlers({
   client,
@@ -331,6 +394,7 @@ const dispatchSystem = require("./events/dispatchSystem");
 dispatchSystem.setup(supabase, client, {
   payOrderByWallet,
   payOrderByMonthly,
+  payExtensionByMonthly,
   sendWalletLog,
   getUser,
   recordMembershipActivity: ({ userId, amount, sourceKey, note }) =>
@@ -353,16 +417,28 @@ dispatchSystem.setup(supabase, client, {
   changeCoins,
   recordAccountingLedger,
   checkAndUpgradeVip,
+  retryPendingVipRewards,
   startTipFlowInChannel,
   startCrownFlowInChannel,
   countOrderVipSpentOnce,
   buildQiunaiWorkReportSalaryPayload,
+  suggestCompanyAiQuote: ({ order, userId }) =>
+    companyAi.suggestQuote({
+      order,
+      userId,
+      failureReason: String(order?.note || "")
+        .replace(/^.*?自動報價無此組合：/, "")
+        .split("；")[0],
+    }),
   createJkopayTopup: jkopayService.createTopupPayment,
+  createJkopayServicePayment: jkopayService.createServicePayment,
   attachJkopayPaymentMessage: jkopayService.attachPaymentMessage,
   jkopayEnabled: jkopayService.config.enabled,
+  jkopayAvailable: jkopayService.config.available,
 });
 // ===== 轉帳冷卻 =====
 const transferCooldown = new Map();
+const STAR_COIN_PLAYER_TRANSFERS_ENABLED = false;
 // ===== 訂單系統設定 =====
 const ORDER_CHANNEL = process.env.ORDER_CHANNEL;
 const STAFF_ROLE = process.env.STAFF_ROLE;
@@ -371,8 +447,61 @@ const claimedDrops = createTtlSet(24 * 60 * 60 * 1000, 100000);
 const dropCooldown = new Map();
 const pendingTips = new Map();
 const pendingChannelDeletes = new Map();
+const pendingManualReviewSurveys = new Map();
 const handledInteractionIds = createTtlSet(15 * 60 * 1000);
 const TIP_HARD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MANUAL_REVIEW_TTL_MS = 24 * 60 * 60 * 1000;
+
+function normalizeManualReviewStaffIds(staffIds) {
+  return [
+    ...new Set(
+      (Array.isArray(staffIds) ? staffIds : [staffIds])
+        .map((id) => String(id || "").trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function formatManualReviewStaffMentions(staffIds) {
+  return normalizeManualReviewStaffIds(staffIds)
+    .map((id) => `<@${id}>`)
+    .join("、");
+}
+
+function setPendingManualReviewSurvey(surveyId, survey) {
+  pendingManualReviewSurveys.set(surveyId, survey);
+  scheduleMapExpiry(
+    pendingManualReviewSurveys,
+    surveyId,
+    survey,
+    MANUAL_REVIEW_TTL_MS,
+  );
+  return survey;
+}
+
+function extractManualReviewStaffIds(message) {
+  const description = message?.embeds?.[0]?.description || "";
+  const staffLine = description.match(/(?:陪陪|受評陪陪)：([^\n]+)/)?.[1] || "";
+  return normalizeManualReviewStaffIds(
+    [...staffLine.matchAll(/<@(\d+)>/g)].map((match) => match[1]),
+  );
+}
+
+function getPendingManualReviewSurvey(surveyId, customerId, message, staffId) {
+  const existing = pendingManualReviewSurveys.get(surveyId);
+  if (existing?.customerId === customerId) return existing;
+
+  const staffIds = normalizeManualReviewStaffIds(
+    staffId ? [staffId] : extractManualReviewStaffIds(message),
+  );
+  if (!staffIds.length) return null;
+
+  return setPendingManualReviewSurvey(surveyId, {
+    customerId,
+    staffIds,
+    createdBy: null,
+  });
+}
 
 function setPendingTip(tipId, tipData) {
   if (tipData && !tipData.flowId) tipData.flowId = String(tipId);
@@ -397,9 +526,11 @@ function getTipGiftByKey(key) {
   return findTipGiftByKey(TIP_GIFTS, key);
 }
 function canAdvanceTipFlow(interaction, tipData) {
-  return (
-    interaction.user.id === tipData?.createdBy || isAdminOrStaff(interaction)
-  );
+  return canOperateTipFlow({
+    actorId: interaction.user.id,
+    creatorId: tipData?.createdBy || tipData?.tipperId,
+    isCustomerService: isAdminOrStaff(interaction),
+  });
 }
 function getTipGiftListText(tipData) {
   return getTipGiftSelections(tipData)
@@ -431,6 +562,57 @@ function refreshTipTotals(tipData) {
   tipData.amount = allocations[0]?.amount || 0;
   tipData.totalAmount = getTipAllocationTotal(tipData);
   return allocations;
+}
+
+async function startJkopayTipPayment({ tipId, tipData, channel }) {
+  if (!jkopayService?.createServicePayment) throw new Error("街口支付尚未完成設定");
+  const allocations = refreshTipTotals(tipData);
+  const totalAmount = getTipAllocationTotal(tipData);
+  if (!allocations.length || totalAmount <= 0) throw new Error("打賞資料不完整");
+  const payment = await jkopayService.createServicePayment({
+    kind: "tip",
+    entityKey: String(tipId),
+    userId: tipData.tipperId,
+    amount: totalAmount,
+    channelId: channel.id,
+    description: `秋奈打賞 ${allocations.map((item) => item.item).join("、")}`,
+    metadata: {
+      tipId: String(tipId),
+      guildId: tipData.guildId || channel.guildId || process.env.GUILD_ID,
+      tipperId: String(tipData.tipperId),
+      allocations,
+      broadcastEnabled: Boolean(tipData.broadcastEnabled),
+      broadcastAnonymous: Boolean(tipData.broadcastAnonymous),
+      crownOrder: tipData.crownOrder || null,
+    },
+  });
+  const paymentEmbed = new EmbedBuilder()
+    .setColor(QIUNAI_WATER_BLUE)
+    .setTitle("📱 打賞街口支付")
+    .setDescription(
+      `受賞陪陪：${formatTipStaffMentions(getTipStaffIds(tipData))}\n` +
+        `打賞明細：\n${getTipAllocationText(tipData)}\n` +
+        `總金額：NT$${totalAmount.toLocaleString("zh-TW")}\n` +
+        `街口訂單編號：${payment.platformOrderId}\n\n` +
+        "可按下方按鈕開啟正式付款頁，或掃描本訊息顯示的該筆交易 QR Code；兩種方式都會自動核帳並寫入打賞薪資。",
+    )
+    .setTimestamp();
+  if (payment.qrImg) paymentEmbed.setImage(payment.qrImg);
+  const message = await channel.send({
+    content: `<@${tipData.tipperId}>`,
+    embeds: [paymentEmbed],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel("使用街口支付")
+          .setEmoji("📱")
+          .setStyle(ButtonStyle.Link)
+          .setURL(payment.paymentUrl),
+      ),
+    ],
+  });
+  await jkopayService.attachPaymentMessage(payment.platformOrderId, message.id);
+  return payment;
 }
 async function saveTipAllocations({
   guildId,
@@ -652,13 +834,20 @@ function getTipStaffSelectionContent(tipData = {}) {
     "可以繼續從選單或搜尋加入陪陪，選完請按「選好了，下一步」。"
   );
 }
-function buildTipStaffSelectionRow(tipId) {
+function buildTipStaffSelectionRow(tipId, tipData = {}) {
+  const hasSelectedStaff = getTipStaffIds(tipData).length > 0;
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`tip_staff_search_${tipId}`)
       .setLabel("搜尋陪陪")
       .setEmoji("🔎")
       .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`tip_staff_remove_${tipId}`)
+      .setLabel("移除陪陪")
+      .setEmoji("➖")
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(!hasSelectedStaff),
     new ButtonBuilder()
       .setCustomId(`tip_staff_done_${tipId}`)
       .setLabel("選好了，下一步")
@@ -672,7 +861,7 @@ function buildTipStaffSelectionRow(tipId) {
 async function sendTipStaffSelectionStatus(channel, tipId, tipData) {
   const message = await channel.send({
     content: getTipStaffSelectionContent(tipData),
-    components: [buildTipStaffSelectionRow(tipId)],
+    components: [buildTipStaffSelectionRow(tipId, tipData)],
   });
 
   tipData.staffSelectionMessageId = message.id;
@@ -681,7 +870,7 @@ async function sendTipStaffSelectionStatus(channel, tipId, tipData) {
 async function updateTipStaffSelectionStatus(channel, tipId, tipData) {
   const payload = {
     content: getTipStaffSelectionContent(tipData),
-    components: [buildTipStaffSelectionRow(tipId)],
+    components: [buildTipStaffSelectionRow(tipId, tipData)],
   };
 
   if (tipData.staffSelectionMessageId) {
@@ -697,54 +886,25 @@ async function updateTipStaffSelectionStatus(channel, tipId, tipData) {
 
   await sendTipStaffSelectionStatus(channel, tipId, tipData);
 }
-function buildTipPaymentMenu(tipId) {
-  return new StringSelectMenuBuilder()
-    .setCustomId(`tip_payment_${tipId}`)
-    .setPlaceholder("請選擇付款方式")
-    .addOptions([
-      {
-        label: "匯款 / 轉帳",
-        description: "顯示銀行帳號，付款後上傳截圖",
-        value: "匯款",
-      },
-      {
-        label: "無卡",
-        description: "顯示無卡帳號，付款後上傳截圖",
-        value: "無卡",
-      },
-      {
-        label: "刷卡",
-        description: "顯示刷卡付款連結，付款後上傳截圖",
-        value: "刷卡",
-      },
-      {
-        label: "儲值卡 / 錢包",
-        description: "直接使用 ASD 餘額扣款",
-        value: "儲值卡",
-      },
-      {
-        label: "員工扣薪",
-        description: "由客服確認後從本人薪資扣除",
-        value: "員工扣薪",
-      },
-      {
-        label: "美金轉帳",
-        description: "請等待客服提供帳號",
-        value: "美金轉帳",
-      },
-      {
-        label: "加密貨幣",
-        description: "請等待客服提供錢包地址",
-        value: "加密貨幣",
-      },
-    ]);
+function buildTipPaymentMenu(tipId, salaryDeductionEnabled = false) {
+  return buildPaymentMethodButtonRows(
+    `tip_payment_${tipId}`,
+    getCanonicalPaymentOptions({
+      includeWallet: true,
+      includeSalary: salaryDeductionEnabled,
+    }),
+  );
 }
 async function sendTipPaymentSelectPrompt(channel, tipId, selectedStaffText) {
-  const row = new ActionRowBuilder().addComponents(buildTipPaymentMenu(tipId));
+  const tipData = pendingTips.get(tipId);
+  const staff = await getStaffByDiscordId(
+    tipData?.tipperId || tipData?.createdBy,
+  );
+  const rows = buildTipPaymentMenu(tipId, staff?.is_active === true);
 
   await channel.send({
     content: `✅ 已選擇受賞陪陪：${selectedStaffText}\n\n` + `請選擇付款方式：`,
-    components: [row],
+    components: rows,
   });
 }
 async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
@@ -792,9 +952,9 @@ async function handleTipBroadcastChoice(interaction) {
       content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
     });
   }
-  if (interaction.user.id !== tipData.createdBy) {
+  if (!canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({
-      content: "❌ 只有建立這筆打賞的人可以選擇播報方式。",
+      content: "❌ 只有打賞人、客服或管理員可以選擇播報方式。",
     });
   }
 
@@ -856,9 +1016,9 @@ async function handleTipBroadcastPrivacy(interaction) {
       content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
     });
   }
-  if (interaction.user.id !== tipData.createdBy) {
+  if (!canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({
-      content: "❌ 只有建立這筆打賞的人可以選擇播報方式。",
+      content: "❌ 只有打賞人、客服或管理員可以選擇播報方式。",
     });
   }
 
@@ -1177,6 +1337,34 @@ async function startCrownFlowInChannel(channel, user) {
   return tipId;
 }
 
+async function resolveTipperIdForChannel(channel, guild) {
+  const { data: orderData, error: orderError } = await supabase
+    .from("play_orders")
+    .select("customer_id")
+    .eq("channel_id", channel.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (orderError) throw orderError;
+  if (orderData?.customer_id) return String(orderData.customer_id).trim();
+
+  const topicOwner = String(channel.topic || "").match(/owner:(\d+)/)?.[1];
+  if (topicOwner) return topicOwner;
+
+  const ownerOverwrite = channel.permissionOverwrites.cache.find((overwrite) => {
+    const isRole = guild.roles.cache.has(overwrite.id);
+    const isBot = overwrite.id === client.user.id;
+    const isStaff = getConfiguredSupportRoleIds().includes(overwrite.id);
+    return (
+      !isRole &&
+      !isBot &&
+      !isStaff &&
+      overwrite.allow.has(PermissionFlagsBits.ViewChannel)
+    );
+  });
+  return ownerOverwrite?.id || null;
+}
+
 async function handleCrownPackageSelect(interaction) {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({ flags: 64 });
@@ -1186,8 +1374,8 @@ async function handleCrownPackageSelect(interaction) {
   if (!tipData || !tipData.crownOrder) {
     return interaction.editReply({ content: "❌ 冠名單流程已過期，請重新建立。" });
   }
-  if (interaction.user.id !== tipData.createdBy) {
-    return interaction.editReply({ content: "❌ 只有建立冠名單的人可以操作。" });
+  if (!canAdvanceTipFlow(interaction, tipData)) {
+    return interaction.editReply({ content: "❌ 只有打賞人、客服或管理員可以操作冠名單。" });
   }
   const crownPackage = getCrownPackageByKey(
     CROWN_PACKAGES,
@@ -1222,7 +1410,7 @@ async function handleCrownPackageSelect(interaction) {
       return true;
     })
     .map((player) => ({
-      label: getTipStaffSearchLabel(player).slice(0, 100),
+      label: getStaffSearchLabel(player).slice(0, 100),
       description: `Discord ID：${player.discord_id}`.slice(0, 100),
       value: String(player.discord_id),
     }));
@@ -1298,8 +1486,8 @@ async function handleTipStaffPage(interaction) {
   if (!tipData || !Array.isArray(tipData.staffOptions) || !tipData.staffOptions.length) {
     return interaction.editReply({ content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。" });
   }
-  if (interaction.user.id !== tipData.createdBy) {
-    return interaction.editReply({ content: "❌ 只有建立這筆打賞的人可以切換陪陪頁面。" });
+  if (!canAdvanceTipFlow(interaction, tipData)) {
+    return interaction.editReply({ content: "❌ 只有打賞人、客服或管理員可以切換陪陪頁面。" });
   }
 
   const pageData = buildTipStaffPage(tipId, tipData.staffOptions, Number(rawPage));
@@ -1333,9 +1521,9 @@ async function handleTipGiftSelect(interaction) {
     });
   }
 
-  if (interaction.user.id !== tipData.createdBy) {
+  if (!canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({
-      content: "❌ 只有建立這筆打賞的人可以操作。",
+      content: "❌ 只有打賞人、客服或管理員可以操作。",
     });
   }
 
@@ -1441,9 +1629,9 @@ async function handleTipStaffSelect(interaction) {
     });
   }
 
-  if (interaction.user.id !== tipData.createdBy) {
+  if (!canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({
-      content: "❌ 只有建立這筆打賞的人可以操作。",
+      content: "❌ 只有打賞人、客服或管理員可以操作。",
     });
   }
 
@@ -1493,9 +1681,9 @@ async function openTipStaffSearchModal(interaction) {
       flags: 64,
     });
   }
-  if (interaction.user.id !== tipData.createdBy) {
+  if (!canAdvanceTipFlow(interaction, tipData)) {
     return interaction.reply({
-      content: "❌ 只有建立這筆打賞的人可以操作。",
+      content: "❌ 只有打賞人、客服或管理員可以操作。",
       flags: 64,
     });
   }
@@ -1511,26 +1699,15 @@ async function openTipStaffSearchModal(interaction) {
     .setTitle("搜尋受賞陪陪");
   const queryInput = new TextInputBuilder()
     .setCustomId("query")
-    .setLabel("陪陪名字或 Discord ID")
-    .setPlaceholder("例如：小喵、230540391531")
-    .setStyle(TextInputStyle.Short)
+    .setLabel("陪陪名字或 Discord ID（可輸入多人）")
+    .setPlaceholder("多人請用逗號、頓號或換行分隔，也可貼上 @提及")
+    .setStyle(TextInputStyle.Paragraph)
     .setMinLength(1)
-    .setMaxLength(100)
+    .setMaxLength(1000)
     .setRequired(true);
   modal.addComponents(new ActionRowBuilder().addComponents(queryInput));
 
   return interaction.showModal(modal);
-}
-
-function getTipStaffSearchLabel(staff) {
-  return String(
-    staff.display_name ||
-      staff.real_name ||
-      staff.discord_name ||
-      staff.name ||
-      staff.discord_id ||
-      "未命名陪陪",
-  );
 }
 
 async function handleTipStaffSearchModal(interaction) {
@@ -1543,9 +1720,9 @@ async function handleTipStaffSearchModal(interaction) {
       content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
     });
   }
-  if (interaction.user.id !== tipData.createdBy) {
+  if (!canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({
-      content: "❌ 只有建立這筆打賞的人可以操作。",
+      content: "❌ 只有打賞人、客服或管理員可以操作。",
     });
   }
   if (tipData.staffSelectionCompleted) {
@@ -1554,96 +1731,162 @@ async function handleTipStaffSearchModal(interaction) {
     });
   }
 
-  const query = interaction.fields
-    .getTextInputValue("query")
-    .trim()
-    .toLocaleLowerCase("zh-Hant");
-  const seenIds = new Set();
-  const matches = (await listActiveStaff())
-    .filter((staff) => staff.is_active !== false && staff.discord_id)
-    .filter(
-      (staff) =>
-        String(staff.discord_id).trim() !==
-        String(tipData.tipperId || tipData.createdBy || "").trim(),
-    )
-    .filter((staff) => {
-      const id = String(staff.discord_id).trim();
-      if (!id || seenIds.has(id)) return false;
-      seenIds.add(id);
-      return [
-        staff.display_name,
-        staff.real_name,
-        staff.discord_name,
-        staff.name,
-        id,
-      ]
-        .filter(Boolean)
-        .some((value) =>
-          String(value).toLocaleLowerCase("zh-Hant").includes(query),
-        );
-    })
-    .sort((a, b) => {
-      const aExact = [
-        a.display_name,
-        a.real_name,
-        a.discord_name,
-        a.name,
-        a.discord_id,
-      ].some(
-        (value) =>
-          String(value || "").toLocaleLowerCase("zh-Hant") === query,
-      );
-      const bExact = [
-        b.display_name,
-        b.real_name,
-        b.discord_name,
-        b.name,
-        b.discord_id,
-      ].some(
-        (value) =>
-          String(value || "").toLocaleLowerCase("zh-Hant") === query,
-      );
-      return Number(bExact) - Number(aExact);
-    });
-
-  if (!matches.length) {
+  const rawQuery = interaction.fields.getTextInputValue("query");
+  const staffRecords = (await listActiveStaff()).filter(
+    (staff) => staff.is_active !== false && staff.discord_id,
+  );
+  const searchResult = resolveStaffSearchInput(staffRecords, rawQuery, {
+    excludeIds: [tipData.tipperId || tipData.createdBy],
+  });
+  if (tipData.crownOrder && searchResult.queries.length > 1) {
     return interaction.editReply({
-      content: `❌ 找不到名稱或 Discord ID 包含「${query}」的啟用中陪陪。`,
+      content: "❌ 冠名單只能選擇一位陪陪，請只輸入一個名字或 Discord ID。",
+    });
+  }
+  if (!searchResult.resolvedIds.length && !searchResult.ambiguousMatches.length) {
+    return interaction.editReply({
+      content:
+        "❌ 找不到以下啟用中的陪陪：" +
+        searchResult.missingQueries.join("、"),
     });
   }
 
-  if (matches.length === 1) {
-    const staffId = String(matches[0].discord_id);
+  if (searchResult.resolvedIds.length) {
     const selectedStaffIds = tipData.crownOrder
-      ? [staffId]
-      : [...new Set([...getTipStaffIds(tipData), staffId])];
+      ? searchResult.resolvedIds.slice(0, 1)
+      : [
+          ...new Set([
+            ...getTipStaffIds(tipData),
+            ...searchResult.resolvedIds,
+          ]),
+        ];
     tipData.selectedStaffId = selectedStaffIds[0];
     tipData.selectedStaffIds = selectedStaffIds;
     setPendingTip(tipId, tipData);
     await updateTipStaffSelectionStatus(interaction.channel, tipId, tipData);
+  }
+
+  if (!searchResult.ambiguousMatches.length) {
+    const missingText = searchResult.missingQueries.length
+      ? `\n⚠️ 找不到：${searchResult.missingQueries.join("、")}`
+      : "";
     return interaction.editReply({
-      content: `✅ 已加入搜尋結果：<@${staffId}>`,
+      content:
+        `✅ 已加入：${formatTipStaffMentions(searchResult.resolvedIds)}` +
+        missingText,
     });
   }
 
-  const visibleMatches = matches.slice(0, 25);
+  const ambiguousRecords = [];
+  const seenAmbiguousIds = new Set();
+  for (const group of searchResult.ambiguousMatches) {
+    for (const staff of group.matches) {
+      const staffId = String(staff.discord_id);
+      if (seenAmbiguousIds.has(staffId)) continue;
+      seenAmbiguousIds.add(staffId);
+      ambiguousRecords.push(staff);
+    }
+  }
+  const visibleMatches = ambiguousRecords.slice(0, 25);
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`tip_staff_search_result_${tipId}`)
-    .setPlaceholder(`找到 ${matches.length} 位，請選擇受賞陪陪`)
+    .setPlaceholder("部分名稱有多人符合，請複選正確陪陪")
     .setMinValues(1)
     .setMaxValues(tipData.crownOrder ? 1 : visibleMatches.length)
     .addOptions(
       visibleMatches.map((staff) => ({
-        label: getTipStaffSearchLabel(staff).slice(0, 100),
+        label: getStaffSearchLabel(staff).slice(0, 100),
         description: `Discord ID：${staff.discord_id}`.slice(0, 100),
         value: String(staff.discord_id),
       })),
     );
   return interaction.editReply({
     content:
-      `🔎 找到 ${matches.length} 位符合「${query}」的陪陪` +
-      (matches.length > 25 ? "，目前顯示前 25 位。" : "。"),
+      (searchResult.resolvedIds.length
+        ? `✅ 已先加入：${formatTipStaffMentions(searchResult.resolvedIds)}\n`
+        : "") +
+      `🔎 「${searchResult.ambiguousMatches
+        .map((group) => group.query)
+        .join("、")}」有多位符合，請從下方複選。` +
+      (ambiguousRecords.length > 25 ? "目前顯示前 25 位。" : "") +
+      (searchResult.missingQueries.length
+        ? `\n⚠️ 找不到：${searchResult.missingQueries.join("、")}`
+        : ""),
     components: [new ActionRowBuilder().addComponents(menu)],
+  });
+}
+
+async function openTipStaffRemoveMenu(interaction) {
+  const tipId = interaction.customId.replace("tip_staff_remove_", "");
+  const tipData = pendingTips.get(tipId);
+  if (!tipData) {
+    return interaction.reply({
+      content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
+      flags: 64,
+    });
+  }
+  if (!canAdvanceTipFlow(interaction, tipData)) {
+    return interaction.reply({
+      content: "❌ 只有打賞人、客服或管理員可以操作。",
+      flags: 64,
+    });
+  }
+  if (tipData.staffSelectionCompleted) {
+    return interaction.reply({
+      content: "✅ 已進入下一步，若要更換陪陪請重新建立打賞流程。",
+      flags: 64,
+    });
+  }
+  const selectedStaffIds = getTipStaffIds(tipData);
+  if (!selectedStaffIds.length) {
+    return interaction.reply({ content: "目前沒有已選陪陪。", flags: 64 });
+  }
+  const knownOptions = new Map(
+    (tipData.staffOptions || []).map((option) => [String(option.value), option]),
+  );
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`tip_staff_remove_select_${tipId}`)
+    .setPlaceholder("選擇要移除的陪陪")
+    .setMinValues(1)
+    .setMaxValues(Math.min(selectedStaffIds.length, 25))
+    .addOptions(
+      selectedStaffIds.slice(0, 25).map((staffId) => ({
+        label: String(knownOptions.get(staffId)?.label || staffId).slice(0, 100),
+        description: `Discord ID：${staffId}`.slice(0, 100),
+        value: staffId,
+      })),
+    );
+  return interaction.reply({
+    content: "請勾選要從這筆打賞移除的陪陪：",
+    components: [new ActionRowBuilder().addComponents(menu)],
+    flags: 64,
+  });
+}
+
+async function handleTipStaffRemoveSelect(interaction) {
+  await interaction.deferUpdate();
+  const tipId = interaction.customId.replace("tip_staff_remove_select_", "");
+  const tipData = pendingTips.get(tipId);
+  if (!tipData || !canAdvanceTipFlow(interaction, tipData)) {
+    return interaction.editReply({
+      content: "❌ 這筆打賞流程已過期，或你沒有操作權限。",
+      components: [],
+    });
+  }
+  const removedIds = new Set(interaction.values.map(String));
+  const selectedStaffIds = getTipStaffIds(tipData).filter(
+    (staffId) => !removedIds.has(staffId),
+  );
+  tipData.selectedStaffIds = selectedStaffIds;
+  tipData.selectedStaffId = selectedStaffIds[0] || null;
+  if (tipData.quantitiesByStaff) {
+    for (const staffId of removedIds) delete tipData.quantitiesByStaff[staffId];
+  }
+  setPendingTip(tipId, tipData);
+  await updateTipStaffSelectionStatus(interaction.channel, tipId, tipData);
+  return interaction.editReply({
+    content: `✅ 已移除：${formatTipStaffMentions([...removedIds])}`,
+    components: [],
   });
 }
 
@@ -1840,8 +2083,8 @@ async function handleCrownSuffixChoice(interaction) {
     "",
   );
   const tipData = pendingTips.get(tipId);
-  if (!tipData?.crownOrder || interaction.user.id !== tipData.createdBy) {
-    return interaction.reply({ content: "❌ 冠名單已失效或你不是建立者。", flags: 64 });
+  if (!tipData?.crownOrder || !canAdvanceTipFlow(interaction, tipData)) {
+    return interaction.reply({ content: "❌ 冠名單已失效或你沒有操作權限。", flags: 64 });
   }
   if (wantsSuffix) {
     const modal = new ModalBuilder()
@@ -1874,8 +2117,8 @@ async function handleCrownSuffixModal(interaction) {
   await interaction.deferReply({ flags: 64 });
   const tipId = interaction.customId.replace("crown_suffix_modal_", "");
   const tipData = pendingTips.get(tipId);
-  if (!tipData?.crownOrder || interaction.user.id !== tipData.createdBy) {
-    return interaction.editReply({ content: "❌ 冠名單已失效或你不是建立者。" });
+  if (!tipData?.crownOrder || !canAdvanceTipFlow(interaction, tipData)) {
+    return interaction.editReply({ content: "❌ 冠名單已失效或你沒有操作權限。" });
   }
   tipData.changeSuffixes = true;
   tipData.staffSuffix = interaction.fields.getTextInputValue("staff_suffix").trim();
@@ -2131,9 +2374,9 @@ async function handleTipStaffClear(interaction) {
     });
   }
 
-  if (interaction.user.id !== tipData.createdBy) {
+  if (!canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({
-      content: "❌ 只有建立這筆打賞的人可以操作。",
+      content: "❌ 只有打賞人、客服或管理員可以操作。",
     });
   }
 
@@ -2161,7 +2404,8 @@ async function handleTipPaymentSelect(interaction) {
     });
   }
 
-  const tipId = interaction.customId.replace("tip_payment_", "");
+  const selection = getPaymentMethodSelection(interaction, "tip_payment_");
+  const tipId = selection?.entityId;
 
   const tipData = pendingTips.get(tipId);
 
@@ -2171,13 +2415,13 @@ async function handleTipPaymentSelect(interaction) {
     });
   }
 
-  if (interaction.user.id !== tipData.createdBy) {
+  if (!canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({
-      content: "❌ 只有建立這筆打賞的人可以操作。",
+      content: "❌ 只有打賞人、客服或管理員可以操作。",
     });
   }
 
-  const paymentMethod = interaction.values[0];
+  const paymentMethod = selection?.paymentMethod;
 
   const { tipperId, item, amount } = tipData;
   const selectedStaffIds = getTipStaffIds(tipData);
@@ -2213,9 +2457,22 @@ async function handleTipPaymentSelect(interaction) {
     paymentMethod.includes("錢包") ||
     paymentMethod.includes("餘額");
   const salaryPayment = paymentMethod.includes("扣薪");
+  const jkopayPayment = paymentMethod === "街口支付";
 
   tipData.keepForPayment = !walletPayment;
   setPendingTip(tipId, tipData);
+
+  if (jkopayPayment) {
+    if (!jkopayService.config.available) {
+      return interaction.editReply({ content: "❌ 街口支付目前無法使用，請稍後再試或改選其他付款方式。" });
+    }
+    try {
+      await startJkopayTipPayment({ tipId, tipData, channel: interaction.channel });
+      return interaction.editReply({ content: "✅ 已建立街口付款連結，付款完成後會自動完成打賞。" });
+    } catch (err) {
+      return interaction.editReply({ content: `❌ 建立街口付款失敗：${err.message || err}` });
+    }
+  }
 
   if (walletPayment) {
     const row = new ActionRowBuilder().addComponents(
@@ -2425,7 +2682,7 @@ function getGuildId(interaction = null) {
   return interaction?.guildId || interaction?.guild?.id || process.env.GUILD_ID;
 }
 function getStaffGuildId() {
-  return process.env.STAFF_GUILD_ID || process.env.GUILD_ID;
+  return QIUNAI_STAFF_GUILD_ID;
 }
 function getRarityEmoji(rarity) {
   switch (rarity) {
@@ -2517,7 +2774,19 @@ async function saveTipToPlayOrders({
   amount,
   channelId,
   paid = true,
+  idempotencyKey = null,
 }) {
+  const note = idempotencyKey ? `打賞｜${idempotencyKey}` : "打賞";
+  if (idempotencyKey) {
+    const { data: existing, error: existingError } = await supabase
+      .from("play_orders")
+      .select("*")
+      .eq("note", note)
+      .eq("assigned_player", staffId)
+      .maybeSingle();
+    if (existingError) throw existingError;
+    if (existing) return existing;
+  }
   const { data, error } = await supabase
     .from("play_orders")
     .insert({
@@ -2530,7 +2799,7 @@ async function saveTipToPlayOrders({
       order_item: item,
       game: "打賞",
       service: `打賞：${item}`,
-      note: "打賞",
+      note,
       channel_id: channelId,
       source_channel_id: channelId,
       price: Number(amount),
@@ -2812,6 +3081,18 @@ async function saveQiunaiSalaryOrder({
     .single();
 
   if (error) {
+    if (error.code === "23505" && sourceKeys.length) {
+      const { data: concurrentExisting, error: reloadError } = await supabase
+        .from("qiunai_salary_orders")
+        .select("*")
+        .eq("discord_id", String(discordId))
+        .in("order_id", sourceKeys)
+        .or("is_deleted.eq.false,is_deleted.is.null")
+        .order("created_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (!reloadError && concurrentExisting) return concurrentExisting;
+    }
     console.error("[秋奈薪資網] 寫入薪資訂單失敗:", error);
     return null;
   }
@@ -3004,14 +3285,13 @@ function buildOrderReviewComponents(orderId, anonymous = false, allowSkip = fals
 
 function buildManualReviewComponents(
   customerId,
-  staffId,
   surveyId,
   anonymous = false,
 ) {
   const makeButton = (rating, label, style) =>
     new ButtonBuilder()
       .setCustomId(
-        `manual_review_${rating}_${customerId}_${staffId}_${surveyId}_${anonymous ? "anon" : "public"}`,
+        `manual_review_${rating}_${customerId}_${surveyId}_${anonymous ? "anon" : "public"}`,
       )
       .setLabel(label)
       .setStyle(style);
@@ -3028,7 +3308,7 @@ function buildManualReviewComponents(
     new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(
-          `review_privacy_manual_${anonymous ? "public" : "anon"}_${customerId}_${staffId}_${surveyId}`,
+          `review_privacy_manual_${anonymous ? "public" : "anon"}_${customerId}_${surveyId}`,
         )
         .setLabel(
           anonymous
@@ -3140,27 +3420,33 @@ async function sendOrderReviewPanel(channel, order, assignedPlayers = []) {
     ),
   });
 }
-async function sendManualOrderReviewPanel(channel, customer, staff) {
-  const surveyId = Date.now().toString(36);
+async function sendManualOrderReviewPanel(
+  channel,
+  customerId,
+  staffIds,
+  surveyId,
+) {
+  const normalizedStaffIds = normalizeManualReviewStaffIds(staffIds);
+  if (!normalizedStaffIds.length) {
+    throw new Error("滿意度調查至少需要一位陪陪");
+  }
+  const staffMentions = formatManualReviewStaffMentions(normalizedStaffIds);
 
   await channel.send({
-    content: `<@${customer.id}>`,
+    content: `<@${customerId}>`,
     embeds: [
       new EmbedBuilder()
-        .setColor("#ffd166")
+        .setColor(QIUNAI_WATER_BLUE)
         .setTitle("💬 滿意度調查")
         .setDescription(
-          `<@${customer.id}> 請為 <@${staff.id}> 的服務留下評價。\n\n` +
+          `<@${customerId}> 請為以下陪陪的服務留下同一組評價。\n` +
+            `陪陪：${staffMentions}\n\n` +
             "這份調查由客服手動建立，不需要對應訂單。",
         )
         .setFooter({ text: "可先選擇公開或匿名，再選擇評分並填寫文字心得" })
         .setTimestamp(),
     ],
-    components: buildManualReviewComponents(
-      customer.id,
-      staff.id,
-      surveyId,
-    ),
+    components: buildManualReviewComponents(customerId, surveyId),
   });
 }
 async function handleSatisfactionSurveyCommand(interaction) {
@@ -3172,17 +3458,38 @@ async function handleSatisfactionSurveyCommand(interaction) {
 
   const orderNo = interaction.options.getString("訂單編號")?.trim();
   const customer = interaction.options.getUser("老闆");
-  const staff = interaction.options.getUser("陪陪");
 
-  if (customer || staff) {
-    if (!customer || !staff) {
-      return interaction.editReply({
-        content: "❌ 選人建立調查時，請同時選擇老闆和陪陪",
-      });
-    }
-    await sendManualOrderReviewPanel(interaction.channel, customer, staff);
+  if (customer) {
+    const surveyId = `${Date.now().toString(36)}${Math.random()
+      .toString(36)
+      .slice(2, 6)}`;
+    setPendingManualReviewSurvey(surveyId, {
+      customerId: customer.id,
+      staffIds: [],
+      createdBy: interaction.user.id,
+    });
+    const staffSelect = new UserSelectMenuBuilder()
+      .setCustomId(
+        `manual_review_staff_select_${surveyId}_${customer.id}_${interaction.user.id}`,
+      )
+      .setPlaceholder("選擇一位或多位陪陪")
+      .setMinValues(1)
+      .setMaxValues(25);
+    const searchButton = new ButtonBuilder()
+      .setCustomId(
+        `manual_review_staff_search_${surveyId}_${customer.id}_${interaction.user.id}`,
+      )
+      .setLabel("打字搜尋陪陪")
+      .setEmoji("🔎")
+      .setStyle(ButtonStyle.Primary);
     return interaction.editReply({
-      content: `✅ 已發送 <@${customer.id}> 對 <@${staff.id}> 的滿意度調查`,
+      content:
+        `請選擇要讓 <@${customer.id}> 一次評論的陪陪（可複選）：\n` +
+        "也可以按「打字搜尋陪陪」，用逗號、頓號或換行一次輸入多人。",
+      components: [
+        new ActionRowBuilder().addComponents(staffSelect),
+        new ActionRowBuilder().addComponents(searchButton),
+      ],
     });
   }
   let query = supabase.from("play_orders").select("*");
@@ -3217,6 +3524,209 @@ async function handleSatisfactionSurveyCommand(interaction) {
 
   return interaction.editReply({
     content: `✅ 已重新發送訂單 ${order.order_no || order.id} 的滿意度調查`,
+  });
+}
+
+async function handleManualReviewStaffSelect(interaction) {
+  const isSearchResult = interaction.customId.startsWith(
+    "manual_review_staff_search_result_",
+  );
+  const prefix = isSearchResult
+    ? "manual_review_staff_search_result_"
+    : "manual_review_staff_select_";
+  const [surveyId, customerId, createdBy] = interaction.customId
+    .slice(prefix.length)
+    .split("_");
+  const pending = pendingManualReviewSurveys.get(surveyId);
+
+  if (
+    !surveyId ||
+    !customerId ||
+    !createdBy ||
+    pending?.customerId !== customerId ||
+    pending?.createdBy !== createdBy
+  ) {
+    return interaction.reply({
+      content: "❌ 這次多人評論選擇已過期，請重新使用 `/滿意度調查`。",
+      flags: 64,
+    });
+  }
+  if (interaction.user.id !== createdBy || !isAdminOrStaff(interaction)) {
+    return interaction.reply({
+      content: "❌ 只有建立這份調查的管理員或客服可以選擇陪陪。",
+      flags: 64,
+    });
+  }
+
+  const staffIds = normalizeManualReviewStaffIds(
+    isSearchResult
+      ? [...(pending.staffIds || []), ...interaction.values]
+      : interaction.values,
+  );
+  if (!staffIds.length) {
+    return interaction.reply({
+      content: "❌ 請至少選擇一位陪陪。",
+      flags: 64,
+    });
+  }
+
+  setPendingManualReviewSurvey(surveyId, {
+    ...pending,
+    staffIds,
+  });
+  await interaction.deferUpdate();
+  await sendManualOrderReviewPanel(
+    interaction.channel,
+    customerId,
+    staffIds,
+    surveyId,
+  );
+  return interaction.editReply({
+    content:
+      `✅ 已發送 <@${customerId}> 對以下陪陪的共同滿意度調查：\n` +
+      formatManualReviewStaffMentions(staffIds),
+    components: [],
+  });
+}
+
+function parseManualReviewStaffSearchId(customId, prefix) {
+  const [surveyId, customerId, createdBy] = customId.slice(prefix.length).split("_");
+  return { surveyId, customerId, createdBy };
+}
+
+function getManualReviewStaffSearchContext(interaction, prefix) {
+  const context = parseManualReviewStaffSearchId(interaction.customId, prefix);
+  const pending = pendingManualReviewSurveys.get(context.surveyId);
+  if (
+    !context.surveyId ||
+    !context.customerId ||
+    !context.createdBy ||
+    pending?.customerId !== context.customerId ||
+    pending?.createdBy !== context.createdBy
+  ) {
+    return null;
+  }
+  return { ...context, pending };
+}
+
+async function openManualReviewStaffSearchModal(interaction) {
+  const prefix = "manual_review_staff_search_";
+  const context = getManualReviewStaffSearchContext(interaction, prefix);
+  if (!context) {
+    return interaction.reply({
+      content: "❌ 這次多人評論選擇已過期，請重新使用 `/滿意度調查`。",
+      flags: 64,
+    });
+  }
+  if (interaction.user.id !== context.createdBy || !isAdminOrStaff(interaction)) {
+    return interaction.reply({
+      content: "❌ 只有建立這份調查的管理員或客服可以搜尋陪陪。",
+      flags: 64,
+    });
+  }
+  const modal = new ModalBuilder()
+    .setCustomId(
+      `manual_review_staff_search_modal_${context.surveyId}_${context.customerId}_${context.createdBy}`,
+    )
+    .setTitle("打字搜尋陪陪");
+  const input = new TextInputBuilder()
+    .setCustomId("query")
+    .setLabel("陪陪暱稱、帳號名稱或 Discord ID")
+    .setPlaceholder("多人請用逗號、頓號或換行分隔，也可貼上 @提及")
+    .setStyle(TextInputStyle.Paragraph)
+    .setMinLength(1)
+    .setMaxLength(1000)
+    .setRequired(true);
+  modal.addComponents(new ActionRowBuilder().addComponents(input));
+  return interaction.showModal(modal);
+}
+
+async function handleManualReviewStaffSearchModal(interaction) {
+  await interaction.deferReply({ flags: 64 });
+  const prefix = "manual_review_staff_search_modal_";
+  const context = getManualReviewStaffSearchContext(interaction, prefix);
+  if (!context) {
+    return interaction.editReply({
+      content: "❌ 這次多人評論選擇已過期，請重新使用 `/滿意度調查`。",
+    });
+  }
+  if (interaction.user.id !== context.createdBy || !isAdminOrStaff(interaction)) {
+    return interaction.editReply({
+      content: "❌ 只有建立這份調查的管理員或客服可以搜尋陪陪。",
+    });
+  }
+  const searchResult = resolveStaffSearchInput(
+    (await listActiveStaff()).filter(
+      (staff) => staff.is_active !== false && staff.discord_id,
+    ),
+    interaction.fields.getTextInputValue("query"),
+  );
+  if (!searchResult.resolvedIds.length && !searchResult.ambiguousMatches.length) {
+    return interaction.editReply({
+      content: `❌ 找不到以下啟用中的陪陪：${searchResult.missingQueries.join("、")}`,
+    });
+  }
+
+  setPendingManualReviewSurvey(context.surveyId, {
+    ...context.pending,
+    staffIds: searchResult.resolvedIds,
+  });
+
+  if (!searchResult.ambiguousMatches.length) {
+    await sendManualOrderReviewPanel(
+      interaction.channel,
+      context.customerId,
+      searchResult.resolvedIds,
+      context.surveyId,
+    );
+    return interaction.editReply({
+      content:
+        `✅ 已發送 <@${context.customerId}> 對以下陪陪的共同滿意度調查：\n` +
+        formatManualReviewStaffMentions(searchResult.resolvedIds) +
+        (searchResult.missingQueries.length
+          ? `\n⚠️ 找不到：${searchResult.missingQueries.join("、")}`
+          : ""),
+    });
+  }
+
+  const ambiguousRecords = [];
+  const seenIds = new Set();
+  for (const group of searchResult.ambiguousMatches) {
+    for (const staff of group.matches) {
+      const staffId = String(staff.discord_id);
+      if (seenIds.has(staffId)) continue;
+      seenIds.add(staffId);
+      ambiguousRecords.push(staff);
+    }
+  }
+  const visibleMatches = ambiguousRecords.slice(0, 25);
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(
+      `manual_review_staff_search_result_${context.surveyId}_${context.customerId}_${context.createdBy}`,
+    )
+    .setPlaceholder("部分名稱有多人符合，請複選正確陪陪")
+    .setMinValues(1)
+    .setMaxValues(visibleMatches.length)
+    .addOptions(
+      visibleMatches.map((staff) => ({
+        label: getStaffSearchLabel(staff).slice(0, 100),
+        description: `Discord ID：${staff.discord_id}`.slice(0, 100),
+        value: String(staff.discord_id),
+      })),
+    );
+  return interaction.editReply({
+    content:
+      (searchResult.resolvedIds.length
+        ? `✅ 已先找到：${formatManualReviewStaffMentions(searchResult.resolvedIds)}\n`
+        : "") +
+      `🔎 「${searchResult.ambiguousMatches
+        .map((group) => group.query)
+        .join("、")}」有多位符合，請從下方複選。` +
+      (ambiguousRecords.length > 25 ? "目前顯示前 25 位。" : "") +
+      (searchResult.missingQueries.length
+        ? `\n⚠️ 找不到：${searchResult.missingQueries.join("、")}`
+        : ""),
+    components: [new ActionRowBuilder().addComponents(menu)],
   });
 }
 // ===== 安全回覆封裝 =====
@@ -3258,13 +3768,13 @@ async function safeEditReply(interaction, options) {
 function isAdmin(interaction) {
   return (
     interaction.guild.ownerId === interaction.user.id ||
-    interaction.member.permissions.has(PermissionFlagsBits.Administrator)
+    interactionHasPermission(interaction, PermissionFlagsBits.Administrator)
   );
 }
 function isOwnerOrAdmin(interaction) {
   return (
     interaction.guild.ownerId === interaction.user.id ||
-    interaction.member.permissions.has(PermissionFlagsBits.Administrator)
+    interactionHasPermission(interaction, PermissionFlagsBits.Administrator)
   );
 }
 async function handleGiveRoleCommand(interaction) {
@@ -3275,8 +3785,8 @@ async function handleGiveRoleCommand(interaction) {
   }
 
   const isAllowed =
-    interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
-    interaction.member.permissions.has(PermissionFlagsBits.ManageRoles);
+    interactionHasPermission(interaction, PermissionFlagsBits.Administrator) ||
+    interactionHasPermission(interaction, PermissionFlagsBits.ManageRoles);
 
   if (!isAllowed) {
     return interaction.editReply({
@@ -3318,8 +3828,10 @@ async function handleGiveRoleCommand(interaction) {
     });
   }
 
+  const actingMember = interaction.member?.roles?.highest
+    ? interaction.member : await interaction.guild.members.fetch(interaction.user.id);
   if (
-    role.position >= interaction.member.roles.highest.position &&
+    role.position >= actingMember.roles.highest.position &&
     interaction.guild.ownerId !== interaction.user.id
   ) {
     return interaction.editReply({
@@ -3645,6 +4157,328 @@ async function handleJkopayTopupPaid({
     await channel.send({ embeds: [successEmbed], components });
   }
 }
+
+async function handleJkopayServicePaid({ payment, transaction }) {
+  if (payment.payment_kind !== "tip") {
+    return dispatchSystem.handleJkopayServicePaid({ payment, transaction });
+  }
+
+  const metadata = payment.metadata || {};
+  const allocations = Array.isArray(metadata.allocations)
+    ? metadata.allocations
+        .map((item) => ({
+          staffId: String(item.staffId || ""),
+          item: String(item.item || "打賞"),
+          amount: Number(item.amount || 0),
+        }))
+        .filter((item) => item.staffId && item.amount > 0)
+    : [];
+  if (!allocations.length) throw new Error("街口打賞資料不完整");
+  const tipperId = String(metadata.tipperId || payment.user_id || "");
+  const channel = payment.channel_id
+    ? await client.channels.fetch(payment.channel_id).catch(() => null)
+    : null;
+  const tipOrders = [];
+  for (const [allocationIndex, allocation] of allocations.entries()) {
+    tipOrders.push(
+      await saveTipToPlayOrders({
+        guildId: metadata.guildId || process.env.GUILD_ID,
+        tipperId,
+        staffId: allocation.staffId,
+        item: allocation.item,
+        amount: allocation.amount,
+        channelId: payment.channel_id,
+        paid: true,
+        idempotencyKey: `街口:${payment.platform_order_id}:${allocationIndex}`,
+      }),
+    );
+  }
+  for (const order of tipOrders) {
+    await countOrderVipSpentOnce(order, "街口打賞付款完成");
+  }
+  await recordAccountingLedger({
+    entry_type: "customer_tip_jkopay",
+    entry_label: "客人消費",
+    amount: Number(payment.amount),
+    revenue_amount: Number(payment.amount),
+    cash_amount: Number(payment.amount),
+    payment_method: "街口支付",
+    customer_id: tipperId,
+    source_table: "jkopay_service_payments",
+    source_id: payment.platform_order_id,
+    dedupe_key: `jkopay-service:${payment.platform_order_id}:tip`,
+    note: `打賞街口交易 ${transaction.tradeNo}`,
+    metadata: { trade_no: transaction.tradeNo, allocations },
+  });
+  await allianceMembership.applyActivity({
+    discordUserId: tipperId,
+    activityType: "spend",
+    amount: Number(payment.amount),
+    sourceKey: `jkopay-service:${payment.platform_order_id}:tip`,
+    note: "街口支付打賞",
+  });
+
+  const tipData = {
+    flowId: metadata.tipId || payment.entity_key,
+    tipperId,
+    selectedStaffIds: allocations.map((item) => item.staffId),
+    allocations,
+    item: allocations.map((item) => item.item).join("、"),
+    amount: allocations[0]?.amount || 0,
+    broadcastEnabled: Boolean(metadata.broadcastEnabled),
+    broadcastAnonymous: Boolean(metadata.broadcastAnonymous),
+    crownOrder: metadata.crownOrder || null,
+  };
+  await sendTipWorkReportsSafely(tipOrders, { tipperId });
+  await sendTipBroadcastSafely(tipData);
+  pendingTips.delete(String(metadata.tipId || payment.entity_key));
+  if (channel?.isTextBased()) {
+    await channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor("#57F287")
+          .setTitle("✅ 打賞街口付款完成")
+          .setDescription(
+            `打賞人：<@${tipperId}>\n` +
+              `受賞陪陪：${formatTipStaffMentions(allocations.map((item) => item.staffId))}\n` +
+              `打賞明細：\n${allocations.map((item) => `<@${item.staffId}>：${item.item}｜${item.amount.toLocaleString("zh-TW")} ASD`).join("\n")}\n` +
+              `總金額：NT$${Number(payment.amount).toLocaleString("zh-TW")}\n` +
+              `街口訂單編號：${payment.platform_order_id}`,
+          )
+          .setTimestamp(),
+      ],
+    });
+    await sendTipCloseButtons(channel);
+  }
+}
+
+function isSettledJkopaySalaryRow(row) {
+  return Boolean(
+    row?.wallet_settled_at ||
+      row?.salary_paid ||
+      row?.salary_paid_at ||
+      ["已入帳", "已發薪", "paid"].includes(String(row?.status || "")),
+  );
+}
+
+async function loadJkopayRefundSalaryRows(payment, sourceIds, exactOrderIds = []) {
+  const organization = String(payment.organization_code || "qiunai");
+  const salaryTable = organization === "deepnight" ? "play_orders" : "qiunai_salary_orders";
+  const rows = [];
+  for (const sourceId of sourceIds) {
+    const { data, error } = await supabase
+      .from(salaryTable)
+      .select("*")
+      .like("order_id", `WORK-${sourceId}-%`);
+    if (error) throw new Error(error.message || "讀取退款薪資資料失敗");
+    rows.push(...(data || []));
+  }
+  if (exactOrderIds.length) {
+    const { data, error } = await supabase
+      .from(salaryTable)
+      .select("*")
+      .in("order_id", [...new Set(exactOrderIds.filter(Boolean).map(String))]);
+    if (error) throw new Error(error.message || "讀取退款打賞薪資資料失敗");
+    rows.push(...(data || []));
+  }
+  return {
+    salaryTable,
+    rows: [...new Map(rows.map((row) => [String(row.id), row])).values()],
+  };
+}
+
+async function getJkopayServiceRefundContext(payment) {
+  const metadata = payment.metadata || {};
+  if (payment.payment_kind === "order") {
+    const orderIds = Array.isArray(metadata.orderIds)
+      ? metadata.orderIds.map(String).filter(Boolean)
+      : [String(payment.entity_key || "")].filter(Boolean);
+    const { data: orders, error } = await supabase
+      .from("play_orders")
+      .select("*")
+      .in("id", orderIds);
+    if (error) throw new Error(error.message || "讀取退款訂單失敗");
+    const salary = await loadJkopayRefundSalaryRows(payment, orderIds);
+    return { orderIds, orders: orders || [], salary, extension: null, tipOrders: [] };
+  }
+  if (payment.payment_kind === "extension") {
+    const extensionId = String(metadata.extensionId || payment.entity_key || "");
+    const { data: extension, error } = await supabase
+      .from("order_extensions")
+      .select("*")
+      .eq("id", extensionId)
+      .maybeSingle();
+    if (error) throw new Error(error.message || "讀取退款加時單失敗");
+    const salary = await loadJkopayRefundSalaryRows(payment, [`EXT-${extensionId}`]);
+    return { orderIds: [], orders: [], salary, extension, tipOrders: [] };
+  }
+  if (payment.payment_kind === "tip") {
+    const { data: tipOrders, error } = await supabase
+      .from("play_orders")
+      .select("*")
+      .like("note", `打賞｜街口:${payment.platform_order_id}:%`);
+    if (error) throw new Error(error.message || "讀取退款打賞單失敗");
+    const exactOrderIds = (tipOrders || []).flatMap((order) => [order.id, order.order_no]);
+    const salary = await loadJkopayRefundSalaryRows(payment, [], exactOrderIds);
+    return { orderIds: [], orders: [], salary, extension: null, tipOrders: tipOrders || [] };
+  }
+  throw new Error(`不支援的街口服務退款類型：${payment.payment_kind}`);
+}
+
+async function validateJkopayServiceRefund({ payment }) {
+  const context = await getJkopayServiceRefundContext(payment);
+  const sourceRows = payment.payment_kind === "order"
+    ? context.orders
+    : payment.payment_kind === "extension"
+      ? [context.extension].filter(Boolean)
+      : context.tipOrders;
+  if (!sourceRows.length) throw new Error("找不到這筆街口付款對應的原始訂單，已停止退款");
+  const settled = [
+    ...context.salary.rows,
+    ...context.orders,
+    ...context.tipOrders,
+  ].some(isSettledJkopaySalaryRow);
+  if (settled) {
+    throw new Error("此訂單薪資已入帳或發放，請先完成員工薪資回沖後再退款");
+  }
+  return context;
+}
+
+async function handleJkopayServiceRefunded({ payment, refundResult, requestedBy }) {
+  const context = await getJkopayServiceRefundContext(payment);
+  const refundedAt = new Date().toISOString();
+  let legacyVipReverseAmount = 0;
+
+  if (payment.payment_kind === "order") {
+    for (const order of context.orders) {
+      const { data, error } = await supabase
+        .from("play_orders")
+        .update({
+          paid: false,
+          payment_method: "街口支付（已退款）",
+          status: "cancelled",
+          quote_status: "cancelled",
+          vip_spent_counted: false,
+          vip_spent_counted_at: null,
+          updated_at: refundedAt,
+        })
+        .eq("id", order.id)
+        .eq("paid", true)
+        .select("id,final_price,price,vip_spent_counted")
+        .maybeSingle();
+      if (error) throw new Error(error.message || "回沖街口訂單失敗");
+      if (data && order.vip_spent_counted) {
+        legacyVipReverseAmount += Number(order.final_price || order.price || 0);
+      }
+    }
+  } else if (payment.payment_kind === "extension") {
+    // 街口退款已成功後，原訂單金額、加時單與未結算薪資必須在同一個
+    // transaction 回沖。RPC 另留 operation key，程序中止後可安全重試。
+    const { data: reversal, error: reversalError } = await supabase.rpc(
+      "qiunai_reverse_jkopay_extension",
+      {
+        p_platform_order_id: payment.platform_order_id,
+        p_requested_by: String(requestedBy || ""),
+      },
+    );
+    if (reversalError || !reversal) {
+      throw new Error(reversalError?.message || "回沖街口加時單失敗");
+    }
+  } else if (payment.payment_kind === "tip") {
+    for (const order of context.tipOrders) {
+      const { data, error } = await supabase
+        .from("play_orders")
+        .update({
+          paid: false,
+          payment_method: "街口支付（已退款）",
+          status: "cancelled",
+          salary_paid: false,
+          salary_paid_at: null,
+          vip_spent_counted: false,
+          vip_spent_counted_at: null,
+          is_deleted: true,
+          updated_at: refundedAt,
+        })
+        .eq("id", order.id)
+        .eq("paid", true)
+        .select("id,final_price,price,vip_spent_counted")
+        .maybeSingle();
+      if (error) throw new Error(error.message || "回沖街口打賞單失敗");
+      if (data && order.vip_spent_counted) {
+        legacyVipReverseAmount += Number(order.final_price || order.price || 0);
+      }
+    }
+  }
+
+  // 加時薪資已由 qiunai_reverse_jkopay_extension 一起處理。
+  for (const row of payment.payment_kind === "extension" ? [] : context.salary.rows) {
+    const update = context.salary.salaryTable === "qiunai_salary_orders"
+      ? {
+          is_deleted: true,
+          status: "已退款",
+          deleted_at: refundedAt,
+          deleted_reason: `街口退款 ${payment.platform_order_id}`,
+        }
+      : {
+          is_deleted: true,
+          status: "refunded",
+          paid: false,
+          salary_paid: false,
+          salary_paid_at: null,
+          updated_at: refundedAt,
+        };
+    const { error } = await supabase
+      .from(context.salary.salaryTable)
+      .update(update)
+      .eq("id", row.id)
+      .is("wallet_settled_at", null);
+    if (error) throw new Error(error.message || "回沖街口退款薪資資料失敗");
+  }
+
+  const reversalKey = `jkopay-service-refund:${payment.platform_order_id}`;
+  const refundGuildId =
+    context.orders[0]?.guild_id ||
+    context.extension?.guild_id ||
+    context.tipOrders[0]?.guild_id ||
+    payment.metadata?.guildId ||
+    process.env.GUILD_ID;
+  const refundMembership = createAllianceMembership(supabase, refundGuildId);
+  await refundMembership.applyActivity({
+    discordUserId: payment.user_id,
+    activityType: "spend",
+    amount: -Number(payment.amount),
+    sourceKey: reversalKey,
+    note: `街口${payment.payment_kind}退款`,
+  });
+  if (legacyVipReverseAmount > 0) {
+    const { member: refreshedMembership } = await refundMembership.getMembership(payment.user_id);
+    await checkAndUpgradeVip(
+      payment.user_id,
+      "spend",
+      -legacyVipReverseAmount,
+      refundGuildId,
+      payment.channel_id || null,
+      Number(refreshedMembership?.qualifying_spend || 0),
+    );
+  }
+  const { recordAccountingLedger: recordRefundLedger } = createAccountingLedger(supabase, {
+    appKey: payment.organization_code === "deepnight" ? "deepnight" : "qiunai",
+  });
+  await recordRefundLedger({
+    entry_type: `customer_${payment.payment_kind}_jkopay_refund`,
+    entry_label: "客人退款",
+    amount: -Number(payment.amount),
+    revenue_amount: -Number(payment.amount),
+    cash_amount: -Number(payment.amount),
+    payment_method: "街口支付",
+    customer_id: payment.user_id,
+    source_table: "jkopay_service_payments",
+    source_id: payment.platform_order_id,
+    dedupe_key: reversalKey,
+    note: `街口服務退款｜${payment.platform_order_id}`,
+    metadata: { requested_by: requestedBy, refund_result: refundResult },
+  });
+}
 function isWalletPayment(text = "") {
   const value = String(text || "");
 
@@ -3670,6 +4504,7 @@ function isNeedManualPaidPayment(text = "") {
     value.includes("匯款") ||
     value.includes("轉帳") ||
     value.includes("無卡") ||
+    value.includes("街口掃碼") ||
     value.includes("刷卡") ||
     value.includes("信用卡") ||
     value.includes("美金") ||
@@ -3706,11 +4541,10 @@ async function sendNoCardPaymentInfo(channel) {
 
 async function sendCardPaymentInfo(channel) {
   const embed = new EmbedBuilder()
-    .setColor("#9b5cff")
-    .setTitle("💳 刷卡付款資訊")
+    .setColor("#ef1b24")
+    .setTitle("📱 街口支付｜收款 QR Code")
     .setDescription(
-      `請點擊以下連結完成刷卡付款：\n\n` +
-        `🔗 PChomePay 合法付款連結：https://pcpay.tw/aCU67\n\n` +
+      `請使用街口支付掃描下方收款碼完成付款；也可在街口付款頁面選擇信用卡。\n\n` +
         `付款完成後，請在此頻道上傳付款成功截圖，等待客服確認。\n\n` +
         `截圖請包含：\n` +
         `1. 付款成功畫面\n` +
@@ -3723,11 +4557,20 @@ async function sendCardPaymentInfo(channel) {
     .setTimestamp();
 
   await channel.send({
-    embeds: [embed],
+    embeds: [embed.setImage("attachment://jkopay-deepnight.png")],
+    files: [
+      {
+        attachment: JKOPAY_QR_CODE_PATH,
+        name: "jkopay-deepnight.png",
+      },
+    ],
   });
 }
-async function payOrderByWallet(order) {
-  const { data, error } = await supabase.rpc("pay_play_order_with_wallet", {
+async function payOrderByWallet(order, { dispatchAfterPayment = false } = {}) {
+  const paymentRpc = dispatchAfterPayment
+    ? "qiunai_pay_service_order_with_wallet"
+    : "pay_play_order_with_wallet";
+  const { data, error } = await supabase.rpc(paymentRpc, {
     p_order_id: order.id,
   });
 
@@ -3780,10 +4623,13 @@ async function payOrderByWallet(order) {
     note: paidOrder.service || paidOrder.service_name || "陪玩訂單",
   });
 
-  return { amount, finalCoins };
+  return { amount, finalCoins, order: data?.order || paidOrder };
 }
-async function payOrderByMonthly(order) {
-  const { data, error } = await supabase.rpc("pay_play_order_with_monthly", {
+async function payOrderByMonthly(order, { dispatchAfterPayment = false } = {}) {
+  const paymentRpc = dispatchAfterPayment
+    ? "qiunai_pay_service_order_with_monthly"
+    : "pay_play_order_with_monthly";
+  const { data, error } = await supabase.rpc(paymentRpc, {
     p_order_id: order.id,
   });
 
@@ -3830,12 +4676,82 @@ async function payOrderByMonthly(order) {
     usedAmount: Number(data?.used_amount || 0),
     monthlyLimit: Number(data?.monthly_limit || 0),
     availableAmount: Number(data?.available_amount || 0),
+    order: data?.order || paidOrder,
   };
+}
+async function payExtensionByMonthly(extension) {
+  const sourceId = String(extension.id);
+  const { data: existingTransaction, error: existingError } = await supabase
+    .from("member_monthly_transactions")
+    .select("*")
+    .eq("source_type", "order_extension")
+    .eq("source_id", sourceId)
+    .limit(1)
+    .maybeSingle();
+  if (existingError) {
+    throw new Error(existingError.message || "查詢加時月結紀錄失敗");
+  }
+
+  if (existingTransaction) {
+    const { data: account } = await supabase
+      .from("member_monthly_accounts")
+      .select("monthly_limit, used_amount")
+      .eq("user_id", extension.customer_id)
+      .maybeSingle();
+    return {
+      amount: Number(existingTransaction.amount || extension.amount || 0),
+      cashback: Number(existingTransaction.cashback || 0),
+      usedAmount: Number(account?.used_amount || 0),
+      monthlyLimit: Number(account?.monthly_limit || 0),
+      availableAmount: Math.max(
+        0,
+        Number(account?.monthly_limit || 0) - Number(account?.used_amount || 0),
+      ),
+    };
+  }
+
+  let originalOrder = null;
+  if (extension.order_id) {
+    const result = await supabase
+      .from("play_orders")
+      .select("*")
+      .eq("id", extension.order_id)
+      .maybeSingle();
+    if (!result.error) originalOrder = result.data;
+  }
+  if (!originalOrder && extension.order_no) {
+    const result = await supabase
+      .from("play_orders")
+      .select("*")
+      .eq("order_no", extension.order_no)
+      .limit(1)
+      .maybeSingle();
+    if (!result.error) originalOrder = result.data;
+  }
+
+  const itemName = [
+    originalOrder?.service,
+    originalOrder?.service_name,
+    originalOrder?.game,
+    originalOrder?.item,
+    extension.service,
+    extension.extension_text,
+  ]
+    .filter(Boolean)
+    .join("｜");
+
+  return createMonthlyTransaction({
+    userId: extension.customer_id,
+    sourceType: "order_extension",
+    sourceId,
+    itemName,
+    amount: Number(extension.amount || 0),
+  });
 }
 async function handleSlashExtendOrder(interaction) {
   const isStaff =
-    interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
-    interaction.member.roles.cache.has(process.env.STAFF_ROLE);
+    interactionHasPermission(interaction, PermissionFlagsBits.Administrator) ||
+    memberHasRole(interaction.member, process.env.STAFF_ROLE);
 
   if (!isStaff) {
     return interaction.reply({
@@ -3935,43 +4851,13 @@ async function handleSlashExtendOrder(interaction) {
         `提示：${insertError?.hint || "無"}`,
     });
   }
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`extension_payment_method_${extension.id}`)
-    .setPlaceholder("請選擇加時付款方式")
-    .addOptions([
-      {
-        label: "匯款 / 轉帳",
-        description: "顯示銀行帳號，付款後上傳截圖",
-        value: "匯款",
-      },
-      {
-        label: "無卡",
-        description: "顯示無卡帳號，付款後上傳截圖",
-        value: "無卡",
-      },
-      {
-        label: "刷卡",
-        description: "顯示刷卡付款連結，付款後上傳截圖",
-        value: "刷卡",
-      },
-      {
-        label: "儲值卡 / 錢包",
-        description: "立即由 ASD 餘額扣款",
-        value: "儲值卡",
-      },
-      {
-        label: "美金轉帳",
-        description: "請等待客服提供帳號",
-        value: "美金轉帳",
-      },
-      {
-        label: "加密貨幣",
-        description: "請等待客服提供錢包地址",
-        value: "加密貨幣",
-      },
-    ]);
-
-  const row = new ActionRowBuilder().addComponents(menu);
+  const rows = buildPaymentMethodButtonRows(
+    `extension_payment_method_${extension.id}`,
+    getCanonicalPaymentOptions({
+      includeWallet: true,
+      includeMonthly: true,
+    }),
+  );
 
   await interaction.channel.send({
     embeds: [
@@ -3988,7 +4874,7 @@ async function handleSlashExtendOrder(interaction) {
         )
         .setTimestamp(),
     ],
-    components: [row],
+    components: rows,
   });
 
   return interaction.editReply({
@@ -4000,12 +4886,20 @@ async function handleSlashExtendOrder(interaction) {
   });
 }
 // ===== VIP 成長制度 =====
-async function giveVipRole(userId, roleId, guildId = process.env.GUILD_ID) {
+async function giveVipRole(
+  userId,
+  roleId,
+  guildId = process.env.GUILD_ID,
+  strict = false,
+) {
   if (!roleId) return;
 
-  const guild = client.guilds.cache.get(guildId) || client.guilds.cache.first();
+  const guild = client.guilds.cache.get(guildId);
 
-  if (!guild) return;
+  if (!guild) {
+    if (strict) throw new Error("找不到 VIP 身分組所屬伺服器");
+    return;
+  }
 
   const member = await guild.members.fetch(userId).catch(() => null);
 
@@ -4019,6 +4913,7 @@ async function giveVipRole(userId, roleId, guildId = process.env.GUILD_ID) {
 
   if (error) {
     console.error("[VIP] 讀取全部 VIP 身分組失敗", error);
+    if (strict) throw error;
   }
 
   const allVipRoleIds = (levels || [])
@@ -4031,16 +4926,93 @@ async function giveVipRole(userId, roleId, guildId = process.env.GUILD_ID) {
   );
 
   if (rolesToRemove.length) {
-    await member.roles.remove(rolesToRemove).catch((err) => {
-      console.log("[VIP 舊身分組移除失敗]", err.message);
-    });
+    if (strict) {
+      await member.roles.remove(rolesToRemove);
+    } else {
+      await member.roles.remove(rolesToRemove).catch((err) => {
+        console.log("[VIP 舊身分組移除失敗]", err.message);
+      });
+    }
   }
 
   if (!member.roles.cache.has(roleId)) {
-    await member.roles.add(roleId).catch((err) => {
-      console.log("[VIP 新身分組發放失敗]", err.message);
+    if (strict) {
+      await member.roles.add(roleId);
+    } else {
+      await member.roles.add(roleId).catch((err) => {
+        console.log("[VIP 新身分組發放失敗]", err.message);
+      });
+    }
+  }
+}
+
+async function sendVipRewardExternalEffects(reward, notificationChannelId = null) {
+  const guildId = String(reward.guild_id);
+  const userId = String(reward.user_id);
+  const levelKey = String(reward.level_key);
+  // Discord role add/remove 本身可重入；即使程序在角色成功後中斷，重試也
+  // 只會確認同一角色狀態，不會再次發放 ASD 或優惠券。
+  await giveVipRole(userId, reward.role_id, guildId, true);
+  const rewardAsd = Number(reward.reward_asd || 0);
+  const finalCoins = Number.isFinite(Number(reward.final_balance))
+    ? Number(reward.final_balance)
+    : null;
+  const coupons = Array.isArray(reward.reward_coupons)
+    ? reward.reward_coupons
+    : [];
+  const couponText = coupons.length
+    ? coupons
+        .map((coupon) => `${coupon.name} × ${Number(coupon.count || 1)}`)
+        .join("、")
+    : "無";
+  const user = await client.users.fetch(userId).catch(() => null);
+  const upgradeEmbed = new EmbedBuilder()
+    .setColor("#ffd700")
+    .setTitle("✨ VIP 等級提升")
+    .setDescription(`恭喜 <@${userId}> 升級為 **${reward.level_name || levelKey}**！`)
+    .addFields(
+      {
+        name: "🎁 ASD 回饋",
+        value: `${rewardAsd.toLocaleString("zh-TW")} ASD`,
+        inline: true,
+      },
+      { name: "🎟️ 優惠券", value: couponText, inline: true },
+      { name: "💎 權益", value: reward.reward_note || "無", inline: false },
+    )
+    .setTimestamp();
+
+  if (finalCoins !== null) {
+    upgradeEmbed.addFields({
+      name: "💳 回饋後餘額",
+      value: `${Number(finalCoins).toLocaleString("zh-TW")} ASD`,
+      inline: true,
     });
   }
+  const broadcastChannelId =
+    notificationChannelId || process.env.VIP_UPGRADE_CHANNEL_ID;
+  if (broadcastChannelId) {
+    const broadcastChannel = await client.channels
+      .fetch(broadcastChannelId)
+      .catch(() => null);
+    if (broadcastChannel?.isTextBased()) {
+      await broadcastChannel
+        .send({ content: `<@${userId}>`, embeds: [upgradeEmbed] })
+        .catch((error) => console.error("[VIP] 升級播報發送失敗", error));
+    }
+  }
+  if (user) await user.send({ embeds: [upgradeEmbed] }).catch(() => {});
+}
+
+function getVipRewardCoordinator(notificationChannelId = null) {
+  return createVipRewardCoordinator({
+    supabase,
+    deliver: (reward) =>
+      sendVipRewardExternalEffects(reward, notificationChannelId),
+  });
+}
+
+async function deliverVipRewardOperation(operation, notificationChannelId = null) {
+  return getVipRewardCoordinator(notificationChannelId).deliverPersisted(operation);
 }
 
 async function grantVipLevelReward(
@@ -4052,107 +5024,37 @@ async function grantVipLevelReward(
   guildId = process.env.GUILD_ID,
   notificationChannelId = null,
 ) {
-  const rewardAsd = Number(level.reward_asd || 0);
-  let finalCoins = null;
-
-  if (rewardAsd > 0) {
-    finalCoins = await changeCoins(userId, rewardAsd);
-
-    await sendWalletLog(
-      userId,
-      "VIP升級獎勵",
-      rewardAsd,
-      finalCoins,
-      `升級 ${level.level_name}｜獲得 ${rewardAsd} ASD`,
-    );
-  }
-
   const coupons = parseVipCouponReward(level.reward_coupon);
-
-  for (const coupon of coupons) {
-    for (let i = 0; i < coupon.count; i++) {
-      await addUserItem(
-        userId,
-        coupon.name,
-        "VIP",
-        `${level.level_name} 升級獎勵`,
-        "coupon",
-      );
-    }
-  }
-
-  await giveVipRole(userId, level.role_id, guildId);
-
-  await supabase.from("vip_upgrade_logs").insert({
-    guild_id: guildId,
-    user_id: userId,
-    old_level_key: oldLevelKey,
-    new_level_key: level.level_key,
-    trigger_type: triggerType,
-    trigger_amount: triggerAmount,
-    reward_asd: rewardAsd,
-    reward_coupon: level.reward_coupon,
-    reward_note: level.reward_note,
+  return getVipRewardCoordinator(notificationChannelId).applyAndDeliver({
+    p_guild_id: String(guildId),
+    p_user_id: String(userId),
+    p_level_key: String(level.level_key),
+    p_old_level_key: oldLevelKey,
+    p_trigger_type: triggerType,
+    p_trigger_amount: Number(triggerAmount || 0),
+    p_reward_coupons: coupons,
   });
+}
 
-  const user = await client.users.fetch(userId).catch(() => null);
-  const upgradeEmbed = new EmbedBuilder()
-    .setColor("#ffd700")
-    .setTitle("✨ VIP 等級提升")
-    .setDescription(`恭喜 <@${userId}> 升級為 **${level.level_name}**！`)
-    .addFields(
-      {
-        name: "🎁 ASD 回饋",
-        value: `${rewardAsd.toLocaleString("zh-TW")} ASD`,
-        inline: true,
-      },
-      {
-        name: "🎟️ 優惠券",
-        value: level.reward_coupon || "無",
-        inline: true,
-      },
-      {
-        name: "💎 權益",
-        value: level.reward_note || "無",
-        inline: false,
-      },
-    )
-    .setTimestamp();
-
-  if (finalCoins !== null) {
-    upgradeEmbed.addFields({
-      name: "💳 回饋後餘額",
-      value: `${Number(finalCoins).toLocaleString("zh-TW")} ASD`,
-      inline: true,
-    });
-  }
-
-  const broadcastChannelId =
-    notificationChannelId || process.env.VIP_UPGRADE_CHANNEL_ID;
-
-  if (broadcastChannelId) {
-    const broadcastChannel = await client.channels
-      .fetch(broadcastChannelId)
-      .catch(() => null);
-
-    if (broadcastChannel?.isTextBased()) {
-      await broadcastChannel
-        .send({
-          content: `<@${userId}>`,
-          embeds: [upgradeEmbed],
-        })
-        .catch((error) => {
-          console.error("[VIP] 升級播報發送失敗", error);
-        });
-    }
-  }
-
-  if (user) {
-    await user
-      .send({
-        embeds: [upgradeEmbed],
-      })
-      .catch(() => {});
+async function retryPendingVipRewards() {
+  const guildId = String(process.env.GUILD_ID || "").trim();
+  if (!guildId) return;
+  const { data, error } = await supabase
+    .from("bot_vip_reward_operations")
+    .select("*")
+    .eq("organization_code", "qiunai")
+    .eq("guild_id", guildId)
+    .in("delivery_status", ["pending", "processing", "failed"])
+    .order("updated_at", { ascending: true })
+    .limit(20);
+  if (error) throw error;
+  for (const operation of data || []) {
+    await deliverVipRewardOperation(operation).catch((rewardError) =>
+      console.error(
+        `[VIP 獎勵補送] ${operation.user_id}/${operation.level_key} 失敗`,
+        rewardError,
+      ),
+    );
   }
 }
 async function getUserVipRecord(userId, guildId = process.env.GUILD_ID) {
@@ -4267,11 +5169,21 @@ async function checkAndUpgradeVip(
   guildId = process.env.GUILD_ID,
   notificationChannelId = null,
   absoluteTotal = null,
+  absoluteHighestTopup = null,
+  strict = false,
 ) {
   const triggerAmount = Number(amount || 0);
   const normalizedAbsoluteTotal = Number(absoluteTotal);
   const useAbsoluteTotal =
     absoluteTotal !== null && Number.isFinite(normalizedAbsoluteTotal);
+  const normalizedAbsoluteHighestTopup = Number(absoluteHighestTopup);
+  const useAbsoluteHighestTopup =
+    absoluteHighestTopup !== null &&
+    Number.isFinite(normalizedAbsoluteHighestTopup);
+  // 持久補償路徑的累積金額已由 qiunai_apply_vip_effect 在 DB transaction
+  // 內完成。它回傳的絕對值只是一個當下快照；兩個 operation 併發時，較舊
+  // 的呼叫可能比較晚回來，因此這條路徑絕不能再由 JS 把快照寫回 user_vips。
+  const useAtomicVipTotals = strict && useAbsoluteTotal;
 
   if (!userId || !guildId) {
     return null;
@@ -4284,6 +5196,7 @@ async function checkAndUpgradeVip(
 
   if (vipReadError) {
     console.error("[VIP] 讀取累積資料失敗", vipReadError);
+    if (strict) throw vipReadError;
     return null;
   }
 
@@ -4295,21 +5208,31 @@ async function checkAndUpgradeVip(
 
   const newTotalSpent =
     triggerType === "spend"
-      ? useAbsoluteTotal
+      ? useAtomicVipTotals
+        ? oldTotalSpent
+        : useAbsoluteTotal
         ? Math.max(0, normalizedAbsoluteTotal)
         : oldTotalSpent + triggerAmount
       : oldTotalSpent;
 
   const newTotalTopup =
     triggerType === "topup"
-      ? useAbsoluteTotal
+      ? useAtomicVipTotals
+        ? oldTotalTopup
+        : useAbsoluteTotal
         ? Math.max(0, normalizedAbsoluteTotal)
         : oldTotalTopup + triggerAmount
       : oldTotalTopup;
 
   const newHighestTopup =
-    triggerType === "topup" && !useAbsoluteTotal
-      ? Math.max(oldHighestTopup, triggerAmount)
+    triggerType === "topup"
+      ? useAtomicVipTotals
+        ? oldHighestTopup
+        : useAbsoluteHighestTopup
+        ? Math.max(oldHighestTopup, normalizedAbsoluteHighestTopup)
+        : !useAbsoluteTotal
+          ? Math.max(oldHighestTopup, triggerAmount)
+          : oldHighestTopup
       : oldHighestTopup;
 
   const { data: levels, error: levelError } = await supabase
@@ -4320,10 +5243,11 @@ async function checkAndUpgradeVip(
 
   if (levelError || !levels?.length) {
     console.log("[VIP] 讀取等級失敗", levelError);
+    if (strict) throw levelError || new Error("找不到 VIP 等級設定");
     return null;
   }
 
-  const oldSortOrder = currentVip?.level_key
+  let oldSortOrder = currentVip?.level_key
     ? Number(
         levels.find((level) => level.level_key === currentVip.level_key)
           ?.sort_order || 0,
@@ -4344,6 +5268,9 @@ async function checkAndUpgradeVip(
   });
 
   if (!availableLevels.length) {
+    // 原子累積已在 DB 提交；沒有符合等級時不需要（也不得）回寫整列快照。
+    if (useAtomicVipTotals) return null;
+
     const { error: saveError } = await saveUserVipRecord(
       {
         guild_id: guildId,
@@ -4361,44 +5288,91 @@ async function checkAndUpgradeVip(
     if (saveError) {
       console.error("[VIP] 更新累積資料失敗", saveError);
       await explainUserVipSaveFailure(userId, guildId, saveError);
+      if (strict) throw saveError;
     }
 
     return null;
   }
 
-  const newLevel = availableLevels[availableLevels.length - 1];
+  let newLevel = availableLevels[availableLevels.length - 1];
+  let newSortOrder = Number(newLevel.sort_order || 0);
+  let rewardOldLevelKey = currentVip?.level_key || null;
 
-  const newSortOrder = Number(newLevel.sort_order || 0);
+  if (useAtomicVipTotals) {
+    // 只升級 level 欄位；RPC 會鎖住 user_vips 並拒絕較舊請求降級。
+    // total_spent / total_topup / highest_single_topup 全部維持 DB 最新值。
+    const { data: promotionData, error: promotionError } = await supabase.rpc(
+      "qiunai_promote_vip_level",
+      {
+        p_guild_id: guildId,
+        p_user_id: userId,
+        p_level_key: newLevel.level_key,
+      },
+    );
+    if (promotionError) {
+      console.error("[VIP] 原子更新等級失敗", promotionError);
+      throw promotionError;
+    }
+    const promotion = Array.isArray(promotionData)
+      ? promotionData[0] || null
+      : promotionData;
+    const actualLevel = levels.find(
+      (level) => level.level_key === promotion?.level_key,
+    );
+    if (!promotion || !actualLevel) {
+      throw new Error("VIP 原子更新未回傳有效等級");
+    }
+    rewardOldLevelKey = promotion.previous_level_key || rewardOldLevelKey;
+    oldSortOrder = Number(promotion.previous_sort_order || 0);
+    newLevel = actualLevel;
+    newSortOrder = Number(promotion.sort_order || actualLevel.sort_order || 0);
+  } else {
+    const { error: saveError } = await saveUserVipRecord(
+      {
+        guild_id: guildId,
+        user_id: userId,
+        level_key: newLevel.level_key,
+        level_name: newLevel.level_name,
+        total_spent: newTotalSpent,
+        total_topup: newTotalTopup,
+        highest_single_topup: newHighestTopup,
+        updated_at: new Date().toISOString(),
+      },
+      currentVip,
+    );
 
-  const { error: saveError } = await saveUserVipRecord(
-    {
-      guild_id: guildId,
-      user_id: userId,
-      level_key: newLevel.level_key,
-      level_name: newLevel.level_name,
-      total_spent: newTotalSpent,
-      total_topup: newTotalTopup,
-      highest_single_topup: newHighestTopup,
-      updated_at: new Date().toISOString(),
-    },
-    currentVip,
-  );
-
-  if (saveError) {
-    console.error("[VIP] 更新等級資料失敗", saveError);
-    await explainUserVipSaveFailure(userId, guildId, saveError);
-    return null;
+    if (saveError) {
+      console.error("[VIP] 更新等級資料失敗", saveError);
+      await explainUserVipSaveFailure(userId, guildId, saveError);
+      if (strict) throw saveError;
+      return null;
+    }
   }
 
-  if (newSortOrder <= oldSortOrder) {
-    return null;
+  const { data: rewardOperations, error: rewardOperationsError } = await supabase
+    .from("bot_vip_reward_operations")
+    .select("level_key,delivery_status")
+    .eq("organization_code", "qiunai")
+    .eq("guild_id", guildId)
+    .eq("user_id", userId);
+  if (rewardOperationsError) {
+    console.error("[VIP] 讀取升等獎勵持久狀態失敗", rewardOperationsError);
+    if (strict) throw rewardOperationsError;
   }
-
-  const rewardLevels = levels.filter(
-    (level) =>
-      Number(level.sort_order || 0) > oldSortOrder &&
-      Number(level.sort_order || 0) <= newSortOrder,
+  const rewardOperationStates = new Map(
+    (rewardOperations || []).map((operation) => [
+      operation.level_key,
+      operation.delivery_status,
+    ]),
   );
+  const rewardLevels = levels.filter((level) => {
+    const sortOrder = Number(level.sort_order || 0);
+    if (sortOrder > newSortOrder) return false;
+    if (sortOrder > oldSortOrder) return true;
+    // 等級可能已先保存、但程序在獎勵發放前中斷。completed backfill 會讓
+    // 正常歷史等級略過；缺列/pending/failed 則可安全重入補發。
+    return rewardOperationStates.get(level.level_key) !== "completed";
+  });
 
   for (const level of rewardLevels) {
     await grantVipLevelReward(
@@ -4406,13 +5380,13 @@ async function checkAndUpgradeVip(
       level,
       triggerType,
       triggerAmount,
-      currentVip?.level_key || null,
+      rewardOldLevelKey,
       guildId,
       notificationChannelId,
     );
   }
 
-  return newLevel;
+  return newSortOrder > oldSortOrder ? newLevel : null;
 }
 // ===== 訂單付款完成後，計入累積消費，防止重複計算 =====
 async function countOrderVipSpentOnce(order, reason = "付款完成") {
@@ -4921,6 +5895,7 @@ async function getUserItems(userId) {
 
   return data || [];
 }
+
 // 刪除玩家商品
 async function removeUserItem(itemId) {
   const { error } = await supabase.from("user_items").delete().eq("id", itemId);
@@ -5114,6 +6089,9 @@ async function handleUseCouponCommand(interaction) {
 }
 // 安全轉帳函數
 async function safeTransfer(senderId, receiverId, amount) {
+  if (!STAR_COIN_PLAYER_TRANSFERS_ENABLED) {
+    throw new Error("星雨幣玩家轉帳目前已關閉");
+  }
   // ===== 轉帳冷卻 =====
   const now = Date.now();
   const cooldown = transferCooldown.get(senderId);
@@ -5446,13 +6424,13 @@ async function sendTopupPanel(client) {
 
   const embed = new EmbedBuilder()
     .setColor("#ffd166")
-    .setTitle("💳 ASD 儲值區")
+    .setTitle("💳 購買星雨幣")
     .setDescription(
-      `歡迎來到 ASD 儲值區。\n\n` +
-        `點擊下方按鈕後，系統會建立專屬儲值臨時頻道。\n\n` +
+      `歡迎購買星雨幣。\n\n` +
+        `可自行輸入金額，或點選快捷金額直接建立訂單並進入付款流程。\n\n` +
         `匯率：1 元台幣 = 1 ASD\n` +
-        `支援付款方式：街口支付 / 匯款 / 無卡 / 刷卡 / 美金 / 加密貨幣\n\n` +
-        `✅ 使用街口支付，付款完成後系統會自動核帳並將 ASD 存入錢包。`,
+        `支援付款方式：街口支付 / 匯款 / 無卡 / 美金 / 加密貨幣\n\n` +
+        `街口支付會同時提供串接付款按鈕與該筆交易 QR Code，完成後自動核帳。`,
     )
     .setFooter({
       text: "深夜不關燈｜We Are Still Here",
@@ -5462,9 +6440,32 @@ async function sendTopupPanel(client) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId("order_start_topup")
-      .setLabel("建立儲值單｜支援街口支付")
+      .setLabel("建立訂單")
       .setEmoji("💳")
       .setStyle(ButtonStyle.Success),
+  );
+  const quickAmountLabelRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("topup_quick_amount_label")
+      .setLabel("快速金額")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true),
+  );
+  const quickAmountRow = new ActionRowBuilder().addComponents(
+    ...[100, 250, 500, 1000].map((amount) =>
+      new ButtonBuilder()
+        .setCustomId(`order_start_topup_amount_${amount}`)
+        .setLabel(`${amount}元`)
+        .setStyle(ButtonStyle.Primary),
+    ),
+  );
+  const quickAmountFinalRow = new ActionRowBuilder().addComponents(
+    ...[3000, 5000, 10000, 15000].map((amount) =>
+      new ButtonBuilder()
+        .setCustomId(`order_start_topup_amount_${amount}`)
+        .setLabel(`${amount}元`)
+        .setStyle(ButtonStyle.Primary),
+    ),
   );
 
   const panel = await getPanelMessage("order_topup", process.env.GUILD_ID);
@@ -5475,7 +6476,7 @@ async function sendTopupPanel(client) {
 
       await oldMessage.edit({
         embeds: [embed],
-        components: [row],
+        components: [row, quickAmountLabelRow, quickAmountRow, quickAmountFinalRow],
       });
 
       console.log("[TOPUP PANEL] 已更新");
@@ -5487,7 +6488,7 @@ async function sendTopupPanel(client) {
 
   const newMessage = await channel.send({
     embeds: [embed],
-    components: [row],
+    components: [row, quickAmountLabelRow, quickAmountRow, quickAmountFinalRow],
   });
 
   await savePanelMessage(
@@ -5514,9 +6515,11 @@ async function sendJkopayRefundPanel() {
       `查詢訂單：\`/街口查詢\`\n` +
         `執行退款：\`/街口退款\`\n` +
         `• ASD 儲值單：輸入 TOP-... 或 QIUNAI-TOP-...\n` +
+        `• 訂單／加時／打賞：輸入 QIUNAI-ORD/EXT/TIP-... 或 DEEPNIGHT-...\n` +
         `• 官網商品單：輸入 WASH-...\n` +
         `• 目前僅支援整筆退款\n` +
-        `• 儲值退款會同步扣回該筆 ASD\n\n` +
+        `• 服務退款會同步回沖訂單、累積消費與未入帳薪資\n` +
+        `• 薪資已入帳或發放的服務單會停止自動退款\n\n` +
         `⚠️ 執行前請再次核對訂單編號與退款對象。`,
     )
     .setFooter({ text: "秋奈｜街口支付退款管理" })
@@ -5641,7 +6644,8 @@ async function sendCheckinPanel(client) {
     .setTitle("📅 星雨每日簽到")
     .setDescription(
       `✨ 每日簽到系統\n\n` +
-        `每天都可以領取星雨幣獎勵！\n` +
+        `每天可在秋奈或深夜其中一間領取 5 星雨幣！\n` +
+        `兩間店共用每日簽到次數，一天只能簽到一次。\n` +
         `連續簽到可能會有額外驚喜 🎁\n\n` +
         `━━━━━━━━━━━━━━\n` +
         `🪙 每日領取星雨幣\n` +
@@ -5692,10 +6696,6 @@ async function sendAtmPanel(client) {
     .setCustomId("check_coins")
     .setLabel("💰 查看餘額")
     .setStyle(ButtonStyle.Primary);
-  const transferButton = new ButtonBuilder()
-    .setCustomId("transfer_menu")
-    .setLabel("💸 玩家轉帳")
-    .setStyle(ButtonStyle.Primary);
   const consumeButton = new ButtonBuilder()
     .setCustomId("consume_info")
     .setLabel("💠 消費資訊")
@@ -5720,9 +6720,12 @@ async function sendAtmPanel(client) {
     .setCustomId("monthly_bill_pay")
     .setLabel("🌙 月結繳費")
     .setStyle(ButtonStyle.Secondary);
+  const raffleTicketButton = new ButtonBuilder()
+    .setCustomId("check_raffle_tickets")
+    .setLabel("🎟️ 抽獎券")
+    .setStyle(ButtonStyle.Secondary);
   const row = new ActionRowBuilder().addComponents(
     balanceButton,
-    transferButton,
     consumeButton,
     transferRecordButton,
     bagButton,
@@ -5731,25 +6734,26 @@ async function sendAtmPanel(client) {
     switchBenefitButton,
     monthlyInfoButton,
     monthlyPayButton,
+    raffleTicketButton,
   );
   const embed = new EmbedBuilder()
     .setColor("#00ffff")
     .setTitle("🏦 星雨 ATM")
     .setDescription(
       `💳 歡迎使用星雨銀行\n\n` +
-        `你可以在這裡查看餘額或轉帳給其他玩家。\n\n` +
+        `你可以在這裡查看餘額、消費資訊與交易紀錄。\n\n` +
         `━━━━━━━━━━━━━━\n` +
         `💰 查看餘額｜確認目前星雨幣\n` +
-        `💸 玩家轉帳｜轉帳給指定玩家\n` +
         `💠 消費資訊｜查看累積消費\n` +
         `📜 交易紀錄｜查看最近錢包明細\n` +
+        `🎟️ 抽獎券｜查看目前持有張數\n` +
         `🔄 切換權益｜每日最多切換 2 次\n` +
         `🌙 查詢月結｜查看保證金與剩餘額度`,
     )
     .setThumbnail(client.user.displayAvatarURL())
     .setImage("attachment://star-rain-atm.png")
     .setFooter({
-      text: "星雨銀行｜交易請確認對象與金額",
+      text: "星雨銀行｜星雨幣玩家轉帳目前關閉",
     })
     .setTimestamp();
   const panel = await getPanelMessage("atm");
@@ -5845,7 +6849,7 @@ async function sendOrderSystem(client) {
   if (!channel) return;
 
   const embed = new EmbedBuilder()
-    .setColor("#ff66cc")
+    .setColor(QIUNAI_WATER_BLUE)
     .setTitle("🌙 星雨訂單中心")
     .setDescription(
       `請選擇要建立的服務。\n\n` +
@@ -5898,7 +6902,7 @@ async function sendOrderSystem(client) {
   const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId("order_start_topup")
-      .setLabel("儲值")
+      .setLabel("購買星雨幣")
       .setEmoji("💳")
       .setStyle(ButtonStyle.Success),
   );
@@ -5989,6 +6993,22 @@ const commands = sortCommandDefinitions([
     .setName("指令")
     .setDescription("查看分類後的指令清單"),
   new SlashCommandBuilder().setName("ping").setDescription("測試機器人"),
+  new SlashCommandBuilder()
+    .setName("公司ai")
+    .setDescription("私密聊天、查公司資料或搜尋最新網路資訊")
+    .addStringOption((option) =>
+      option
+        .setName("問題")
+        .setDescription("輸入想詢問的內容")
+        .setMaxLength(1000)
+        .setRequired(true),
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName("上網搜尋")
+        .setDescription("需要最新網路資料時開啟（一般聊天不必開啟）")
+        .setRequired(false),
+    ),
   new SlashCommandBuilder()
     .setName("新增訂單")
     .setDescription("客服替指定老闆在目前頻道新增訂單")
@@ -6170,26 +7190,26 @@ const commands = sortCommandDefinitions([
     ),
   new SlashCommandBuilder()
     .setName("街口查詢")
-    .setDescription("查詢街口儲值單或官網商品單的最新交易狀態")
+    .setDescription("查詢街口儲值、服務或官網商品單的最新交易狀態")
     .addStringOption((option) =>
       option
         .setName("訂單編號")
-        .setDescription("輸入 TOP-...、QIUNAI-TOP-... 或 WASH-... 編號")
+        .setDescription("輸入 TOP、QIUNAI/DEEPNIGHT 服務單或 WASH 編號")
         .setRequired(true),
     ),
   new SlashCommandBuilder()
     .setName("街口退款")
-    .setDescription("將已付款的街口儲值單或官網商品單整筆退款")
+    .setDescription("將已付款的街口儲值、服務或官網商品單整筆退款")
     .addStringOption((option) =>
       option
         .setName("訂單編號")
-        .setDescription("輸入 TOP-...、QIUNAI-TOP-... 或 WASH-... 編號")
+        .setDescription("輸入 TOP、QIUNAI/DEEPNIGHT 服務單或 WASH 編號")
         .setRequired(true),
     )
     .addBooleanOption((option) =>
       option
         .setName("確認")
-        .setDescription("確認退款；儲值單會同步扣回這筆入帳的 ASD")
+        .setDescription("確認退款並同步回沖相關帳務資料")
         .setRequired(true),
     ),
   new SlashCommandBuilder()
@@ -6204,13 +7224,7 @@ const commands = sortCommandDefinitions([
     .addUserOption((option) =>
       option
         .setName("老闆")
-        .setDescription("依老闆尋找最近一筆訂單")
-        .setRequired(false),
-    )
-    .addUserOption((option) =>
-      option
-        .setName("陪陪")
-        .setDescription("依陪陪尋找最近一筆訂單")
+        .setDescription("選擇後會再開啟可複選的陪陪名單")
         .setRequired(false),
     ),
   new SlashCommandBuilder()
@@ -6622,6 +7636,129 @@ async function processLegacyVipBackfillQueue() {
     console.log(`[舊 VIP 回填] 已檢查 ${queued.length} 位會員`);
   }
 }
+
+async function processSignedEmploymentReportChannels({
+  discordId = null,
+  genderOverride = null,
+  reuseSignedAcrossOrganizations = false,
+} = {}) {
+  const summary = await provisionSignedEmploymentReportChannels({
+    supabase,
+    organization: "qiunai",
+    discordId,
+    genderOverride,
+    reuseSignedAcrossOrganizations,
+    ensureStaffReportChannel: (staff, options) =>
+      dispatchSystem.ensureStaffReportChannel(staff, options),
+  });
+  if (summary.provisioned || summary.manualRequired || summary.failed) {
+    console.log(
+      `[入職填單區] 檢查 ${summary.checked} 筆，完成 ${summary.provisioned} 筆，待人工 ${summary.manualRequired} 筆，失敗 ${summary.failed} 筆`,
+    );
+  }
+  return summary;
+}
+
+const signedEmploymentChannelTask = createNonOverlappingTask(
+  "已簽署新人填單區",
+  processSignedEmploymentReportChannels,
+);
+const signedEmploymentMemberTasks = new Map();
+
+function getEmploymentGenderFromMember(member) {
+  const roleNames = member?.roles?.cache
+    ?.map((role) => String(role.name || ""))
+    .join(" ");
+  if (roleNames?.includes("女陪")) return "女";
+  if (roleNames?.includes("男陪")) return "男";
+  return null;
+}
+
+function retrySignedEmploymentForMember(member) {
+  if (String(member.guild.id) !== QIUNAI_STAFF_GUILD_ID) return;
+  const discordId = String(member.id);
+  if (signedEmploymentMemberTasks.has(discordId)) {
+    return signedEmploymentMemberTasks.get(discordId);
+  }
+  const task = processSignedEmploymentReportChannels({
+    discordId,
+    genderOverride: getEmploymentGenderFromMember(member),
+    reuseSignedAcrossOrganizations: true,
+  })
+    .finally(() => {
+      signedEmploymentMemberTasks.delete(discordId);
+    });
+  signedEmploymentMemberTasks.set(discordId, task);
+  return task;
+}
+
+// 線上簽署可能早於加入員工群；加入前 Discord 不允許建立該使用者的
+// 頻道權限。成員一加入便立即重試，15 秒輪詢仍作為斷線與事件漏接保底。
+function handleSignedEmploymentMemberEvent(member) {
+  void retrySignedEmploymentForMember(member)?.catch((error) => {
+    console.error(`[入職填單區] <@${member?.id || "未知"}> 入群即時建立失敗`, error);
+  });
+}
+
+client.on(Events.GuildMemberAdd, handleSignedEmploymentMemberEvent);
+client.on(Events.GuildMemberUpdate, (_oldMember, newMember) => {
+  handleSignedEmploymentMemberEvent(newMember);
+});
+
+async function reconcileExistingSignedEmploymentMembers() {
+  const staffGuild =
+    client.guilds.cache.get(QIUNAI_STAFF_GUILD_ID) ||
+    (await client.guilds.fetch(QIUNAI_STAFF_GUILD_ID));
+  let members;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      members = await staffGuild.members.fetch();
+      break;
+    } catch (error) {
+      const retryAfterSeconds = Number(error?.data?.retry_after || 0);
+      if (attempt > 0 || !Number.isFinite(retryAfterSeconds) || retryAfterSeconds <= 0) {
+        throw error;
+      }
+      console.warn(
+        `[入職填單區] Discord 成員名單暫時限流，${retryAfterSeconds} 秒後重試`,
+      );
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.ceil(retryAfterSeconds * 1000) + 250),
+      );
+    }
+  }
+  if (!members) throw new Error("無法取得秋奈員工群成員名單");
+  const { data: signings, error } = await supabase
+    .from("employment_contract_signings")
+    .select("discord_id")
+    .in("status", ["signed", "activated"])
+    .limit(1000);
+  if (error) throw error;
+
+  const signedDiscordIds = new Set(
+    (signings || []).map((row) => String(row.discord_id || "")).filter(Boolean),
+  );
+  const signedMembers = [...members.values()].filter((member) =>
+    signedDiscordIds.has(String(member.id)),
+  );
+  let failed = 0;
+  // Discord 成員/頻道 API 在啟動時最容易撞到限流。逐位低速回補；新加入的
+  // 員工仍由 GuildMemberAdd 即時建立，不需要等待這個背景掃描。
+  for (const member of signedMembers) {
+    try {
+      await retrySignedEmploymentForMember(member);
+    } catch {
+      failed += 1;
+    }
+    await delay(750);
+  }
+  console.log(
+    `[入職填單區] 現有員工群已簽署成員 ${signedMembers.length} 位，失敗 ${failed} 位`,
+  );
+  if (failed) throw new Error(`${failed} 位現有已簽署成員補建失敗`);
+  return { checked: signedMembers.length, failed };
+}
+
 client.once(Events.ClientReady, async () => {
   console.log("🚀 星雨系統啟動中...");
 
@@ -6637,6 +7774,16 @@ client.once(Events.ClientReady, async () => {
         },
       },
       {
+        name: "付款方式圖片",
+        run: async () => {
+          const result = await ensurePaymentMethodEmojis(client);
+          console.log(
+            `[付款圖示] 新增 ${result.uploaded}、沿用 ${result.reused}、失敗 ${result.failed}`,
+          );
+          return result;
+        },
+      },
+      {
         name: "Slash Commands 同步",
         run: () =>
           syncApplicationCommands({
@@ -6647,6 +7794,7 @@ client.once(Events.ClientReady, async () => {
       },
       { name: "分區下單面板", run: () => dispatchSystem.sendGameOrderPanels() },
       { name: "自助下單面板", run: () => dispatchSystem.sendSelfServiceOrderPanel() },
+      { name: "街口自助購幣面板", run: () => dispatchSystem.sendJkopayTopupPanel() },
       { name: "自助派單倒數恢復", run: () => dispatchSystem.restoreSelfServiceDispatchTimers() },
       { name: "打賞下單面板", run: () => dispatchSystem.sendTipOrderPanel() },
       { name: "報單面板", run: () => dispatchSystem.sendWorkReportPanel() },
@@ -6671,10 +7819,28 @@ client.once(Events.ClientReady, async () => {
     `[STARTUP] 面板與指令完成 ${startupSummary.succeeded}/${startupSummary.total}，耗時 ${startupSummary.elapsedMs}ms`,
   );
 
+  // 不阻塞 ready 後最初一分鐘的按鈕互動；完整成員抓取與歷史回補改在背景
+  // 低速執行。即時 GuildMemberAdd 流程不受影響。
+  const employmentBackfillTimer = setTimeout(() => {
+    void runStartupGroup(
+      [
+        {
+          name: "現有已簽署成員填單區（背景低速）",
+          run: reconcileExistingSignedEmploymentMembers,
+        },
+      ],
+      { concurrency: 1, healthState: runtimeHealth },
+    );
+  }, 20_000);
+  employmentBackfillTimer.unref?.();
+
   await runStartupGroup(
     [
       { name: "每日陪玩總結排程", run: startDailySummaryScheduler },
       { name: "月結帳單排程", run: startMonthlyBillScheduler },
+      { name: "價目表切換排程", run: () => dispatchSystem.startPricingPanelScheduler() },
+      { name: "已付款訂單補派排程", run: () => dispatchSystem.startPaidOrderDispatchRecovery() },
+      { name: "VIP 與會計補償排程", run: () => dispatchSystem.startFinancialEffectsRecovery() },
       {
         name: "考核討論串刪除排程",
         run: () => employmentSystem.startCleanupScheduler(),
@@ -6698,6 +7864,7 @@ client.once(Events.ClientReady, async () => {
             repairTasks: [
               { name: "分區下單面板", run: () => dispatchSystem.sendGameOrderPanels() },
               { name: "自助下單面板", run: () => dispatchSystem.sendSelfServiceOrderPanel() },
+              { name: "街口自助購幣面板", run: () => dispatchSystem.sendJkopayTopupPanel() },
               { name: "打賞下單面板", run: () => dispatchSystem.sendTipOrderPanel() },
               { name: "報單面板", run: () => dispatchSystem.sendWorkReportPanel() },
               { name: "入職申請面板", run: () => employmentSystem.sendPanel() },
@@ -6709,6 +7876,12 @@ client.once(Events.ClientReady, async () => {
     ],
     { concurrency: 3, healthState: runtimeHealth },
   );
+
+  const signedEmploymentChannelTimer = setInterval(
+    signedEmploymentChannelTask,
+    5 * 60 * 1000,
+  );
+  signedEmploymentChannelTimer.unref?.();
 
   setInterval(
     createNonOverlappingTask("月卡 VIP 到期清理", async () => {
@@ -7007,6 +8180,8 @@ function isCardPayment(text = "") {
   const value = String(text || "").toLowerCase();
 
   return (
+    value === JKOPAY_METHOD ||
+    value.includes("街口掃碼") ||
     value.includes("刷卡") ||
     value.includes("信用卡") ||
     value.includes("信用卡付款") ||
@@ -7026,17 +8201,16 @@ async function sendBankTransferInfo(channel) {
     .setTitle("🏦 匯款資訊")
     .setDescription(
       `請依照以下資訊完成匯款：\n\n` +
-        `銀行：街口支付\n` +
-        `銀行代碼：396\n` +
-        `帳號：902960949\n` +
-        `戶名：許O星\n\n` +
+        `銀行：824連線銀行\n` +
+        `分行：6880總行（非必填）\n` +
+        `帳號：312000002665\n` +
+        `戶名：深夜不關燈工作室\n` +
+        `備註：（麻煩空白即可）\n\n` +
         `也可以掃描下方 QR Code 付款。\n\n` +
         `匯款完成後，請在此頻道上傳匯款截圖，等待客服確認。\n\n` +
         `若有其他銀行之需求，請在下方告訴客服。`,
     )
-    .setImage(
-      "https://cdn.discordapp.com/attachments/1501098193276895360/1524312607320965220/image.png?ex=6a4f4a3d&is=6a4df8bd&hm=85a35d149d4c0bf2a1958f6c8fbc5bedb6b731db7ff0cae74c754b09c0edc2a7&",
-    )
+    .setImage("attachment://bank-transfer-line-bank.png")
     .setFooter({
       text: "請確認金額正確後再匯款",
     })
@@ -7044,6 +8218,12 @@ async function sendBankTransferInfo(channel) {
 
   await channel.send({
     embeds: [embed],
+    files: [
+      {
+        attachment: BANK_TRANSFER_QR_CODE_PATH,
+        name: "bank-transfer-line-bank.png",
+      },
+    ],
   });
 }
 async function getAvailablePlayerOptions(
@@ -7134,6 +8314,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleTipStaffSearchModal(interaction);
         return;
       }
+      if (
+        interaction.customId.startsWith("manual_review_staff_search_modal_")
+      ) {
+        await handleManualReviewStaffSearchModal(interaction);
+        return;
+      }
       // ===== 月結繳費金額輸入 =====
       if (interaction.customId === "submit_monthly_bill_pay_amount") {
         await interaction.deferReply({
@@ -7204,7 +8390,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             },
             {
               label: "其他繳費方式",
-              description: "建立臨時頻道後再選匯款 / 刷卡 / 無卡 / 虛擬貨幣",
+              description: "建立臨時頻道後再選街口掃碼 / 匯款 / 無卡 / 虛擬貨幣",
               value: "manual",
             },
           ]);
@@ -7236,9 +8422,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const parts = interaction.customId.split("_");
         const rating = Number(parts[3]);
         const customerId = parts[4];
-        const staffId = parts[5];
-        const surveyId = parts[6];
-        const anonymous = parts[7] === "anon";
+        const isLegacyId = parts.length >= 8;
+        const staffId = isLegacyId ? parts[5] : null;
+        const surveyId = isLegacyId ? parts[6] : parts[5];
+        const anonymous = parts[isLegacyId ? 7 : 6] === "anon";
         const orderId = `manual-${surveyId}`;
         const comment = interaction.fields.getTextInputValue("comment") || "";
         if (interaction.user.id !== customerId) {
@@ -7247,6 +8434,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
             flags: 64,
           });
         }
+        const survey = getPendingManualReviewSurvey(
+          surveyId,
+          customerId,
+          null,
+          staffId,
+        );
+        if (!survey?.staffIds?.length) {
+          return await interaction.reply({
+            content: "❌ 這份滿意度調查已過期，請客服重新發送。",
+            flags: 64,
+          });
+        }
+        const staffIds = normalizeManualReviewStaffIds(survey.staffIds);
+        const staffMentions = formatManualReviewStaffMentions(staffIds);
         const { data: oldReview } = await supabase
           .from("order_reviews")
           .select("order_id")
@@ -7265,7 +8466,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             order_id: orderId,
             order_no: `MANUAL-${surveyId}`,
             customer_id: customerId,
-            staff_ids: staffId,
+            staff_ids: staffIds.join(","),
             rating,
             comment,
             channel_id: interaction.channel.id,
@@ -7287,10 +8488,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.channel.send({
           embeds: [
             new EmbedBuilder()
-              .setColor("#ffd166")
+              .setColor(QIUNAI_WATER_BLUE)
               .setTitle("💬 已收到滿意度調查")
               .setDescription(
-                `老闆：${anonymous ? "匿名" : `<@${customerId}>`}\n陪陪：<@${staffId}>\n` +
+                `老闆：${anonymous ? "匿名" : `<@${customerId}>`}\n陪陪：${staffMentions}\n` +
                   `評分：${"🌟".repeat(rating)} ${rating}/5\n心得：${
                     comment || "未填寫"
                   }`,
@@ -7301,11 +8502,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await publishPositiveReview({
           rating,
           customerId,
-          staffIds: [staffId],
+          staffIds,
           comment,
           anonymous,
           orderNo: `MANUAL-${surveyId}`,
         });
+        pendingManualReviewSurveys.delete(surveyId);
         return;
       }
       if (
@@ -7482,6 +8684,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await handleBulkDeleteCancel(interaction);
       }
       // ===== 訂單評價按鈕：會開 Modal，不能先 defer =====
+      if (customId.startsWith("manual_review_staff_search_")) {
+        await openManualReviewStaffSearchModal(interaction);
+        return;
+      }
       if (
         customId.startsWith("order_review_") ||
         customId.startsWith("manual_review_") ||
@@ -7498,6 +8704,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       if (customId.startsWith("tip_staff_search_")) {
         await openTipStaffSearchModal(interaction);
+        return;
+      }
+      if (customId.startsWith("tip_staff_remove_")) {
+        await openTipStaffRemoveMenu(interaction);
         return;
       }
       if (
@@ -7601,6 +8811,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         interaction.customId === "order_start_chat" ||
         interaction.customId === "order_start_emotion" ||
         interaction.customId === "order_start_topup" ||
+        interaction.customId.startsWith("order_start_topup_amount_") ||
+        interaction.customId === "jkopay_topup_start" ||
+        interaction.customId.startsWith("jkopay_topup_amount_") ||
         interaction.customId === "order_start_tip" ||
         interaction.customId === "order_start_crown"
       ) {
@@ -7613,9 +8826,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         const ownerId = interaction.customId.replace("private_room_close_", "");
         const isStaff =
-          interaction.member.permissions.has(
-            PermissionFlagsBits.Administrator,
-          ) || interaction.member.roles.cache.has(process.env.STAFF_ROLE);
+          interactionHasPermission(interaction, PermissionFlagsBits.Administrator) || memberHasRole(interaction.member, process.env.STAFF_ROLE);
         if (interaction.user.id !== ownerId && !isStaff) {
           return interaction.editReply({
             content: "❌ 只有房間建立者或客服可以關閉",
@@ -7624,9 +8835,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.editReply({
           content: "🗑️ 私人頻道將在 3 秒後刪除",
         });
-        setTimeout(async () => {
-          await interaction.channel.delete().catch(() => {});
-        }, 3000);
+        scheduleChannelDeletion(interaction, 3000);
         return;
       }
       if (interaction.customId.startsWith("confirm_topup_")) {
@@ -7664,6 +8873,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // Modal 類按鈕不能 defer
       if (
         interaction.customId === "open_topup_modal" ||
+        interaction.customId === "open_jkopay_topup_modal" ||
         interaction.customId === "open_play_order_form" ||
         interaction.customId === "self_service_start" ||
         interaction.customId.startsWith("self_service_claim_") ||
@@ -7676,7 +8886,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         interaction.customId.startsWith("save_order_note_") ||
         interaction.customId.startsWith("staff_edit_order_") ||
         interaction.customId.startsWith("new_order_back_") ||
-        interaction.customId.startsWith("extend_order_")
+        interaction.customId.startsWith("extend_order_") ||
+        interaction.customId.startsWith("open_manual_work_report") ||
+        interaction.customId.startsWith("work_report_crown_start_") ||
+        interaction.customId.startsWith("work_report_add_") ||
+        interaction.customId.startsWith("work_report_edit_") ||
+        interaction.customId.startsWith("work_report_correct_start_") ||
+        interaction.customId.startsWith("work_report_start_") ||
+        interaction.customId.startsWith("work_report_end_")
       ) {
         return await dispatchSystem.handleDispatchInteraction(interaction);
       }
@@ -7686,13 +8903,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.deferReply({ flags: 64 });
         }
         const topic = interaction.channel?.topic || "";
-        const ownerId = topic.startsWith("owner:")
-          ? topic.replace("owner:", "").trim()
-          : null;
+        const ownerId = topic.match(/(?:^|;)owner:(\d{16,22})(?:;|$)/)?.[1] || null;
         const isStaff =
-          interaction.member.permissions.has(
-            PermissionFlagsBits.Administrator,
-          ) || interaction.member.roles.cache.has(process.env.STAFF_ROLE);
+          interactionHasPermission(interaction, PermissionFlagsBits.Administrator) || memberHasRole(interaction.member, process.env.STAFF_ROLE);
         if (interaction.user.id !== ownerId && !isStaff) {
           return interaction.editReply({
             content: "❌ 只有建立這個頻道的人或客服可以關閉。",
@@ -7701,9 +8914,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.editReply({
           content: "🗑️ 已收到，這個臨時頻道將在 3 秒後刪除。",
         });
-        setTimeout(async () => {
-          await interaction.channel.delete().catch(() => {});
-        }, 3000);
+        scheduleChannelDeletion(interaction, 3000);
         return;
       }
       if (interaction.customId.startsWith("change_preferred_player_")) {
@@ -7711,6 +8922,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await interaction.deferReply({ flags: 64 });
         }
         return await dispatchSystem.handleDispatchInteraction(interaction);
+      }
+      // ===== 打賞付款圖片按鈕 =====
+      if (interaction.customId.startsWith("tip_payment_")) {
+        return await handleTipPaymentSelect(interaction);
       }
       // ===== 訂單評價按鈕：會開 Modal，不能先 defer =====
       if (
@@ -7739,6 +8954,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
     // ===== String Select =====
     if (interaction.isStringSelectMenu()) {
+      if (interaction.customId.startsWith("tip_staff_remove_select_")) {
+        return await handleTipStaffRemoveSelect(interaction);
+      }
+      if (
+        interaction.customId.startsWith("manual_review_staff_search_result_")
+      ) {
+        return await handleManualReviewStaffSelect(interaction);
+      }
       // ===== 新版下單流程：不能先 defer，因為 dispatchSystem 會用 interaction.update() =====
       if (
         interaction.customId.startsWith("self_service_game_") ||
@@ -7787,7 +9010,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .filter(Boolean),
           ),
         ];
-        if (hasSelfTip(interaction.user.id, selectedStaffIds)) {
+        let tipperId;
+        try {
+          tipperId = await resolveTipperIdForChannel(
+            interaction.channel,
+            interaction.guild,
+          );
+        } catch (error) {
+          console.error("[打賞選擇陪陪] 讀取打賞人失敗", error);
+          return interaction.reply({
+            content: "❌ 讀取打賞人失敗，請稍後再試。",
+            flags: 64,
+          });
+        }
+        if (!tipperId) {
+          return interaction.reply({
+            content: "❌ 找不到這個頻道的打賞人，請重新建立打賞頻道。",
+            flags: 64,
+          });
+        }
+        if (hasSelfTip(tipperId, selectedStaffIds)) {
           return interaction.reply({
             content: "❌ 不能打賞自己，請選擇其他陪陪。",
             flags: 64,
@@ -7800,6 +9042,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           guildId: interaction.guild.id,
           selectedStaffId: selectedStaffIds[0],
           selectedStaffIds,
+          tipperId,
           createdBy: interaction.user.id,
           createdAt: Date.now(),
         });
@@ -7828,7 +9071,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const tipPaymentInput = new TextInputBuilder()
           .setCustomId("tip_payment_method")
           .setLabel("付款方式")
-          .setPlaceholder("轉帳 / 無卡 / 儲值卡 / 員工扣薪")
+          .setPlaceholder("街口 / 轉帳 / 無卡 / 儲值卡 / 員工扣薪")
           .setStyle(TextInputStyle.Short)
           .setRequired(true);
         modal.addComponents(
@@ -7884,6 +9127,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
     // ===== User Select =====
     if (interaction.isUserSelectMenu()) {
+      if (interaction.customId.startsWith("manual_review_staff_select_")) {
+        return await handleManualReviewStaffSelect(interaction);
+      }
       if (interaction.customId.startsWith("manual_work_staff_")) {
         return await dispatchSystem.handleDispatchInteraction(interaction);
       }
@@ -7985,8 +9231,8 @@ function isAdminOrStaff(interaction) {
   ].filter(Boolean);
   return (
     interaction.guild.ownerId === interaction.user.id ||
-    interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
-    roleIds.some((roleId) => interaction.member.roles.cache.has(roleId))
+    interactionHasPermission(interaction, PermissionFlagsBits.Administrator) ||
+    roleIds.some((roleId) => memberHasRole(interaction.member, roleId))
   );
 }
 
@@ -8041,6 +9287,26 @@ async function handleSlashCommand(interaction) {
   if (interaction.commandName === "ping") {
     return interaction.editReply("Pong!");
   }
+  if (interaction.commandName === "公司ai") {
+    try {
+      const canUseOperations = isAdminOrStaff(interaction);
+      const answer = await companyAi.answer({
+        userId: interaction.user.id,
+        question: interaction.options.getString("問題", true),
+        publicReply: false,
+        canViewOthers: canUseOperations,
+        canUseOperations,
+        allowWebSearch:
+          interaction.options.getBoolean("上網搜尋") === true,
+        conversationKey: interaction.user.id,
+      });
+      return interaction.editReply({ content: answer });
+    } catch (error) {
+      return interaction.editReply({
+        content: "❌ " + (error.message || "公司 AI 暫時無法回覆"),
+      });
+    }
+  }
   if (interaction.commandName === "新增訂單") {
     if (!isAdminOrStaff(interaction)) {
       return interaction.editReply({
@@ -8087,7 +9353,7 @@ async function handleSlashCommand(interaction) {
     const note = interaction.options.getString("備註") || "";
     const isAdministrator =
       interaction.guild.ownerId === interaction.user.id ||
-      interaction.member.permissions.has(PermissionFlagsBits.Administrator);
+      interactionHasPermission(interaction, PermissionFlagsBits.Administrator);
 
     if (!QIUNAI_CUSTOMER_SERVICE_IDS.includes(target.id)) {
       return interaction.editReply({
@@ -8563,9 +9829,13 @@ async function handleSlashCommand(interaction) {
 
       const warnings = [];
       const isTopup = refund.kind === "topup";
+      const isService = refund.kind === "service";
+      const serviceLabel = { order: "訂單", extension: "加時", tip: "打賞" }[refund.serviceKind] || "服務";
       const note = isTopup
         ? `${refund.order.topup_no}｜街口退款 ${refund.order.platform_order_id}`
-        : `${refund.order.order_no}｜官網商品街口退款 ${refund.order.platform_order_id}`;
+        : isService
+          ? `${serviceLabel}街口退款 ${refund.order.platform_order_id}`
+          : `${refund.order.order_no}｜官網商品街口退款 ${refund.order.platform_order_id}`;
       if (isTopup) {
         await allianceMembership
           .adjustCumulative({
@@ -8581,24 +9851,26 @@ async function handleSlashCommand(interaction) {
             warnings.push("會籍累積儲值尚未回沖");
           });
       }
-      await recordAccountingLedger({
-        entry_type: isTopup ? "customer_topup_refund" : "merchandise_refund",
-        entry_label: isTopup ? "客人儲值退款" : "官網商品退款",
-        amount: -refund.amount,
-        cash_amount: -refund.amount,
-        liability_amount: isTopup ? -refund.amount : 0,
-        payment_method: "街口支付",
-        customer_id: isTopup ? refund.order.user_id : null,
-        source_table: isTopup ? "jkopay_topup_orders" : "merchandise_orders",
-        source_id: refund.order.platform_order_id,
-        dedupe_key: `jkopay-refund:${refund.order.platform_order_id}`,
-        note,
-        metadata: { refund_result: refund.refundResult },
-        created_by: interaction.user.id,
-      }).catch((error) => {
-        console.error("[JKOPAY][REFUND] 會計流水回沖失敗", error);
-        warnings.push("會計流水尚未寫入");
-      });
+      if (!isService) {
+        await recordAccountingLedger({
+          entry_type: isTopup ? "customer_topup_refund" : "merchandise_refund",
+          entry_label: isTopup ? "客人儲值退款" : "官網商品退款",
+          amount: -refund.amount,
+          cash_amount: -refund.amount,
+          liability_amount: isTopup ? -refund.amount : 0,
+          payment_method: "街口支付",
+          customer_id: isTopup ? refund.order.user_id : null,
+          source_table: isTopup ? "jkopay_topup_orders" : "merchandise_orders",
+          source_id: refund.order.platform_order_id,
+          dedupe_key: `jkopay-refund:${refund.order.platform_order_id}`,
+          note,
+          metadata: { refund_result: refund.refundResult },
+          created_by: interaction.user.id,
+        }).catch((error) => {
+          console.error("[JKOPAY][REFUND] 會計流水回沖失敗", error);
+          warnings.push("會計流水尚未寫入");
+        });
+      }
       if (isTopup) {
         await sendWalletLog(
           refund.order.user_id,
@@ -8618,7 +9890,9 @@ async function handleSlashCommand(interaction) {
         kind: refund.kind,
         detail: isTopup
           ? `已完成退款並扣回 ASD；退款後餘額 ${refund.balance.toLocaleString("zh-TW")} ASD。`
-          : `官網訂單 ${refund.order.order_no} 已更新為已退款。`,
+          : isService
+            ? `${serviceLabel}已退款，訂單、累積消費及未入帳薪資均已回沖。`
+            : `官網訂單 ${refund.order.order_no} 已更新為已退款。`,
       }).catch((error) => {
         console.error("[JKOPAY][REFUND] 發送成功紀錄失敗", error);
         warnings.push("退款專區紀錄尚未送出");
@@ -8628,12 +9902,14 @@ async function handleSlashCommand(interaction) {
         : "";
       return interaction.editReply({
         content:
-          `✅ 街口退款完成${isTopup ? "並已扣回 ASD" : "，官網商品訂單已更新"}。\n\n` +
+          `✅ 街口退款完成${isTopup ? "並已扣回 ASD" : isService ? `，${serviceLabel}帳務已回沖` : "，官網商品訂單已更新"}。\n\n` +
           `訂單編號：${refund.order.platform_order_id}\n` +
           `退款金額：NT$${refund.amount.toLocaleString("zh-TW")}\n` +
           (isTopup
             ? `玩家：<@${refund.order.user_id}>\n退款後餘額：${refund.balance.toLocaleString("zh-TW")} ASD`
-            : `官網訂單：${refund.order.order_no}`) +
+            : isService
+              ? `玩家：<@${refund.order.user_id}>\n退款類型：${serviceLabel}`
+              : `官網訂單：${refund.order.order_no}`) +
           warningText,
       });
     } catch (error) {
@@ -9579,7 +10855,7 @@ async function handleSlashCommand(interaction) {
   // 我的商品
   if (interaction.commandName === "我的商品") {
     const rawItems = await getUserItems(interaction.user.id);
-    const items = rawItems.filter((item) => {
+    const items = groupInventoryItems(rawItems.filter((item) => {
       const name = String(item.item_name || "");
       const desc = String(item.description || "");
       return !(
@@ -9589,7 +10865,7 @@ async function handleSlashCommand(interaction) {
         desc.includes("星雨幣") ||
         desc.includes("金幣")
       );
-    });
+    }));
     if (!items.length) {
       return interaction.editReply({
         content: "📦 你目前沒有商品",
@@ -9603,7 +10879,7 @@ async function handleSlashCommand(interaction) {
       if (filtered.length === 0) continue;
       text += `\n${getRarityEmoji(rarity)} ${rarity}\n`;
       for (const item of filtered) {
-        text += `• ${item.item_name}`;
+        text += formatInventoryItemTitle(item);
         if (item.description) {
           text += `\n└ 📦 ${item.description}`;
         }
@@ -9618,7 +10894,7 @@ async function handleSlashCommand(interaction) {
     if (normalItems.length > 0) {
       text += `\n🛒 一般商品\n`;
       for (const item of normalItems) {
-        text += `• ${item.item_name}\n`;
+        text += `${formatInventoryItemTitle(item)}\n`;
         if (item.description) {
           text += `\n└ 📦 ${item.description}`;
         }
@@ -9635,7 +10911,7 @@ async function handleSlashCommand(interaction) {
     if (couponItems.length > 0) {
       text += `\n🎟️ 優惠券\n`;
       for (const item of couponItems) {
-        text += `• ${item.item_name}\n`;
+        text += `${formatInventoryItemTitle(item)}\n`;
         if (item.description) {
           text += `└ 📦 ${item.description}\n`;
         }
@@ -10280,14 +11556,14 @@ async function createMonthlyBillPaymentChannel(interaction, bill) {
     .setPlaceholder("請選擇月結繳費方式")
     .addOptions([
       {
+        label: JKOPAY_METHOD,
+        description: "街口支付收款 QR Code",
+        value: JKOPAY_METHOD,
+      },
+      {
         label: "匯款 / 轉帳",
         description: "顯示銀行帳號，付款後上傳明細",
         value: "匯款",
-      },
-      {
-        label: "刷卡",
-        description: "顯示刷卡連結，付款後上傳截圖",
-        value: "刷卡",
       },
       {
         label: "無卡",
@@ -10363,7 +11639,7 @@ async function handleButtonInteraction(interaction) {
     await interaction.channel.send(
       `✅ 訂單 ${order.order_no || order.id} 已完成，頻道將在 10 秒後關閉。`,
     );
-    setTimeout(() => interaction.channel.delete().catch(() => null), 10_000).unref?.();
+    scheduleChannelDeletion(interaction, 10_000);
     return;
   }
   if (customId.startsWith("review_privacy_order_")) {
@@ -10399,18 +11675,30 @@ async function handleButtonInteraction(interaction) {
     const parts = customId.split("_");
     const anonymous = parts[3] === "anon";
     const customerId = parts[4];
-    const staffId = parts[5];
-    const surveyId = parts[6];
+    const isLegacyId = parts.length >= 7;
+    const staffId = isLegacyId ? parts[5] : null;
+    const surveyId = isLegacyId ? parts[6] : parts[5];
     if (interaction.user.id !== customerId) {
       return await interaction.reply({
         content: "❌ 只有這份調查指定的老闆可以選擇是否匿名",
         flags: 64,
       });
     }
+    const survey = getPendingManualReviewSurvey(
+      surveyId,
+      customerId,
+      interaction.message,
+      staffId,
+    );
+    if (!survey) {
+      return interaction.reply({
+        content: "❌ 這份滿意度調查已過期，請客服重新發送。",
+        flags: 64,
+      });
+    }
     return await interaction.update({
       components: buildManualReviewComponents(
         customerId,
-        staffId,
         surveyId,
         anonymous,
       ),
@@ -10420,18 +11708,31 @@ async function handleButtonInteraction(interaction) {
     const parts = customId.split("_");
     const rating = Number(parts[2]);
     const customerId = parts[3];
-    const staffId = parts[4];
-    const surveyId = parts[5];
-    const anonymous = parts[6] === "anon";
+    const isLegacyId = parts.length >= 7;
+    const staffId = isLegacyId ? parts[4] : null;
+    const surveyId = isLegacyId ? parts[5] : parts[4];
+    const anonymous = parts[isLegacyId ? 6 : 5] === "anon";
     if (interaction.user.id !== customerId) {
       return await interaction.reply({
         content: "❌ 只有這份調查指定的老闆可以填寫",
         flags: 64,
       });
     }
+    const survey = getPendingManualReviewSurvey(
+      surveyId,
+      customerId,
+      interaction.message,
+      staffId,
+    );
+    if (!survey) {
+      return interaction.reply({
+        content: "❌ 這份滿意度調查已過期，請客服重新發送。",
+        flags: 64,
+      });
+    }
     const modal = new ModalBuilder()
       .setCustomId(
-        `submit_manual_review_${rating}_${customerId}_${staffId}_${surveyId}_${anonymous ? "anon" : "public"}`,
+        `submit_manual_review_${rating}_${customerId}_${surveyId}_${anonymous ? "anon" : "public"}`,
       )
       .setTitle(anonymous ? "填寫匿名滿意度調查" : "填寫滿意度調查");
     const commentInput = new TextInputBuilder()
@@ -10509,12 +11810,12 @@ async function handleButtonInteraction(interaction) {
       dailyCheckinInFlight.add(userId);
       try {
         const today = getTodayDateString();
-        const reward = 10;
+        const reward = DAILY_CHECKIN_REWARD;
         const result = await claimDailyCheckinReward(userId, today, reward);
 
         if (!result.claimed) {
           return await interaction.editReply({
-            content: "❌ 今天已經簽到過了",
+            content: "❌ 今天已在秋奈或深夜簽到過了，每天合計只能簽到一次。",
           });
         }
 
@@ -10553,6 +11854,43 @@ async function handleButtonInteraction(interaction) {
             .setDescription(`目前餘額：${userData.coins} 星雨幣`),
         ],
       });
+    }
+
+    // ===== ATM 抽獎券 =====
+    if (customId === "check_raffle_tickets") {
+      try {
+        const summary = await getLatestRaffleTicketSummary(
+          supabase,
+          interaction.user.id,
+        );
+        const statusLabel =
+          summary.raffle?.status === "drawn"
+            ? "已完成抽獎"
+            : summary.raffle?.status === "closed"
+              ? "資格已結算"
+              : "進行中";
+        return await interaction.editReply({
+          embeds: [
+            new EmbedBuilder()
+              .setColor("#00ffff")
+              .setTitle(`${interaction.user.username}｜抽獎券`)
+              .setThumbnail(interaction.user.displayAvatarURL())
+              .setDescription(
+                `${summary.raffle?.title || "目前沒有抽獎活動"}\n\n` +
+                  `**闆闆消費券**\n${summary.customerTickets.toLocaleString("zh-TW")} 張\n\n` +
+                  `**陪陪接單券**\n${summary.staffTickets.toLocaleString("zh-TW")} 張\n\n` +
+                  `**目前持有總數**\n${summary.totalTickets.toLocaleString("zh-TW")} 張` +
+                  (summary.raffle ? `\n\n狀態：${statusLabel}` : ""),
+              )
+              .setTimestamp(),
+          ],
+        });
+      } catch (error) {
+        console.error("[ATM 抽獎券] 查詢失敗", error);
+        return await interaction.editReply({
+          content: "❌ 抽獎券查詢失敗，請稍後再試。",
+        });
+      }
     }
 
     // ===== ATM 月結繳費：先輸入金額 =====
@@ -10636,8 +11974,8 @@ async function handleButtonInteraction(interaction) {
     // ===== 客服確認月結已繳費 =====
     if (customId.startsWith("monthly_bill_confirm_paid_")) {
       const isStaff =
-        interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
-        interaction.member.roles.cache.has(process.env.STAFF_ROLE);
+        interactionHasPermission(interaction, PermissionFlagsBits.Administrator) ||
+        memberHasRole(interaction.member, process.env.STAFF_ROLE);
       if (!isStaff) {
         return await interaction.editReply({
           content: "❌ 只有客服可以確認月結繳費",
@@ -10763,15 +12101,9 @@ async function handleButtonInteraction(interaction) {
     }
     // ===== ATM 轉帳 =====
     if (customId === "transfer_menu") {
-      const menu = new UserSelectMenuBuilder()
-        .setCustomId("transfer_user_select")
-        .setPlaceholder("選擇要轉帳的玩家");
-
-      const row = new ActionRowBuilder().addComponents(menu);
-
       return await interaction.editReply({
-        content: "💸 請選擇轉帳對象",
-        components: [row],
+        content: "❌ 星雨幣玩家轉帳目前已關閉。",
+        components: [],
       });
     }
     if (customId === "transfer_records") {
@@ -10937,29 +12269,7 @@ async function handleButtonInteraction(interaction) {
           content: "🎒 你的背包目前是空的",
         });
       }
-      function groupItems(list) {
-        const map = new Map();
-        for (const item of list) {
-          const key = [
-            item.item_name || "",
-            item.rarity || "",
-            item.description || "",
-            item.item_type || "",
-          ].join("||");
-          if (!map.has(key)) {
-            const newItem = Object.assign({}, item, {
-              count: 1,
-            });
-            map.set(key, newItem);
-          } else {
-            const old = map.get(key);
-            old.count = Number(old.count || 1) + 1;
-            map.set(key, old);
-          }
-        }
-        return Array.from(map.values());
-      }
-      const groupedItems = groupItems(items);
+      const groupedItems = groupInventoryItems(items);
       const rarityOrder = ["SSR", "SR", "R"];
       let text = "";
       for (const rarity of rarityOrder) {
@@ -10967,11 +12277,7 @@ async function handleButtonInteraction(interaction) {
         if (!filtered.length) continue;
         text += `\n${getRarityEmoji(rarity)} ${rarity}\n`;
         for (const item of filtered) {
-          text += `• ${item.item_name}`;
-          if (item.count > 1) {
-            text += ` × ${item.count}`;
-          }
-          text += `\n`;
+          text += `${formatInventoryItemTitle(item)}\n`;
           if (item.description) {
             text += `└ 📦 ${item.description}\n`;
           }
@@ -10997,11 +12303,7 @@ async function handleButtonInteraction(interaction) {
       if (couponItems.length > 0) {
         text += `\n🎟️ 優惠券\n`;
         for (const item of couponItems) {
-          text += `• ${item.item_name}`;
-          if (item.count > 1) {
-            text += ` × ${item.count}`;
-          }
-          text += `\n`;
+          text += `${formatInventoryItemTitle(item)}\n`;
           if (item.description) {
             text += `└ 📦 ${item.description}\n`;
           }
@@ -11011,11 +12313,7 @@ async function handleButtonInteraction(interaction) {
       if (normalItems.length > 0) {
         text += `\n🛒 一般商品\n`;
         for (const item of normalItems) {
-          text += `• ${item.item_name}`;
-          if (item.count > 1) {
-            text += ` × ${item.count}`;
-          }
-          text += `\n`;
+          text += `${formatInventoryItemTitle(item)}\n`;
           if (item.description) {
             text += `└ 📦 ${item.description}\n`;
           }
@@ -11259,10 +12557,7 @@ async function handleButtonInteraction(interaction) {
           components: [],
         });
       }
-      if (
-        interaction.user.id !== tipData.createdBy &&
-        !isAdminOrStaff(interaction)
-      ) {
+      if (!canAdvanceTipFlow(interaction, tipData)) {
         return await interaction.editReply({
           content: "❌ 只有打賞人、客服或管理員可以確認送出",
         });
@@ -11291,6 +12586,7 @@ async function handleButtonInteraction(interaction) {
         paymentMethod.includes("錢包") ||
         paymentMethod.includes("餘額");
       const isSalaryPayment = paymentMethod.includes("扣薪");
+      const isJkopayPayment = paymentMethod === "街口支付";
       if (isSalaryPayment) {
         let eligibility;
         try {
@@ -11323,6 +12619,29 @@ async function handleButtonInteraction(interaction) {
           content: "✅ 已送出打賞扣薪申請，請等待客服或管理員確認。",
           components: [],
         });
+      }
+      if (isJkopayPayment) {
+        if (!jkopayService.config.available) {
+          return await interaction.editReply({
+            content: "❌ 街口支付目前無法使用，請稍後再試或改選其他付款方式。",
+            components: [],
+          });
+        }
+        try {
+          await startJkopayTipPayment({
+            tipId: tipConfirmId,
+            tipData,
+            channel: interaction.channel,
+          });
+          return await interaction.editReply({
+            content: "✅ 已建立街口付款連結，付款完成後會自動完成打賞。",
+            components: [],
+          });
+        } catch (error) {
+          return await interaction.editReply({
+            content: `❌ 建立街口付款失敗：${error.message || error}`,
+          });
+        }
       }
       const needManualConfirm = !isWalletPayment;
       let deductText = needManualConfirm ? "待客服確認付款" : "未自動扣款";
@@ -11486,9 +12805,9 @@ async function handleButtonInteraction(interaction) {
           components: [],
         });
       }
-      if (interaction.user.id !== tipData.createdBy) {
+      if (!canAdvanceTipFlow(interaction, tipData)) {
         return await interaction.editReply({
-          content: "❌ 只有填寫這筆打賞的人可以取消",
+          content: "❌ 只有打賞人、客服或管理員可以取消",
         });
       }
       pendingTips.delete(tipConfirmId);
@@ -11546,6 +12865,7 @@ async function handleButtonInteraction(interaction) {
               tipperId,
               allocations,
               channelId: interaction.channel.id,
+              countReason: "員工扣薪打賞／冠名付款完成",
             }),
         });
         const tipOrders = payment.result || [];
@@ -11587,11 +12907,7 @@ async function handleButtonInteraction(interaction) {
     if (customId.startsWith("cancel_tip_salary_")) {
       const tipId = customId.replace("cancel_tip_salary_", "");
       const tipData = pendingTips.get(tipId);
-      if (
-        tipData &&
-        interaction.user.id !== tipData.tipperId &&
-        !isAdminOrStaff(interaction)
-      ) {
+      if (tipData && !canAdvanceTipFlow(interaction, tipData)) {
         return await interaction.editReply({ content: "❌ 你無法取消這筆付款。" });
       }
       if (tipData) {
@@ -11612,9 +12928,9 @@ async function handleButtonInteraction(interaction) {
           content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
         });
       }
-      if (interaction.user.id !== tipData.tipperId) {
+      if (!canAdvanceTipFlow(interaction, tipData)) {
         return await interaction.editReply({
-          content: "❌ 只有打賞人可以確認儲值卡付款",
+          content: "❌ 只有打賞人、客服或管理員可以確認儲值卡付款",
         });
       }
       const { tipperId } = tipData;
@@ -11944,12 +13260,10 @@ async function handleButtonInteraction(interaction) {
       const customerId = String(order.customer_id || "").trim();
       const isCustomer = interaction.user.id === customerId;
       const isStaff =
-        interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
-        interaction.member.roles.cache.has(process.env.STAFF_ROLE) ||
+        interactionHasPermission(interaction, PermissionFlagsBits.Administrator) ||
+        memberHasRole(interaction.member, process.env.STAFF_ROLE) ||
         (process.env.CUSTOMER_SERVICE_ROLE_ID &&
-          interaction.member.roles.cache.has(
-            process.env.CUSTOMER_SERVICE_ROLE_ID,
-          ));
+          memberHasRole(interaction.member, process.env.CUSTOMER_SERVICE_ROLE_ID));
       if (!customerId || (!isCustomer && !isStaff)) {
         return await interaction.editReply({
           content: "❌ 只有建立此訂單的客人或客服可以再下一單",
@@ -12016,12 +13330,10 @@ async function handleButtonInteraction(interaction) {
       }
       const isCustomer = interaction.user.id === customerId;
       const isStaff =
-        interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
-        interaction.member.roles.cache.has(process.env.STAFF_ROLE) ||
+        interactionHasPermission(interaction, PermissionFlagsBits.Administrator) ||
+        memberHasRole(interaction.member, process.env.STAFF_ROLE) ||
         (process.env.CUSTOMER_SERVICE_ROLE_ID &&
-          interaction.member.roles.cache.has(
-            process.env.CUSTOMER_SERVICE_ROLE_ID,
-          ));
+          memberHasRole(interaction.member, process.env.CUSTOMER_SERVICE_ROLE_ID));
       if (!isCustomer && !isStaff) {
         return await interaction.editReply({
           content: "❌ 只有建立此訂單的客人或客服可以確認關閉",
@@ -12076,12 +13388,10 @@ async function handleButtonInteraction(interaction) {
       }
       const isCustomer = interaction.user.id === customerId;
       const isStaff =
-        interaction.member.permissions.has(PermissionFlagsBits.Administrator) ||
-        interaction.member.roles.cache.has(process.env.STAFF_ROLE) ||
+        interactionHasPermission(interaction, PermissionFlagsBits.Administrator) ||
+        memberHasRole(interaction.member, process.env.STAFF_ROLE) ||
         (process.env.CUSTOMER_SERVICE_ROLE_ID &&
-          interaction.member.roles.cache.has(
-            process.env.CUSTOMER_SERVICE_ROLE_ID,
-          ));
+          memberHasRole(interaction.member, process.env.CUSTOMER_SERVICE_ROLE_ID));
       if (!isCustomer && !isStaff) {
         return await interaction.editReply({
           content: "❌ 只有建立此訂單的客人或客服可以操作",
@@ -12279,22 +13589,12 @@ async function handleButtonInteraction(interaction) {
         const paidTotal = Number(order.final_price || order.price || 0);
         const salaryBaseTotal = getOrderCommissionBase(order);
         const splitAmount = Math.floor(salaryBaseTotal / playerCount);
-        const { data: workReports } = await supabase
-          .from("qiunai_salary_orders")
-          .select("id")
-          .like("order_id", `WORK-${order.id}-%`)
-          .limit(1);
-        const hasWorkReports = Boolean(workReports?.length);
         // ===== 寫入薪資紀錄：多位陪陪平分 =====
-        if (
-          assignedPlayers.length > 0 &&
-          salaryBaseTotal > 0 &&
-          !hasWorkReports
-        ) {
+        if (assignedPlayers.length > 0 && salaryBaseTotal > 0) {
           const finishedAt = new Date().toISOString();
           for (const playerId of assignedPlayers) {
             const player = await getStaffByDiscordId(playerId);
-            await saveQiunaiSalaryOrder({
+            const salaryRow = await saveQiunaiSalaryOrder({
               orderId: order.id,
               orderNo: order.order_no,
               discordId: playerId,
@@ -12313,6 +13613,9 @@ async function handleButtonInteraction(interaction) {
               bonusAmount: 0,
               finishedAt,
             });
+            if (!salaryRow) {
+              throw new Error(`陪陪 ${playerId} 的薪資報單建立失敗`);
+            }
           }
         }
         await interaction.channel.send({
@@ -12397,13 +13700,9 @@ async function handleButtonInteraction(interaction) {
       await interaction.editReply({
         content: "🗑️ 頻道將在 3 秒後刪除",
       });
-      setTimeout(async () => {
-        try {
-          await interaction.channel.delete();
-        } catch (err) {
-          console.error("[直接刪除頻道失敗]", err);
-        }
-      }, 3000);
+      scheduleChannelDeletion(interaction, 3000, {
+        onError: (error) => console.error("[直接刪除頻道失敗]", error),
+      });
       return;
     }
     // ===== 儲存訂單紀錄 =====
@@ -12415,63 +13714,51 @@ async function handleButtonInteraction(interaction) {
       }
       let tempDirectory = null;
       try {
-        const messages = await interaction.channel.messages.fetch({
-          limit: 100,
-        });
-
-        const sorted = [...messages.values()].sort(
-          (a, b) => a.createdTimestamp - b.createdTimestamp,
-        );
-
-        let html = `
-<html>
-<head>
-<meta charset="UTF-8">
-<style>
-body{
-  background:#2b2d31;
-  color:white;
-  font-family:sans-serif;
-  padding:20px;
-}
-.message{
-  background:#1e1f22;
-  padding:10px;
-  border-radius:10px;
-  margin-bottom:10px;
-}
-</style>
-</head>
-<body>
-`;
-
-        for (const msg of sorted) {
-          const content = escapeHtml(msg.content || "(無內容)");
-
-          html += `
-<div class="message">
-<b>${escapeHtml(msg.author.tag)}</b><br>
-${content || "(無內容)"}
-</div>
-`;
+        const sorted = await fetchAllChannelMessages(interaction.channel);
+        const { data: archivedOrders, error: archivedOrdersError } = await supabase
+          .from("play_orders")
+          .select("*")
+          .eq("channel_id", interaction.channel.id)
+          .order("created_at", { ascending: false })
+          .limit(20);
+        if (archivedOrdersError) {
+          console.error("[訂單存檔] 讀取遊戲類別失敗", archivedOrdersError);
         }
 
-        html += "</body></html>";
+        const isTopup =
+          interaction.channel.name.includes("儲值-") ||
+          interaction.channel.name.includes("購買星雨幣");
+        const archiveName = isTopup
+          ? "儲值記錄"
+          : classifyOrderArchive(
+              (archivedOrders || [])[0] || {},
+              interaction.channel.name,
+            );
+        const html = await buildDiscordArchiveHtml({
+          channelName: interaction.channel.name,
+          guildName: interaction.guild.name,
+          messages: sorted,
+        });
 
         tempDirectory = await fs.mkdtemp(
           path.join(os.tmpdir(), "qiunai-order-log-"),
         );
-        const fileName = `order-${interaction.channel.id}-${Date.now()}.html`;
+        const fileName = `${archiveName}-${interaction.channel.id}-${Date.now()}.html`;
         const filePath = path.join(tempDirectory, fileName);
         await fs.writeFile(filePath, html, "utf8");
 
-        const isTopup = interaction.channel.name.includes("儲值-");
-
-        const logChannelId = isTopup
+        const allGuildChannels = await interaction.guild.channels.fetch();
+        const categoryId =
+          process.env.ORDER_ARCHIVE_CATEGORY_ID || "1513533751504666716";
+        const categorizedLogChannel = [...allGuildChannels.values()].find(
+          (channel) =>
+            channel?.parentId === categoryId && channel.name === archiveName,
+        );
+        const fallbackLogChannelId = isTopup
           ? process.env.TOPUP_LOG_CHANNEL
           : process.env.ORDER_LOG_CHANNEL;
-
-        const logChannel = interaction.guild.channels.cache.get(logChannelId);
+        const logChannel =
+          categorizedLogChannel || allGuildChannels.get(fallbackLogChannelId);
 
         if (!logChannel) {
           return await interaction.editReply({
@@ -12480,7 +13767,7 @@ ${content || "(無內容)"}
         }
 
         await logChannel.send({
-          content: `📁 ${interaction.channel.name} 訂單紀錄`,
+          content: `📁 ${interaction.channel.name} 訂單紀錄｜分類：${archiveName}`,
           files: [filePath],
         });
 
@@ -12488,13 +13775,7 @@ ${content || "(無內容)"}
           content: "✅ 已儲存紀錄\n10 秒後刪除頻道",
         });
 
-        setTimeout(async () => {
-          try {
-            await interaction.channel.delete();
-          } catch (err) {
-            console.error("[刪除頻道失敗]", err);
-          }
-        }, 10000);
+        scheduleChannelDeletion(interaction, 10000);
 
         return;
       } catch (err) {
@@ -12729,8 +14010,16 @@ async function handleStringSelectInteraction(interaction) {
       await handleCrownPackageSelect(interaction);
       return;
     }
+    if (customId.startsWith("tip_staff_remove_select_")) {
+      await handleTipStaffRemoveSelect(interaction);
+      return;
+    }
     if (customId.startsWith("tip_staff_")) {
       await handleTipStaffSelect(interaction);
+      return;
+    }
+    if (customId.startsWith("manual_review_staff_search_result_")) {
+      await handleManualReviewStaffSelect(interaction);
       return;
     }
     if (customId.startsWith("tip_payment_")) {
@@ -12871,7 +14160,7 @@ async function handleStringSelectInteraction(interaction) {
             cancelButton,
           );
           const embed = new EmbedBuilder()
-            .setColor("#ff66cc")
+            .setColor(QIUNAI_WATER_BLUE)
             .setTitle("🛒 訂單建立成功")
             .setDescription(
               "請依照上方選單一步一步完成需求填寫。\n" +
@@ -12991,6 +14280,20 @@ async function handleStringSelectInteraction(interaction) {
           finalCoins,
           `🛒 購買商品：${item.item_name}`,
           false,
+        );
+        await allianceMembership.applyActivity({
+          discordUserId: interaction.user.id,
+          activityType: "spend",
+          amount: Number(item.price || 0),
+          sourceKey: `shop-purchase:${interaction.id}`,
+          note: `商店購買：${item.item_name}`,
+        });
+        await checkAndUpgradeVip(
+          interaction.user.id,
+          "spend",
+          Number(item.price || 0),
+          getGuildId(interaction),
+          interaction.channelId,
         );
         await refreshShop(client);
         return await interaction.editReply({
@@ -13192,6 +14495,12 @@ async function handleStringSelectInteraction(interaction) {
 async function handleUserSelectSubmit(interaction) {
   try {
     if (interaction.customId === "transfer_user_select") {
+      if (!STAR_COIN_PLAYER_TRANSFERS_ENABLED) {
+        return await interaction.reply({
+          content: "❌ 星雨幣玩家轉帳目前已關閉。",
+          flags: 64,
+        });
+      }
       const targetId = interaction.values[0];
 
       // ⚠️ UserSelect 不要 reply
@@ -13268,39 +14577,20 @@ async function handleModalSubmit(interaction) {
           flags: 64,
         });
       }
-      const { data: orderData, error: orderError } = await supabase
-        .from("play_orders")
-        .select("customer_id")
-        .eq("channel_id", interaction.channel.id)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (orderError) {
-        console.error("[打賞讀取訂單客人失敗]", orderError);
-        return interaction.reply({
-          content: "❌ 讀取訂單客人失敗，無法判斷打賞人。",
-          flags: 64,
-        });
-      }
-      let tipperId = orderData?.customer_id;
-      // ===== 優先從頻道 topic 找建立者 =====
-      if (!tipperId && interaction.channel.topic) {
-        const match = interaction.channel.topic.match(/owner:(\d+)/);
-        if (match) {
-          tipperId = match[1];
-        }
-      }
-      // ===== 舊頻道沒有 topic，才從權限覆蓋找 =====
+      let tipperId = tipDraftData?.tipperId;
       if (!tipperId) {
-        const ownerOverwrite =
-          interaction.channel.permissionOverwrites.cache.find((p) => {
-            const isRole = interaction.guild.roles.cache.has(p.id);
-            const isBot = p.id === client.user.id;
-            const isStaff = p.id === process.env.STAFF_ROLE;
-            const canView = p.allow.has(PermissionFlagsBits.ViewChannel);
-            return !isRole && !isBot && !isStaff && canView;
+        try {
+          tipperId = await resolveTipperIdForChannel(
+            interaction.channel,
+            interaction.guild,
+          );
+        } catch (error) {
+          console.error("[打賞讀取訂單客人失敗]", error);
+          return interaction.reply({
+            content: "❌ 讀取訂單客人失敗，無法判斷打賞人。",
+            flags: 64,
           });
-        tipperId = ownerOverwrite?.id;
+        }
       }
       if (!tipperId) {
         return interaction.reply({
@@ -13352,6 +14642,11 @@ async function handleModalSubmit(interaction) {
     }
     if (interaction.customId.startsWith("transfer_modal_")) {
       await interaction.deferReply({ flags: 64 });
+      if (!STAR_COIN_PLAYER_TRANSFERS_ENABLED) {
+        return interaction.editReply({
+          content: "❌ 星雨幣玩家轉帳目前已關閉。",
+        });
+      }
       const targetId = interaction.customId.replace("transfer_modal_", "");
 
       const raw = interaction.fields.getTextInputValue("transfer_amount");
@@ -13419,6 +14714,41 @@ const handlePrefixCommand = createPrefixCommandHandler({
 });
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
+  if (
+    message.guild &&
+    client.user &&
+    isDirectBotMention(message.content, client.user.id)
+  ) {
+    const question = message.content
+      .replace(new RegExp("<@!?" + client.user.id + ">", "g"), "")
+      .trim();
+    if (!question) {
+      await message.reply({
+        content: "請在標註我之後輸入問題；若要查自己的資料，請使用 /公司ai。",
+        allowedMentions: { repliedUser: false },
+      });
+      return;
+    }
+    await message.channel.sendTyping().catch(() => {});
+    try {
+      const answer = await companyAi.answer({
+        userId: message.author.id,
+        question,
+        publicReply: true,
+        conversationKey: `${message.channel.id}:${message.author.id}`,
+      });
+      await message.reply({
+        content: answer,
+        allowedMentions: { repliedUser: false },
+      });
+    } catch (error) {
+      await message.reply({
+        content: "❌ " + (error.message || "公司 AI 暫時無法回覆"),
+        allowedMentions: { repliedUser: false },
+      });
+    }
+    return;
+  }
   if (await handlePrefixCommand(message)) return;
   // ===== 秋奈薪資報告測試 =====
   if (message.content === "!秋奈薪資報告測試") {

@@ -31,11 +31,11 @@ function createAccountingLedger(supabase, options = {}) {
   }
 
   async function recordAccountingLedger(entry = {}) {
-    if (tableMissingLogged) return;
+    if (tableMissingLogged) return { saved: false, skipped: true };
 
     if (!entry.entry_type) {
       console.error("[會計流水] 缺少 entry_type", entry);
-      return;
+      return { saved: false, error: new Error("缺少 entry_type") };
     }
 
     const payload = {
@@ -76,11 +76,13 @@ function createAccountingLedger(supabase, options = {}) {
         console.error(
           "[會計流水] accounting_ledger 尚未建立，請先執行 salary-app/supabase/accounting_ledger.sql"
         );
-        return;
+        return { saved: false, skipped: true, error };
       }
 
       console.error("[會計流水] 寫入失敗", error);
+      return { saved: false, error };
     }
+    return { saved: true };
   }
 
   return {

@@ -13,6 +13,79 @@ const {
 const { getOrderCommissionBase } = require("../utils/salaryCommission");
 const { ORDER_FLOW_TTL_MS } = require("../utils/orderFlow");
 
+const QIUNAI_ONBOARDING_GUIDE_COLOR = "#7CC7FF";
+const QIUNAI_ONBOARDING_GUIDE_FOOTER = "秋奈新人入職導覽｜v1";
+const employmentOnboardingGuideTasks = new Map();
+const GUILD_RESOURCE_CACHE_TTL_MS = 5 * 60 * 1000;
+const QIUNAI_ONBOARDING_LINKS = Object.freeze({
+  introduction:
+    "https://discord.com/channels/1513174069087047731/1514570680354472026",
+  requiredReading:
+    "https://discord.com/channels/1513174069087047731/1524701867790307338",
+  rules:
+    "https://discord.com/channels/1513174069087047731/1513185773699207168",
+  eip:
+    "https://discord.com/channels/1513174069087047731/1515487457137791027",
+});
+
+function buildEmploymentOnboardingGuideEmbed() {
+  return new EmbedBuilder()
+    .setColor(QIUNAI_ONBOARDING_GUIDE_COLOR)
+    .setTitle("🩵 秋奈新人入職導覽")
+    .setDescription(
+      `填單區已建立完成，請依序查看以下內容：\n\n` +
+        `1. [陪陪自介卡-繳交區](${QIUNAI_ONBOARDING_LINKS.introduction})\n` +
+        `   自介卡白單在置頂訊息，請開啟討論串繳交。\n\n` +
+        `2. [入職必看](${QIUNAI_ONBOARDING_LINKS.requiredReading})\n` +
+        `3. [陪玩規則](${QIUNAI_ONBOARDING_LINKS.rules})\n` +
+        `   **以上兩個頻道一定要看！**\n\n` +
+        `4. [EIP系統](${QIUNAI_ONBOARDING_LINKS.eip})\n` +
+        `   薪水網頁請由這裡進入。`,
+    )
+    .setFooter({ text: QIUNAI_ONBOARDING_GUIDE_FOOTER })
+    .setTimestamp();
+}
+
+function isEmploymentOnboardingGuideMessage(message, botUserId = null) {
+  if (botUserId && String(message?.author?.id || "") !== String(botUserId)) {
+    return false;
+  }
+  return (message?.embeds || []).some(
+    (embed) => embed?.footer?.text === QIUNAI_ONBOARDING_GUIDE_FOOTER,
+  );
+}
+
+async function ensureEmploymentOnboardingGuide(channel, staffId, botUserId = null) {
+  if (!channel?.messages?.fetch || typeof channel.send !== "function") {
+    throw new Error("填單區不支援新人導覽訊息");
+  }
+  const taskKey = String(channel.id || staffId);
+  const runningTask = employmentOnboardingGuideTasks.get(taskKey);
+  if (runningTask) return runningTask;
+
+  const task = (async () => {
+    const recentMessages = await channel.messages.fetch({ limit: 50 });
+    const existingMessage = recentMessages.find((message) =>
+      isEmploymentOnboardingGuideMessage(message, botUserId),
+    );
+    if (existingMessage) return { message: existingMessage, sent: false };
+
+    const message = await channel.send({
+      content: `<@${staffId}>`,
+      embeds: [buildEmploymentOnboardingGuideEmbed()],
+    });
+    return { message, sent: true };
+  })();
+  employmentOnboardingGuideTasks.set(taskKey, task);
+  try {
+    return await task;
+  } finally {
+    if (employmentOnboardingGuideTasks.get(taskKey) === task) {
+      employmentOnboardingGuideTasks.delete(taskKey);
+    }
+  }
+}
+
 function parseUserIds(value) {
   return [...new Set(String(value || "").match(/\d{17,20}/g) || [])];
 }
@@ -27,6 +100,39 @@ function parseRoleIds(...values) {
       values.flatMap((value) => String(value || "").match(/\d{17,20}/g) || []),
     ),
   ];
+}
+
+function buildSafeReportChannelOverwrites({
+  templateChannel,
+  targetGuild,
+  staffId,
+  botUserId,
+}) {
+  const overwrites = [];
+  const seen = new Set();
+  for (const overwrite of templateChannel?.permissionOverwrites?.cache?.values?.() || []) {
+    const overwriteId = String(overwrite.id || "");
+    const type = Number(overwrite.type);
+    // type 0 是角色：只複製仍存在於本群的角色（含 @everyone）。
+    // type 1 是會員：舊員工或已離群使用者都不複製，只保留 bot 本身。
+    const validRole = type === 0 && Boolean(targetGuild?.roles?.cache?.has?.(overwriteId));
+    const validBot = type === 1 && overwriteId === String(botUserId || "");
+    if ((!validRole && !validBot) || seen.has(`${type}:${overwriteId}`)) continue;
+    seen.add(`${type}:${overwriteId}`);
+    overwrites.push({
+      id: overwriteId,
+      type,
+      allow: overwrite.allow.bitfield,
+      deny: overwrite.deny.bitfield,
+    });
+  }
+  overwrites.push({
+    id: String(staffId),
+    type: 1,
+    allow: PermissionFlagsBits.ViewChannel,
+    deny: 0n,
+  });
+  return overwrites;
 }
 
 function normalizeStaffLookup(value) {
@@ -104,12 +210,7 @@ function matchStaffLookup(records, input) {
   );
 }
 
-function memberHasRole(member, roleId) {
-  if (!member || !roleId) return false;
-  if (member.roles?.cache?.has) return member.roles.cache.has(roleId);
-  if (Array.isArray(member.roles)) return member.roles.includes(roleId);
-  return false;
-}
+const { memberHasRole, interactionHasPermission } = require("../utils/interactionPermissions");
 
 function isStaffInteraction(interaction, ...configuredRoleIds) {
   const roleIds = parseRoleIds(
@@ -122,8 +223,7 @@ function isStaffInteraction(interaction, ...configuredRoleIds) {
   );
   return (
     interaction.guild?.ownerId === interaction.user.id ||
-    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
-    interaction.member?.permissions?.has?.(PermissionFlagsBits.Administrator) ||
+    interactionHasPermission(interaction, PermissionFlagsBits.Administrator) ||
     roleIds.some((roleId) => memberHasRole(interaction.member, roleId))
   );
 }
@@ -263,6 +363,29 @@ function canCorrectFirstSegmentStart(meta) {
   );
 }
 
+const EDITABLE_WORK_REPORT_STATUSES = ["work_draft", "工時待填"];
+const PENDING_REVIEW_WORK_REPORT_STATUSES = ["work_pending", "工時待審核"];
+
+function parseWorkReportMeta(report) {
+  try {
+    return JSON.parse(report?.note || report?.admin_note || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function canEnterWorkReportTime(report, { isEnd = false } = {}) {
+  if (!report) return false;
+  if (EDITABLE_WORK_REPORT_STATUSES.includes(report.status)) return true;
+  // 第一個時間已儲存時，即使 EIP 同步提早把狀態推到待審核，
+  // 仍須允許原陪陪補完同一段的結束時間。
+  return Boolean(
+    isEnd &&
+      PENDING_REVIEW_WORK_REPORT_STATUSES.includes(report.status) &&
+      parseWorkReportMeta(report).pendingSegmentStart,
+  );
+}
+
 function parseDurationMinutes(value) {
   const text = String(value || "")
     .trim()
@@ -353,19 +476,71 @@ function createWorkReportSystem({
   staffTable,
   staffRoleId,
   customerServiceRoleId,
+  staffGuildId = null,
   salaryTable,
   finalizeBotWorkReport,
 }) {
   const pendingManualReports = new Map();
+  const staffReportChannelTasks = new Map();
+  let guildResourceFetchTask = null;
+  let guildResourcesFetchedAt = 0;
   let crownReminderTimer = null;
 
-  async function ensureStaffReportChannel(staff) {
+  async function getStaffGuildWithCachedResources() {
+    const targetGuildId = String(staffGuildId || guildId || "").trim();
+    const guild =
+      client.guilds.cache.get(targetGuildId) ||
+      (await client.guilds.fetch(targetGuildId));
+    if (Date.now() - guildResourcesFetchedAt < GUILD_RESOURCE_CACHE_TTL_MS) {
+      return guild;
+    }
+    if (!guildResourceFetchTask) {
+      guildResourceFetchTask = Promise.all([
+        guild.channels.fetch(),
+        guild.roles.fetch(),
+      ])
+        .then(() => {
+          guildResourcesFetchedAt = Date.now();
+          return guild;
+        })
+        .finally(() => {
+          guildResourceFetchTask = null;
+        });
+    }
+    return guildResourceFetchTask;
+  }
+
+  async function ensureStaffReportChannel(staff, options = {}) {
     const staffId = String(staff?.discord_id || "").trim();
     if (!staffId) throw new Error("員工資料缺少 Discord ID");
 
-    for (const guild of client.guilds.cache.values()) {
-      await guild.channels.fetch().catch(() => null);
+    // 入群事件與背景補掃可能同時發現同一位新人。依員工排隊，而不是
+    // 共用一個會略過工作的鎖，確保只建立一個頻道且需要導覽的呼叫仍會執行。
+    const previousTask = staffReportChannelTasks.get(staffId);
+    const task = (previousTask
+      ? previousTask.catch(() => null)
+      : Promise.resolve()
+    ).then(() => ensureStaffReportChannelUnlocked(staff, options));
+    staffReportChannelTasks.set(staffId, task);
+    try {
+      return await task;
+    } finally {
+      if (staffReportChannelTasks.get(staffId) === task) {
+        staffReportChannelTasks.delete(staffId);
+      }
     }
+  }
+
+  async function ensureStaffReportChannelUnlocked(
+    staff,
+    { sendOnboardingGuide = false } = {},
+  ) {
+    const staffId = String(staff?.discord_id || "").trim();
+    if (!staffId) throw new Error("員工資料缺少 Discord ID");
+
+    // 只抓秋奈員工群，且五分鐘內共用一次 fetch；不能為每位員工掃 bot
+    // 所在的所有群組，否則啟動回補會塞住 Discord REST 佇列。
+    const targetGuild = await getStaffGuildWithCachedResources();
     const staffTokens = [
       staff.display_name,
       staff.discord_name,
@@ -374,16 +549,22 @@ function createWorkReportSystem({
     ]
       .map(reportChannelToken)
       .filter(Boolean);
-    const namedMatches = client.channels.cache.filter(
+    let channel = targetGuild.channels.cache.get(
+      parseChannelId(staff.report_channel_id || staff.salary_channel_id),
+    );
+    if (channel?.type !== ChannelType.GuildText || channel.guildId !== targetGuild.id) channel = null;
+    const namedMatches = targetGuild.channels.cache.filter(
       (channel) =>
         channel.type === ChannelType.GuildText &&
         String(channel.name || "").startsWith("填單專區-") &&
         staffTokens.includes(reportChannelToken(channel.name)),
     );
-    let channel = namedMatches.find(
-      (candidate) => candidate.permissionOverwrites.cache.has(staffId),
-    );
-    if (!channel && namedMatches.size === 1) channel = namedMatches.first();
+    if (!channel) {
+      channel = namedMatches.find(
+        (candidate) => candidate.permissionOverwrites.cache.has(staffId),
+      );
+      if (!channel && namedMatches.size === 1) channel = namedMatches.first();
+    }
 
     if (!channel) {
       let staffQuery = supabase.from(staffTable).select("*");
@@ -393,19 +574,13 @@ function createWorkReportSystem({
       const knownChannels = (staffRows || [])
         .map((row) => ({
           row,
-          channel: client.channels.cache.get(
+          channel: targetGuild.channels.cache.get(
             parseChannelId(row.report_channel_id || row.salary_channel_id),
           ),
         }))
         .filter(({ channel: item }) => item?.type === ChannelType.GuildText);
       const genderText = String(staff.gender || "");
       let genderKey = genderText.includes("女") ? "女陪" : genderText.includes("男") ? "男陪" : "";
-      const employeeGuild = knownChannels.reduce((counts, item) => {
-        counts.set(item.channel.guild, (counts.get(item.channel.guild) || 0) + 1);
-        return counts;
-      }, new Map());
-      const targetGuild = [...employeeGuild.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
-      if (!targetGuild) throw new Error(`無法判斷陪陪 <@${staffId}> 的員工群`);
       if (!genderKey) {
         const member = await targetGuild.members.fetch(staffId).catch(() => null);
         const roleNames = member?.roles.cache.map((role) => role.name).join(" ") || "";
@@ -429,19 +604,11 @@ function createWorkReportSystem({
         ({ channel: item }) => item.parentId === category.id,
       );
       if (!template) throw new Error(`找不到填單區權限範本：${category.name}`);
-      const permissionOverwrites = template.channel.permissionOverwrites.cache
-        .filter((overwrite) => overwrite.id !== String(template.row.discord_id || ""))
-        .map((overwrite) => ({
-          id: overwrite.id,
-          type: overwrite.type,
-          allow: overwrite.allow.bitfield,
-          deny: overwrite.deny.bitfield,
-        }));
-      permissionOverwrites.push({
-        id: staffId,
-        type: 1,
-        allow: PermissionFlagsBits.ViewChannel,
-        deny: 0n,
+      const permissionOverwrites = buildSafeReportChannelOverwrites({
+        templateChannel: template.channel,
+        targetGuild,
+        staffId,
+        botUserId: client.user?.id,
       });
       channel = await targetGuild.channels.create({
         name: getStaffReportChannelName(staff),
@@ -458,6 +625,17 @@ function createWorkReportSystem({
         { ViewChannel: true },
         { reason: `自動補上 ${staffId} 的填單區權限` },
       );
+    }
+
+    if (sendOnboardingGuide) {
+      const guide = await ensureEmploymentOnboardingGuide(
+        channel,
+        staffId,
+        client.user?.id,
+      );
+      if (guide.sent) {
+        console.log(`[入職填單區] ${staffId} 已發送新人導覽 ${guide.message.id}`);
+      }
     }
 
     const updatePayload =
@@ -2103,20 +2281,9 @@ function createWorkReportSystem({
         isStart ? "work_report_start_" : "work_report_end_",
         "",
       );
-      const { data: report } = await supabase
-        .from(salaryTable)
-        .select("*")
-        .eq("id", reportId)
-        .maybeSingle();
-      if (
-        !report ||
-        report.discord_id !== interaction.user.id ||
-        !["work_draft", "工時待填"].includes(report.status)
-      )
-        return interaction.reply({
-          content: "這筆申報無法填寫，可能已送出或不是你的訂單。",
-          flags: 64,
-        });
+      // Discord 要求按鈕互動在短時間內收到回應。不要在 showModal 前等待
+      // Supabase，否則偶發的查詢延遲會讓使用者看到「互動失敗」。報單存在性
+      // 與狀態改在送出 Modal 時驗證，仍不會寫入失效或已完成的報單。
       const modal = new ModalBuilder()
         .setCustomId(
           `submit_work_report_${isStart ? "start" : "end"}_${reportId}`,
@@ -2160,15 +2327,24 @@ function createWorkReportSystem({
             "時間格式不正確，請使用 YYYY-MM-DD HH:mm，例如 2026-07-19 20:30；也可只輸入 HH:mm。",
           flags: 64,
         });
-      const { data: current } = await supabase
+      const { data: current, error: readError } = await supabase
         .from(salaryTable)
         .select("*")
         .eq("id", reportId)
         .maybeSingle();
-      let meta = {};
-      try {
-        meta = JSON.parse(current?.note || current?.admin_note || "{}");
-      } catch {}
+      if (readError || !current) {
+        return interaction.reply({
+          content: "讀取工時申報失敗，請稍後再試。",
+          flags: 64,
+        });
+      }
+      if (!canEnterWorkReportTime(current, { isEnd: !isStart })) {
+        return interaction.reply({
+          content: "這筆工時申報已送出或目前不能再填寫時間。",
+          flags: 64,
+        });
+      }
+      const meta = parseWorkReportMeta(current);
       const segments = Array.isArray(meta.segments) ? [...meta.segments] : [];
       const segmentStart = isStart
         ? enteredTime
@@ -2239,8 +2415,7 @@ function createWorkReportSystem({
         .from(salaryTable)
         .update(updatePayload)
         .eq("id", reportId)
-        .eq("discord_id", interaction.user.id)
-        .in("status", ["work_draft", "工時待填"])
+        .eq("status", current.status)
         .select()
         .maybeSingle();
       if (error || !data)
@@ -2324,6 +2499,7 @@ function createWorkReportSystem({
   }
 
   return {
+    ensureStaffReportChannel,
     handleInteraction,
     startCrownReminderScheduler,
     sendForAcceptedOrder,
@@ -2335,10 +2511,16 @@ function createWorkReportSystem({
 }
 
 module.exports = {
+  QIUNAI_ONBOARDING_GUIDE_FOOTER,
   buildReportAmounts,
+  buildSafeReportChannelOverwrites,
+  buildEmploymentOnboardingGuideEmbed,
   canCorrectFirstSegmentStart,
+  canEnterWorkReportTime,
   calculateCrownEndAt,
   createWorkReportSystem,
+  ensureEmploymentOnboardingGuide,
+  isEmploymentOnboardingGuideMessage,
   isStaffInteraction,
   matchStaffLookup,
   normalizeStaffLookup,

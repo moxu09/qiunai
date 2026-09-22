@@ -1,14 +1,11 @@
 const { createHmac, timingSafeEqual } = require("node:crypto");
 
 const DEFAULT_CALLBACK_IPS = [
-  "125.227.158.50",
-  "220.133.77.56",
-  "59.124.107.103",
-  "35.194.172.6",
-  "35.244.159.28",
-  "175.99.130.66",
-  "125.227.158.49",
-  "175.99.130.82",
+  "210.17.19.154",
+  "124.108.142.123",
+  "210.17.19.129",
+  "35.201.143.108",
+  "210.17.103.201",
   "35.187.144.191",
 ];
 
@@ -54,6 +51,24 @@ function buildPlatformOrderId(topupNo) {
   return `QIUNAI-${normalized}`;
 }
 
+function buildServicePlatformOrderId(prefix, kind, entityKey) {
+  const normalizedPrefix = String(prefix || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 12);
+  const kindPrefix = { order: "ORD", extension: "EXT", tip: "TIP" }[kind];
+  const normalizedKey = String(entityKey || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(-36);
+  if (!normalizedPrefix || !kindPrefix || !normalizedKey) {
+    throw new Error("街口服務付款編號格式錯誤");
+  }
+  return `${normalizedPrefix}-${kindPrefix}-${normalizedKey}`;
+}
+
 function normalizeJkopayPlatformOrderId(value) {
   const normalized = String(value || "").trim().toUpperCase();
   if (/^TOP-\d{10,}$/.test(normalized)) {
@@ -68,7 +83,18 @@ function normalizeJkopayPlatformOrderId(value) {
 function normalizeJkopayRefundOrderId(value) {
   const normalized = String(value || "").trim().toUpperCase();
   if (/^WASH-\d{10,}-[A-Z0-9]+$/.test(normalized)) return normalized;
+  if (/^[A-Z0-9]{1,12}-(?:ORD|EXT|TIP)-[A-Z0-9]{1,36}$/.test(normalized)) {
+    return normalized;
+  }
   return normalizeJkopayPlatformOrderId(normalized);
+}
+
+function normalizeJkopayInquiryOrderId(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (/^[A-Z0-9]{1,12}-(?:ORD|EXT|TIP)-[A-Z0-9]{1,36}$/.test(normalized)) {
+    return normalized;
+  }
+  return normalizeJkopayRefundOrderId(normalized);
 }
 
 function buildJkopayRefundPayload(platformOrderId, refundAmount) {
@@ -95,6 +121,8 @@ function getJkopayConfig(env = process.env) {
     publicBaseUrl: String(env.JKOPAY_PUBLIC_BASE_URL || "")
       .trim()
       .replace(/\/$/, ""),
+    organizationCode: String(env.JKOPAY_ORGANIZATION_CODE || "qiunai").trim(),
+    orderPrefix: String(env.JKOPAY_ORDER_PREFIX || "QIUNAI").trim(),
     callbackIps: parseCallbackIps(env.JKOPAY_CALLBACK_IPS),
   };
   config.enabled = Boolean(
@@ -105,6 +133,7 @@ function getJkopayConfig(env = process.env) {
       config.inquiryUrl &&
       config.publicBaseUrl,
   );
+  config.available = config.enabled && String(env.JKOPAY_ACCEPT_PAYMENTS || "").trim().toLowerCase() === "true";
   return config;
 }
 
@@ -168,7 +197,15 @@ async function callJkopay({ url, method, payload, config }) {
   return data;
 }
 
-function createJkopayService({ supabase, client, onPaid, env = process.env }) {
+function createJkopayService({
+  supabase,
+  client,
+  onPaid,
+  onServicePaid,
+  onValidateServiceRefund,
+  onServiceRefunded,
+  env = process.env,
+}) {
   const config = getJkopayConfig(env);
 
   async function createTopupPayment({ userId, amount, topupNo, channelId }) {
@@ -184,7 +221,6 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
       currency: "TWD",
       total_price: amount,
       final_price: amount,
-      unredeem: 0,
       result_url: resultUrl,
       result_display_url: displayUrl,
       payment_type: "onetime",
@@ -270,10 +306,120 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
   }
 
   async function attachPaymentMessage(platformOrderId, messageId) {
-    await supabase
+    const { data } = await supabase
       .from("jkopay_topup_orders")
       .update({ payment_message_id: String(messageId), updated_at: new Date().toISOString() })
       .eq("platform_order_id", platformOrderId);
+    if (!data) {
+      await supabase
+        .from("jkopay_service_payments")
+        .update({ payment_message_id: String(messageId), updated_at: new Date().toISOString() })
+        .eq("platform_order_id", platformOrderId);
+    }
+  }
+
+  async function createServicePayment({
+    kind,
+    entityKey,
+    userId,
+    amount,
+    channelId,
+    description,
+    metadata = {},
+  }) {
+    if (!config.enabled) throw new Error("街口支付尚未完成環境設定");
+    if (!["order", "extension", "tip"].includes(kind)) {
+      throw new Error("街口付款類型錯誤");
+    }
+    if (!Number.isInteger(amount) || amount <= 0) throw new Error("街口付款金額錯誤");
+    const platformOrderId = buildServicePlatformOrderId(
+      config.orderPrefix,
+      kind,
+      entityKey,
+    );
+    const { data: existingOrder, error: existingError } = await supabase
+      .from("jkopay_service_payments")
+      .select("*")
+      .eq("organization_code", config.organizationCode)
+      .eq("payment_kind", kind)
+      .eq("entity_key", String(entityKey))
+      .maybeSingle();
+    if (existingError) throw new Error(existingError.message || "無法查詢街口付款紀錄");
+    if (existingOrder) {
+      if (String(existingOrder.user_id) !== String(userId) || Number(existingOrder.amount) !== amount) {
+        throw new Error("街口付款編號已被其他付款資料使用");
+      }
+      if (existingOrder.status === "paid") throw new Error("這筆街口付款已完成");
+      if (existingOrder.payment_url) {
+        return {
+          paymentUrl: existingOrder.payment_url,
+          qrImg: existingOrder.qr_img || null,
+          qrTimeout: existingOrder.qr_timeout || null,
+          platformOrderId,
+        };
+      }
+    }
+
+    if (!existingOrder) {
+      const { error: insertError } = await supabase.from("jkopay_service_payments").insert({
+        organization_code: config.organizationCode,
+        payment_kind: kind,
+        entity_key: String(entityKey),
+        platform_order_id: platformOrderId,
+        user_id: String(userId),
+        amount,
+        channel_id: String(channelId || ""),
+        description: String(description || "服務付款").slice(0, 200),
+        metadata,
+      });
+      if (insertError) throw new Error(insertError.message || "無法建立街口付款紀錄");
+    }
+
+    const resultUrl = `${config.publicBaseUrl}/payments/jkopay/service-result`;
+    const displayUrl = `${config.publicBaseUrl}/payments/jkopay/service-display?order=${encodeURIComponent(platformOrderId)}`;
+    const payloadObject = {
+      platform_order_id: platformOrderId,
+      store_id: config.storeId,
+      currency: "TWD",
+      total_price: amount,
+      final_price: amount,
+      result_url: resultUrl,
+      result_display_url: displayUrl,
+      payment_type: "onetime",
+      escrow: false,
+      products: [{
+        name: String(description || "服務付款").slice(0, 80),
+        unit_count: 1,
+        unit_price: amount,
+        unit_final_price: amount,
+      }],
+    };
+    const data = await callJkopay({
+      url: config.entryUrl,
+      method: "POST",
+      payload: JSON.stringify(payloadObject),
+      config,
+    });
+    if (data?.result !== "000" || !data?.result_object?.payment_url) {
+      throw new Error(data?.message || `街口建立付款失敗（${data?.result || "unknown"}）`);
+    }
+    const payment = {
+      paymentUrl: data.result_object.payment_url,
+      qrImg: data.result_object.qr_img || null,
+      qrTimeout: data.result_object.qr_timeout || null,
+      platformOrderId,
+    };
+    const { error: updateError } = await supabase
+      .from("jkopay_service_payments")
+      .update({
+        payment_url: payment.paymentUrl,
+        qr_img: payment.qrImg,
+        qr_timeout: payment.qrTimeout,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("platform_order_id", platformOrderId);
+    if (updateError) throw new Error(updateError.message || "無法保存街口付款連結");
+    return payment;
   }
 
   async function inquire(platformOrderId) {
@@ -309,7 +455,7 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
 
   async function inquirePayment(platformOrderId) {
     if (!config.enabled) throw new Error("街口查單尚未完成環境設定");
-    const normalizedOrderId = normalizeJkopayRefundOrderId(platformOrderId);
+    const normalizedOrderId = normalizeJkopayInquiryOrderId(platformOrderId);
     const transaction = await inquire(normalizedOrderId);
     if (!transaction) throw new Error("街口回傳結果中找不到這筆訂單");
     return { platformOrderId: normalizedOrderId, transaction };
@@ -531,10 +677,163 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
     };
   }
 
+  async function refundServicePayment({ platformOrderId, requestedBy }) {
+    if (!config.enabled || !config.refundUrl) {
+      throw new Error("街口退款尚未完成環境設定");
+    }
+    if (
+      typeof onValidateServiceRefund !== "function" ||
+      typeof onServiceRefunded !== "function"
+    ) {
+      throw new Error("街口服務退款尚未完成帳務回沖設定");
+    }
+    const normalizedOrderId = normalizeJkopayRefundOrderId(platformOrderId);
+    if (!/^[A-Z0-9]{1,12}-(?:ORD|EXT|TIP)-[A-Z0-9]{1,36}$/.test(normalizedOrderId)) {
+      throw new Error("街口服務訂單編號格式錯誤");
+    }
+
+    let { data: payment, error: paymentError } = await supabase
+      .from("jkopay_service_payments")
+      .select("*")
+      .eq("platform_order_id", normalizedOrderId)
+      .maybeSingle();
+    if (paymentError) throw new Error(paymentError.message || "無法查詢街口服務付款紀錄");
+    if (!payment) throw new Error("找不到街口服務付款訂單");
+    if (payment.status === "refunded") {
+      return {
+        kind: "service",
+        serviceKind: payment.payment_kind,
+        alreadyProcessed: true,
+        amount: Number(payment.amount),
+        order: payment,
+        refundResult: payment.raw_result?.refund?.response || null,
+      };
+    }
+    if (payment.status === "refund_reversal_pending") {
+      await onServiceRefunded({
+        payment,
+        refundResult: payment.raw_result?.refund?.response || null,
+        requestedBy,
+      });
+      const { data: completed, error: completeError } = await supabase
+        .from("jkopay_service_payments")
+        .update({ status: "refunded", updated_at: new Date().toISOString() })
+        .eq("id", payment.id)
+        .eq("status", "refund_reversal_pending")
+        .select("*")
+        .maybeSingle();
+      if (completeError || !completed) {
+        throw new Error(completeError?.message || "街口退款已成功，但本地帳務完成標記失敗");
+      }
+      return {
+        kind: "service",
+        serviceKind: completed.payment_kind,
+        alreadyProcessed: false,
+        amount: Number(completed.amount),
+        order: completed,
+        refundResult: completed.raw_result?.refund?.response || null,
+      };
+    }
+    if (payment.status === "refunding") {
+      throw new Error("此訂單的退款結果仍在確認中，請先使用街口查詢，勿重複退款");
+    }
+    if (payment.status !== "paid") throw new Error("只有已付款的街口服務訂單可以退款");
+
+    await onValidateServiceRefund({ payment });
+    const refundObject = buildJkopayRefundPayload(normalizedOrderId, payment.amount);
+    const payload = JSON.stringify(refundObject);
+    const preparedAt = new Date().toISOString();
+    const refundState = {
+      ...(payment.raw_result?.refund || {}),
+      request: refundObject,
+      requested_by: String(requestedBy || ""),
+      prepared_at: preparedAt,
+    };
+    const { data: locked, error: lockError } = await supabase
+      .from("jkopay_service_payments")
+      .update({
+        status: "refunding",
+        raw_result: { ...(payment.raw_result || {}), refund: refundState },
+        updated_at: preparedAt,
+      })
+      .eq("id", payment.id)
+      .eq("status", "paid")
+      .select("*")
+      .maybeSingle();
+    if (lockError) throw new Error(lockError.message || "街口服務退款鎖定失敗");
+    if (!locked) throw new Error("此訂單已被其他退款操作處理，請重新查詢");
+    payment = locked;
+
+    let data;
+    try {
+      data = await callJkopay({ url: config.refundUrl, method: "POST", payload, config });
+    } catch (error) {
+      console.error(`[JKOPAY][SERVICE_REFUND][UNCERTAIN] ${normalizedOrderId}｜${error.message || error}`);
+      throw new Error("街口退款結果不明，訂單已鎖定；請先查單或聯繫街口，請勿重複退款");
+    }
+    if (data?.result !== "000") {
+      await supabase
+        .from("jkopay_service_payments")
+        .update({
+          status: "paid",
+          raw_result: {
+            ...(payment.raw_result || {}),
+            refund: { ...refundState, response: data || {}, cancelled_at: new Date().toISOString() },
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", payment.id)
+        .eq("status", "refunding");
+      throw new Error(data?.message || `街口退款失敗（${data?.result || "unknown"}）`);
+    }
+
+    const succeededAt = new Date().toISOString();
+    const { data: pendingReversal, error: pendingError } = await supabase
+      .from("jkopay_service_payments")
+      .update({
+        status: "refund_reversal_pending",
+        raw_result: {
+          ...(payment.raw_result || {}),
+          refund: { ...refundState, response: data, succeeded_at: succeededAt },
+        },
+        updated_at: succeededAt,
+      })
+      .eq("id", payment.id)
+      .eq("status", "refunding")
+      .select("*")
+      .maybeSingle();
+    if (pendingError || !pendingReversal) {
+      throw new Error(pendingError?.message || "街口退款成功，但本地退款狀態保存失敗，請勿重複退款");
+    }
+
+    await onServiceRefunded({ payment: pendingReversal, refundResult: data, requestedBy });
+    const { data: completed, error: completeError } = await supabase
+      .from("jkopay_service_payments")
+      .update({ status: "refunded", updated_at: new Date().toISOString() })
+      .eq("id", payment.id)
+      .eq("status", "refund_reversal_pending")
+      .select("*")
+      .maybeSingle();
+    if (completeError || !completed) {
+      throw new Error(completeError?.message || "街口退款成功，但本地帳務完成標記失敗");
+    }
+    return {
+      kind: "service",
+      serviceKind: completed.payment_kind,
+      alreadyProcessed: false,
+      amount: Number(completed.amount),
+      order: completed,
+      refundResult: data,
+    };
+  }
+
   async function refundPayment({ platformOrderId, requestedBy }) {
     const normalizedOrderId = normalizeJkopayRefundOrderId(platformOrderId);
     if (normalizedOrderId.startsWith("WASH-")) {
       return refundMerchandisePayment({ platformOrderId: normalizedOrderId, requestedBy });
+    }
+    if (/^[A-Z0-9]{1,12}-(?:ORD|EXT|TIP)-/.test(normalizedOrderId)) {
+      return refundServicePayment({ platformOrderId: normalizedOrderId, requestedBy });
     }
     return refundTopupPayment({ platformOrderId: normalizedOrderId, requestedBy });
   }
@@ -599,6 +898,85 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
     sendJson(response, 200, { ok: true });
   }
 
+  async function handleServiceResultCallback(request, response) {
+    const requestIp = getRequestIp(request);
+    if (!isAllowedCallbackIp(requestIp, config.callbackIps)) {
+      console.warn(`[JKOPAY][SERVICE] 拒絕非白名單 callback IP：${requestIp || "unknown"}`);
+      sendJson(response, 403, { ok: false });
+      return;
+    }
+    const body = await readJsonBody(request);
+    const platformOrderId = String(body?.transaction?.platform_order_id || "");
+    const { data: payment, error } = await supabase
+      .from("jkopay_service_payments")
+      .select("*")
+      .eq("organization_code", config.organizationCode)
+      .eq("platform_order_id", platformOrderId)
+      .maybeSingle();
+    if (error || !payment) {
+      console.error("[JKOPAY][SERVICE] callback 找不到付款單", error || platformOrderId);
+      sendJson(response, 404, { ok: false });
+      return;
+    }
+    const transaction = await inquire(platformOrderId);
+    if (!transaction || Number(transaction.status) !== 0) {
+      throw new Error("街口查單結果尚未付款成功");
+    }
+    if (Number(transaction.final_price) !== Number(payment.amount)) {
+      throw new Error("街口查單金額與服務付款單不一致");
+    }
+    if (body.transaction?.tradeNo && !safeEqual(body.transaction.tradeNo, transaction.tradeNo)) {
+      throw new Error("街口 callback 與查單交易序號不一致");
+    }
+    if (payment.status !== "paid") {
+      const staleBefore = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+      let claim = supabase
+        .from("jkopay_service_payments")
+        .update({ status: "processing", updated_at: new Date().toISOString() })
+        .eq("id", payment.id)
+        .eq("status", payment.status);
+      if (payment.status === "processing" && payment.updated_at > staleBefore) {
+        sendJson(response, 200, { ok: true });
+        return;
+      }
+      const { data: claimed, error: claimError } = await claim.select("id").maybeSingle();
+      if (claimError || !claimed) {
+        sendJson(response, 200, { ok: true });
+        return;
+      }
+    }
+    try {
+      await onServicePaid?.({ payment, transaction, alreadyProcessed: payment.status === "paid" });
+    } catch (serviceError) {
+      // 查單已確認街口扣款成功；後續 Discord／帳務步驟失敗不得把
+      // 真實付款退回 pending。後續 callback 會以 paid 狀態再跑可冪等補派。
+      await supabase
+        .from("jkopay_service_payments")
+        .update({
+          status: "paid",
+          trade_no: transaction.tradeNo,
+          trans_time: transaction.trans_time || null,
+          paid_at: payment.paid_at || new Date().toISOString(),
+          raw_result: { ...(payment.raw_result || {}), callback_error: String(serviceError.message || serviceError) },
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", payment.id);
+      throw serviceError;
+    }
+    await supabase
+      .from("jkopay_service_payments")
+      .update({
+        status: "paid",
+        trade_no: transaction.tradeNo,
+        trans_time: transaction.trans_time || null,
+        raw_result: transaction,
+        paid_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", payment.id);
+    sendJson(response, 200, { ok: true });
+  }
+
   async function handleDisplay(request, response, url) {
     const platformOrderId = String(url.searchParams.get("order") || "");
     const { data: order } = await supabase
@@ -616,6 +994,22 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
       200,
       `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}｜秋奈電競</title><style>body{margin:0;background:#111827;color:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;min-height:100vh}.card{max-width:520px;margin:24px;padding:36px;border-radius:20px;background:#1f2937;text-align:center;box-shadow:0 20px 50px #0006}h1{color:${paid ? "#34d399" : "#fbbf24"}}p{line-height:1.8;color:#d1d5db}.no{font-family:monospace;color:#93c5fd}</style></head><body><main class="card"><h1>${title}</h1><p>${message}</p><p class="no">${order?.topup_no || ""}</p></main></body></html>`,
     );
+  }
+
+  async function handleServiceDisplay(request, response, url) {
+    const platformOrderId = String(url.searchParams.get("order") || "");
+    const { data: payment } = await supabase
+      .from("jkopay_service_payments")
+      .select("description,amount,status")
+      .eq("organization_code", config.organizationCode)
+      .eq("platform_order_id", platformOrderId)
+      .maybeSingle();
+    const paid = payment?.status === "paid";
+    const title = paid ? "付款成功" : "付款結果確認中";
+    const message = paid
+      ? `已完成 NT$${Number(payment.amount).toLocaleString("zh-TW")} 付款，可回到 Discord 查看。`
+      : "系統正在向街口確認付款結果，請回到 Discord 稍候通知。";
+    sendHtml(response, 200, `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{margin:0;background:#111827;color:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;min-height:100vh}.card{max-width:520px;margin:24px;padding:36px;border-radius:20px;background:#1f2937;text-align:center;box-shadow:0 20px 50px #0006}h1{color:${paid ? "#34d399" : "#fbbf24"}}p{line-height:1.8;color:#d1d5db}.no{color:#93c5fd}</style></head><body><main class="card"><h1>${title}</h1><p>${message}</p><p class="no">${payment?.description || ""}</p></main></body></html>`);
   }
 
   function authorizeGateway(request) {
@@ -637,15 +1031,19 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
       const order = JSON.parse(payload);
       const resultOrigin = new URL(String(order.result_url || "")).origin;
       const displayOrigin = new URL(String(order.result_display_url || "")).origin;
+      const deepNightService = pathname.includes("/service-");
       if (
-        !String(order.platform_order_id || "").startsWith("WASH-") ||
+        !(deepNightService
+          ? String(order.platform_order_id || "").startsWith("DEEPNIGHT-")
+          : String(order.platform_order_id || "").startsWith("WASH-")) ||
         order.store_id !== config.storeId ||
-        resultOrigin !== "https://www.wearestilllhere.com" ||
-        displayOrigin !== "https://www.wearestilllhere.com" ||
+        (!deepNightService && resultOrigin !== "https://www.wearestilllhere.com") ||
+        (!deepNightService && displayOrigin !== "https://www.wearestilllhere.com") ||
+        (deepNightService && (resultOrigin !== displayOrigin || !resultOrigin.endsWith(".up.railway.app"))) ||
         !Number.isInteger(order.total_price) ||
         order.total_price <= 0 ||
         order.total_price !== order.final_price ||
-        order.unredeem !== 0
+        (Object.hasOwn(order, "unredeem") && order.unredeem !== 0)
       ) {
         sendJson(response, 400, { result: "400", message: "invalid_order" });
         return;
@@ -662,7 +1060,10 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
 
     const body = await readJsonBody(request);
     const platformOrderId = String(body.platform_order_id || "");
-    if (!/^WASH-[A-Z0-9-]+$/.test(platformOrderId)) {
+    const validOrderId = pathname.includes("/service-")
+      ? /^DEEPNIGHT-(ORD|EXT|TIP)-[A-Z0-9]+$/.test(platformOrderId)
+      : /^WASH-[A-Z0-9-]+$/.test(platformOrderId);
+    if (!validOrderId) {
       sendJson(response, 400, { result: "400", message: "invalid_order_id" });
       return;
     }
@@ -707,8 +1108,21 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
       }
       return true;
     }
+    if (url.pathname === "/payments/jkopay/service-result" && request.method === "POST") {
+      try {
+        await handleServiceResultCallback(request, response);
+      } catch (error) {
+        console.error("[JKOPAY][SERVICE] callback 處理失敗", error);
+        sendJson(response, 500, { ok: false });
+      }
+      return true;
+    }
     if (url.pathname === "/payments/jkopay/display" && request.method === "GET") {
       await handleDisplay(request, response, url);
+      return true;
+    }
+    if (url.pathname === "/payments/jkopay/service-display" && request.method === "GET") {
+      await handleServiceDisplay(request, response, url);
       return true;
     }
     if (
@@ -717,6 +1131,9 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
         "/payments/jkopay/gateway/entry",
         "/payments/jkopay/gateway/inquiry",
         "/payments/jkopay/gateway/refund",
+        "/payments/jkopay/gateway/service-entry",
+        "/payments/jkopay/gateway/service-inquiry",
+        "/payments/jkopay/gateway/service-refund",
       ].includes(url.pathname)
     ) {
       await handleMerchandiseGateway(request, response, url.pathname);
@@ -729,11 +1146,13 @@ function createJkopayService({ supabase, client, onPaid, env = process.env }) {
     attachPaymentMessage,
     config,
     createTopupPayment,
+    createServicePayment,
     handleHttpRequest,
     inquire,
     inquirePayment,
     refundTopupPayment,
     refundMerchandisePayment,
+    refundServicePayment,
     refundPayment,
   };
 }
@@ -742,11 +1161,13 @@ module.exports = {
   DEFAULT_CALLBACK_IPS,
   buildJkopayRefundPayload,
   buildPlatformOrderId,
+  buildServicePlatformOrderId,
   createJkopayService,
   getJkopayConfig,
   isAllowedCallbackIp,
   normalizeJkopayPlatformOrderId,
   normalizeJkopayRefundOrderId,
+  normalizeJkopayInquiryOrderId,
   parseCallbackIps,
   signJkopayPayload,
 };
