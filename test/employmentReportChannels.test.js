@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { ChannelType } = require("discord.js");
 const {
   getEmploymentReportChannelGender,
   provisionSignedEmploymentReportChannels,
@@ -11,7 +12,60 @@ const {
   buildSafeReportChannelOverwrites,
   buildEmploymentOnboardingGuideEmbed,
   ensureEmploymentOnboardingGuide,
+  findExistingStaffReportChannel,
 } = require("../events/workReportSystem");
+
+function reportChannel(id, name, ownerIds, topic = "") {
+  return {
+    id,
+    name,
+    topic,
+    type: ChannelType.GuildText,
+    permissionOverwrites: {
+      cache: new Map(ownerIds.map((ownerId) => [ownerId, { type: 1 }])),
+    },
+  };
+}
+
+test("暱稱改變且資料庫連結失效時，依 Discord ID 找回原填單區", () => {
+  const original = reportChannel("old", "填單專區-貓可可", ["staff-1"]);
+  const channels = new Map([[original.id, original]]);
+  assert.equal(findExistingStaffReportChannel(channels, "staff-1", ["喵可可"]), original);
+});
+
+test("同名填單區不會被綁給沒有本人權限的員工", () => {
+  const channels = new Map([
+    ["other", reportChannel("other", "填單專區-球球", ["staff-2"])],
+  ]);
+  assert.equal(findExistingStaffReportChannel(channels, "staff-1", ["球球"]), null);
+});
+
+test("可存取多個填單區且無法確認本人頻道時，停止自動新建", () => {
+  const channels = new Map([
+    ["a", reportChannel("a", "填單專區-甲", ["staff-1"])],
+    ["b", reportChannel("b", "填單專區-乙", ["staff-1"])],
+  ]);
+  assert.throws(
+    () => findExistingStaffReportChannel(channels, "staff-1", ["改名後"]),
+    /需人工確認/,
+  );
+});
+
+test("新填單區用固定 Discord ID 標記辨識，不受改名及共用權限影響", () => {
+  const own = reportChannel("own", "填單專區-舊名", ["staff-1"], "qiunai-report-owner:staff-1");
+  const shared = reportChannel("shared", "填單專區-同事", ["staff-1"]);
+  const channels = new Map([[own.id, own], [shared.id, shared]]);
+  assert.equal(findExistingStaffReportChannel(channels, "staff-1", []), own);
+});
+
+test("其他員工已綁定的頻道不會因共用權限被誤認為本人的填單區", () => {
+  const shared = reportChannel("shared", "填單專區-同事", ["staff-1", "staff-2"]);
+  const channels = new Map([[shared.id, shared]]);
+  assert.equal(
+    findExistingStaffReportChannel(channels, "staff-1", [], new Set(["shared"])),
+    null,
+  );
+});
 
 test("建立填單區只複製仍存在的角色與 bot，不複製舊員工或失效 overwrite", () => {
   const overwrite = (id, type) => ({

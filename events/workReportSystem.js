@@ -170,6 +170,43 @@ function getStaffReportChannelName(staff) {
   return `填單專區-${shortName || staff?.discord_id || "陪陪"}`.slice(0, 100);
 }
 
+function findExistingStaffReportChannel(
+  channels,
+  staffId,
+  staffTokens = [],
+  reservedChannelIds = new Set(),
+) {
+  const reportChannels = [...channels.values()].filter(
+    (candidate) =>
+      candidate.type === ChannelType.GuildText &&
+      /^填單專區[-－]/u.test(String(candidate.name || "")),
+  );
+  const topicMatches = reportChannels.filter(
+    (candidate) => String(candidate.topic || "").trim() === `qiunai-report-owner:${staffId}`,
+  );
+  if (topicMatches.length > 1) {
+    throw new Error(`陪陪 <@${staffId}> 有多個標記為本人的填單區，需人工確認`);
+  }
+  if (topicMatches.length === 1 && reservedChannelIds.has(topicMatches[0].id)) {
+    throw new Error(`陪陪 <@${staffId}> 的填單區已綁定其他員工，需人工確認`);
+  }
+  if (topicMatches.length === 1) return topicMatches[0];
+
+  const ownedChannels = reportChannels.filter(
+    (candidate) =>
+      !reservedChannelIds.has(candidate.id) &&
+      candidate.permissionOverwrites.cache.get(staffId)?.type === 1,
+  );
+  const namedOwnedChannels = ownedChannels.filter((candidate) =>
+    staffTokens.includes(reportChannelToken(candidate.name)),
+  );
+  if (namedOwnedChannels.length === 1) return namedOwnedChannels[0];
+  if (namedOwnedChannels.length > 1 || ownedChannels.length > 1) {
+    throw new Error(`陪陪 <@${staffId}> 可存取多個填單區，需人工確認，已停止自動新建`);
+  }
+  return ownedChannels[0] || null;
+}
+
 function splitStaffLookupInput(value) {
   return String(value || "")
     .split(/[\n,，、;；]+/)
@@ -549,28 +586,49 @@ function createWorkReportSystem({
     ]
       .map(reportChannelToken)
       .filter(Boolean);
-    let channel = targetGuild.channels.cache.get(
-      parseChannelId(staff.report_channel_id || staff.salary_channel_id),
-    );
+    const linkedChannelId = parseChannelId(staff.report_channel_id || staff.salary_channel_id);
+    let channel = linkedChannelId
+      ? await targetGuild.channels.fetch(linkedChannelId).catch(() => null)
+      : null;
     if (channel?.type !== ChannelType.GuildText || channel.guildId !== targetGuild.id) channel = null;
-    const namedMatches = targetGuild.channels.cache.filter(
-      (channel) =>
-        channel.type === ChannelType.GuildText &&
-        String(channel.name || "").startsWith("填單專區-") &&
-        staffTokens.includes(reportChannelToken(channel.name)),
-    );
+    let staffRows = null;
     if (!channel) {
-      channel = namedMatches.find(
-        (candidate) => candidate.permissionOverwrites.cache.has(staffId),
+      // 連結失效時強制刷新 Discord 清單，避免五分鐘快取或其他程序剛建立
+      // 的頻道還未進入本程序快取，進而重複開設。
+      let staffQuery = supabase.from(staffTable).select("*");
+      if (staffTable === "players") staffQuery = staffQuery.eq("guild_id", guildId);
+      const [freshChannels, staffRead] = await Promise.all([
+        targetGuild.channels.fetch(),
+        staffQuery,
+      ]);
+      if (staffRead.error) throw staffRead.error;
+      staffRows = staffRead.data || [];
+      const latestStaff = staffRows.find(
+        (row) => String(row.discord_id || "") === staffId,
       );
-      if (!channel && namedMatches.size === 1) channel = namedMatches.first();
+      const latestLinkedId = parseChannelId(
+        latestStaff?.report_channel_id || latestStaff?.salary_channel_id,
+      );
+      const latestLinked = latestLinkedId ? freshChannels.get(latestLinkedId) : null;
+      if (latestLinked?.type === ChannelType.GuildText) {
+        channel = latestLinked;
+      } else {
+        const reservedChannelIds = new Set(
+          staffRows
+            .filter((row) => String(row.discord_id || "") !== staffId)
+            .map((row) => parseChannelId(row.report_channel_id || row.salary_channel_id))
+            .filter(Boolean),
+        );
+        channel = findExistingStaffReportChannel(
+          freshChannels,
+          staffId,
+          staffTokens,
+          reservedChannelIds,
+        );
+      }
     }
 
     if (!channel) {
-      let staffQuery = supabase.from(staffTable).select("*");
-      if (staffTable === "players") staffQuery = staffQuery.eq("guild_id", guildId);
-      const { data: staffRows, error } = await staffQuery;
-      if (error) throw error;
       const knownChannels = (staffRows || [])
         .map((row) => ({
           row,
@@ -614,6 +672,7 @@ function createWorkReportSystem({
         name: getStaffReportChannelName(staff),
         type: ChannelType.GuildText,
         parent: category.id,
+        topic: `qiunai-report-owner:${staffId}`,
         permissionOverwrites,
         reason: `自動補建 ${staffId} 的填單區`,
       });
@@ -2514,6 +2573,7 @@ module.exports = {
   QIUNAI_ONBOARDING_GUIDE_FOOTER,
   buildReportAmounts,
   buildSafeReportChannelOverwrites,
+  findExistingStaffReportChannel,
   buildEmploymentOnboardingGuideEmbed,
   canCorrectFirstSegmentStart,
   canEnterWorkReportTime,
