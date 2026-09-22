@@ -197,6 +197,8 @@ const QIUNAI_WATER_BLUE = "#7CC7FF";
 const CURRENT_GUILD_ID = null;
 const QIUNAI_STAFF_GUILD_ID =
   process.env.STAFF_GUILD_ID || "1513174069087047731";
+const QIUNAI_STAFF_FEMALE_ROLE_ID = "1513214106205950112";
+const QIUNAI_STAFF_MALE_ROLE_ID = "1513214182093488148";
 const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 const REVIEW_SHOWCASE_CHANNEL_ID = "1206157728532271185";
@@ -7679,11 +7681,18 @@ const signedEmploymentChannelTask = createNonOverlappingTask(
 const signedEmploymentMemberTasks = new Map();
 
 function getEmploymentGenderFromMember(member) {
-  const roleNames = member?.roles?.cache
-    ?.map((role) => String(role.name || ""))
-    .join(" ");
-  if (roleNames?.includes("女陪")) return "女";
-  if (roleNames?.includes("男陪")) return "男";
+  const roles = member?.roles?.cache;
+  const hasFemaleRole = Boolean(
+    roles?.has?.(QIUNAI_STAFF_FEMALE_ROLE_ID) ||
+      roles?.some?.((role) => String(role.name || "").trim() === "女陪"),
+  );
+  const hasMaleRole = Boolean(
+    roles?.has?.(QIUNAI_STAFF_MALE_ROLE_ID) ||
+      roles?.some?.((role) => String(role.name || "").trim() === "男陪"),
+  );
+  if (hasFemaleRole === hasMaleRole) return null;
+  if (hasFemaleRole) return "女";
+  if (hasMaleRole) return "男";
   return null;
 }
 
@@ -7705,6 +7714,39 @@ async function syncQiunaiStaffGenderFromMember(member) {
   if (updateError) throw updateError;
   console.log(`[員工性別同步] <@${member.id}> 已依 Discord 身分組更新為 ${gender}`);
   return true;
+}
+
+async function syncAllQiunaiStaffGendersFromMembers(members) {
+  const { data: staffRows, error: readError } = await supabase
+    .from(STAFF_TABLE)
+    .select("discord_id, gender");
+  if (readError) throw readError;
+  const staffByDiscordId = new Map(
+    (staffRows || []).map((staff) => [String(staff.discord_id || ""), staff]),
+  );
+  const changes = [...members.values()]
+    .map((member) => ({
+      discordId: String(member.id),
+      gender: getEmploymentGenderFromMember(member),
+    }))
+    .filter(({ discordId, gender }) => {
+      const staff = staffByDiscordId.get(discordId);
+      return staff && gender && String(staff.gender || "") !== gender;
+    });
+
+  let updated = 0;
+  for (const change of changes) {
+    const { error } = await supabase
+      .from(STAFF_TABLE)
+      .update({ gender: change.gender, updated_at: new Date().toISOString() })
+      .eq("discord_id", change.discordId);
+    if (error) throw error;
+    updated += 1;
+  }
+  if (updated) {
+    console.log(`[員工性別同步] 已依秋奈 Discord 身分組校正 ${updated} 位員工`);
+  }
+  return updated;
 }
 
 function retrySignedEmploymentForMember(member) {
@@ -7762,6 +7804,7 @@ async function reconcileExistingSignedEmploymentMembers() {
     }
   }
   if (!members) throw new Error("無法取得秋奈員工群成員名單");
+  const genderUpdated = await syncAllQiunaiStaffGendersFromMembers(members);
   const { data: signings, error } = await supabase
     .from("employment_contract_signings")
     .select("discord_id")
@@ -7790,7 +7833,7 @@ async function reconcileExistingSignedEmploymentMembers() {
     `[入職填單區] 現有員工群已簽署成員 ${signedMembers.length} 位，失敗 ${failed} 位`,
   );
   if (failed) throw new Error(`${failed} 位現有已簽署成員補建失敗`);
-  return { checked: signedMembers.length, failed };
+  return { checked: signedMembers.length, failed, genderUpdated };
 }
 
 client.once(Events.ClientReady, async () => {

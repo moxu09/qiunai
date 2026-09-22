@@ -800,6 +800,13 @@ test("秋奈員工 Discord 性別身分組變更會同步 EIP 官網資料", () 
     source,
     /syncQiunaiStaffGenderFromMember\(member\)[\s\S]*processSignedEmploymentReportChannels/,
   );
+  assert.match(source, /QIUNAI_STAFF_FEMALE_ROLE_ID = "1513214106205950112"/);
+  assert.match(source, /QIUNAI_STAFF_MALE_ROLE_ID = "1513214182093488148"/);
+  assert.match(source, /async function syncAllQiunaiStaffGendersFromMembers/);
+  assert.match(
+    source,
+    /genderUpdated = await syncAllQiunaiStaffGendersFromMembers\(members\)/,
+  );
 });
 
 test("topup numbers use a validated ten-digit sequence", async () => {
