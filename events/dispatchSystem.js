@@ -2631,7 +2631,7 @@ async function confirmSelfServicePlayers(interaction) {
   await interaction.message.edit({ components: [] }).catch(() => null);
   await publishClaimSuccess(waitingPaymentOrder, selectedIds);
   await interaction.channel.send({
-    embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle("💳 付款與自動核帳").setDescription(`應付：NT$${Number(order.final_price).toLocaleString("zh-TW")}\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n可使用 ASD 錢包或街口支付${paymentHelpers.ecpayAvailable ? "、綠界信用卡" : ""}。完成付款後系統會自動查帳、加入陪陪並發送報單。`).setTimestamp()],
+    embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle("💳 付款與自動核帳").setDescription(`應付：NT$${Number(order.final_price).toLocaleString("zh-TW")}\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n可使用 ASD 錢包或街口支付${paymentHelpers.ecpayAvailable ? "、綠界支付" : ""}。完成付款後系統會自動查帳、加入陪陪並發送報單。`).setTimestamp()],
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`self_service_pay_wallet_${order.id}`).setLabel("使用 ASD 付款").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`self_service_pay_jkopay_${order.id}`).setLabel(JKOPAY_METHOD).setEmoji("💳").setStyle(ButtonStyle.Primary),
@@ -3421,7 +3421,7 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
     embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle(`💳 ${label}綠界支付`).setDescription(
       `應付金額：NT$${Number(amount).toLocaleString("zh-TW")}\n` +
       `綠界訂單編號：${payment.platformOrderId}\n\n` +
-      "請按下方按鈕開啟綠界信用卡付款頁；成功後系統會自動核帳，請勿重複付款。",
+      "請按下方按鈕選擇適用的綠界付款方式；實際付款成功後才會自動核帳，請勿重複付款。",
     ).setTimestamp()],
     components: [new ActionRowBuilder().addComponents(new ButtonBuilder()
       .setLabel("使用綠界支付").setEmoji("💳").setStyle(ButtonStyle.Link).setURL(payment.paymentUrl))],
