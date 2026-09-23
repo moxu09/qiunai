@@ -62,13 +62,14 @@ test("派單逾時時已付款的非 ASD 訂單必須保留供人工處理", () 
   assert.equal(requiresManualTimeoutReview({ paid: true, payment_method: "ASD", note: "[MANUAL_DISPATCH]" }), true);
 });
 
-test("人工派單已有候選陪陪但老闆未選人時保留工單頻道", () => {
+test("指令建立的人工派單逾時不論是否湊足陪陪都保留老闆原頻道", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
   const timeout = source.split("async function failSelfServiceDispatch(")[1]
     .split("function scheduleSelfServiceDispatchTimeout(")[0];
-  assert.match(timeout, /const keepManualTicket = isManualDispatchOrder\(order\) && wasWaitingForCustomer/);
-  assert.match(timeout, /工單頻道會保留，請在這裡聯繫客服確認是否重新派單/);
+  assert.match(timeout, /const keepManualTicket = isManualDispatchOrder\(order\);/);
+  assert.match(timeout, /原訂單頻道會保留，請在這裡聯繫客服確認是否重新派單/);
   assert.match(timeout, /if \(orderChannel && !keepManualTicket\) \{\s*setTimeout\(\(\) => orderChannel\.delete/);
+  assert.match(source, /channel_id: pending\.channelId \|\| interaction\.channel\.id/);
 });
 
 test("自助付款六種選項與一般訂單選項分流，先確認才建立付款", () => {
