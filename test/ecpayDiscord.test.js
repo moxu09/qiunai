@@ -5,6 +5,7 @@ const { getPaymentMethodSelection } = require("../utils/paymentMethodEmojis");
 const { ECPAY_ATM_START, isEcpayAtmAvailable } = require("../utils/ecpayAtmSchedule");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
+const { PNG } = require("pngjs");
 
 const order = "QN123456789012345678";
 const payment = { platformOrderId: order, paymentUrl: `https://pay.example/payments/ecpay/service/checkout?order=${order}` };
@@ -47,6 +48,8 @@ test("虛擬 ATM 開放日前，按鈕隱藏且匯款仍走原帳號", () => {
   try {
     const buttons = buildEcpayPaymentRows(payment, 100)[0].components.map(button => button.toJSON());
     assert.equal(buttons.some(button => button.custom_id?.includes("_ATM_")), false);
+    const selfService = buildEcpayPaymentRows(payment, 100, { onlyMethod: "ATM", selfService: true })[0].components.map(button => button.toJSON());
+    assert.deepEqual(selfService.map(button => button.custom_id), [`ecpay_direct_ATM_${order}`]);
     const selected = getPaymentMethodSelection({ customId: "quote_payment_method_123", values: ["匯款"] }, "quote_payment_method_");
     assert.equal(selected.paymentMethod, "匯款");
     assert.equal(selected.requestedMethod, undefined);
@@ -138,10 +141,10 @@ test("自助單超商代碼選定後可直接取號，且只在實際繳款後�
   }
 });
 
-test("超商條碼在 Discord 直接產生三張 PNG", async () => {
+test("超商條碼在 Discord 產生單張白底 PNG；已 defer 的互動不重複 defer", async () => {
   const sent = [];
-  const interaction = { customId: `ecpay_direct_BARCODE_${order}`, user: { id: "123" }, channelId: "456",
-    channel: { async send(payload) { sent.push(payload); } }, async deferReply() {}, async editReply() {} };
+  const interaction = { customId: `ecpay_direct_BARCODE_${order}`, user: { id: "123" }, channelId: "456", deferred: true,
+    channel: { async send(payload) { sent.push(payload); } }, async deferReply() { throw new Error("重複 defer"); }, async editReply() {} };
   const supabase = { from() { return { select() { return this; }, eq() { return this; },
     async maybeSingle() { return { data: { user_id: "123", channel_id: "456", status: "pending", amount: 100, payment_kind: "order" }, error: null }; } }; } };
   const originalFetch = global.fetch;
@@ -152,7 +155,12 @@ test("超商條碼在 Discord 直接產生三張 PNG", async () => {
   try {
     await handleEcpayDirect(interaction, supabase, "https://pay.example");
     assert.equal(sent.length, 1);
-    assert.equal(sent[0].files.length, 3);
+    assert.equal(sent[0].files.length, 1);
+    const image = PNG.sync.read(sent[0].files[0].attachment);
+    assert.equal(image.width > 600, true);
+    assert.equal(image.height > 500, true);
+    assert.deepEqual([...image.data.subarray(0, 4)], [255, 255, 255, 255]);
+    assert.equal(image.data.filter((_, index) => index % 4 === 3).every((alpha) => alpha === 255), true);
     assert.match(sent[0].content, /條碼3/);
   } finally { global.fetch = originalFetch; if (originalSecret === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = originalSecret; }
 });

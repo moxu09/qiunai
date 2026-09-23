@@ -24,6 +24,7 @@
     "dotenv": "^17.4.2",
     "node-cron": "^4.6.0",
     "pdfkit": "^0.19.1",
+    "pngjs": "^7.0.0",
     "sqlite3": "^6.0.1"
   },
   "repository": {

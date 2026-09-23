@@ -3006,7 +3006,7 @@ async function sendSelfServicePaymentSelection(channel, order) {
     if (method === "jkopay") return Boolean(paymentHelpers.jkopayAvailable);
     if (method === "wallet") return true;
     if (!paymentHelpers.ecpayAvailable) return false;
-    if (method === "atm") return isEcpayAtmAvailable() && amount >= 16 && amount <= 49_999;
+    if (method === "atm") return amount >= 16 && amount <= 49_999;
     if (method === "cvs") return amount >= 34 && amount <= 20_000;
     if (method === "barcode") return amount >= 18 && amount <= 20_000;
     return amount >= 6 && amount <= 199_999;
@@ -3026,7 +3026,7 @@ async function sendSelfServicePaymentSelection(channel, order) {
     new ButtonBuilder().setCustomId(`self_service_cancel_order_${order.id}`).setLabel("按錯了，取消訂單").setStyle(ButtonStyle.Danger),
   ));
   return channel.send({
-    content: `<@${order.customer_id}> 請選擇付款方式${!isEcpayAtmAvailable() ? "（綠界虛擬 ATM 依原訂時程於 9/28 開放）" : ""}：`,
+    content: `<@${order.customer_id}> 請選擇付款方式：`,
     embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle("💳 付款與自動核帳")
       .setDescription(`應付：NT$${amount.toLocaleString("zh-TW")}\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n線上付款完成後自動核帳；ATM 與超商取號不等於付款，實際繳費後才會自動核帳。`)],
     components: rows,
@@ -3043,8 +3043,6 @@ async function prepareSelfServicePayment(interaction) {
     return interaction.editReply({ content: "❌ 找不到你的自助訂單。" });
   if (order.paid || order.quote_status !== "waiting_payment")
     return interaction.editReply({ content: "⚠️ 此訂單已進入付款流程或已付款，請使用原付款訊息。" });
-  if (method === "atm" && !isEcpayAtmAvailable())
-    return interaction.editReply({ content: "綠界虛擬 ATM 依原訂時程於 9/28 開放，請改選其他方式。" });
   const gatewayMethod = method === "jkopay" ? "jkopay" : method === "wallet" ? "wallet" : `ecpay_${method}`;
   return interaction.editReply({
     content: `請確認使用「${SELF_SERVICE_PAYMENT_CHOICES[method]}」付款；選錯可按「返回付款方式」，不會扣款或建立付款單。`,
@@ -3057,7 +3055,7 @@ async function prepareSelfServicePayment(interaction) {
 }
 
 async function backToSelfServicePayment(interaction) {
-  await interaction.deferUpdate();
+  if (!interaction.deferred && !interaction.replied) await interaction.deferUpdate();
   const orderId = interaction.customId.replace("self_service_payment_back_", "");
   const { data: order } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
   if (!order || order.customer_id !== interaction.user.id || order.paid || order.quote_status !== "waiting_payment")
@@ -3126,8 +3124,6 @@ async function paySelfServiceOrderByGateway(interaction) {
   if (order.quote_status !== "waiting_payment") {
     return interaction.editReply({ content: "⚠️ 這張訂單已進入付款流程，請使用原本的付款訊息。" });
   }
-  if (selectedMethod === "atm" && !isEcpayAtmAvailable())
-    return interaction.editReply({ content: "綠界虛擬 ATM 依原訂時程於 9/28 開放。" });
   if (!(ecpay ? paymentHelpers.ecpayAvailable : paymentHelpers.jkopayAvailable)) {
     return interaction.editReply({ content: `❌ ${paymentMethod}目前無法使用，請稍後再試。` });
   }
@@ -3939,6 +3935,7 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
     components: buildEcpayPaymentRows(payment, Number(amount), {
       topup: label.includes("儲值"),
       onlyMethod: payment.onlyMethod || null,
+      selfService: label === "自助訂單",
     }),
   });
   await paymentHelpers.attachEcpayPaymentMessage?.(payment.platformOrderId, message.id);
