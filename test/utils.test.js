@@ -74,6 +74,7 @@ const {
   resolveSelfServicePlayerNumbers,
   getPaidOrderPriceAdjustment,
   TOPUP_PRESET_AMOUNTS,
+  buildTopupPaymentMethodRows,
   parseTopupPresetAmount,
   parseJkopayTopupPresetAmount,
 } = require("../events/dispatchSystem");
@@ -110,7 +111,7 @@ test("自助購幣面板沿用自助下單付款方式並支援快速購買", ()
   const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
   const dispatchSource = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
   assert.match(dispatchSource, /1546726352240115712/);
-  assert.match(dispatchSource, /付款方式：街口支付、線上刷卡、匯款帳號、超商條碼、超商代碼/);
+  assert.match(dispatchSource, /付款方式：街口支付、線上刷卡、超商代碼、超商條碼、轉帳匯款/);
   assert.match(dispatchSource, /selfService: jkopayOnly/);
   assert.match(dispatchSource, /pending\.selfService \? \{ flow: "self_service" \}/);
   assert.match(dispatchSource, /jkopay_topup_start/);
@@ -125,7 +126,25 @@ test("一般購幣面板顯示指定的六種付款方式，不改動實際付�
   const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
   const dispatchSource = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
   assert.match(indexSource, /支援付款方式：街口支付 \/ 線上刷卡 \/ 匯款轉帳 \/ 無卡存款 \/ 美金轉帳 \/ 加密貨幣/);
-  assert.match(dispatchSource, /!\["儲值卡", "員工扣薪"\]\.includes\(option\.value\)/);
+  assert.match(dispatchSource, /"加密貨幣", "美金轉帳", "超商條碼", "超商代碼"/);
+});
+
+test("兩種購幣付款選單只調整指定的排列與顏色", () => {
+  const describeRows = (rows) => rows.map((row) => row.components.map((button) => ({
+    label: button.data.label,
+    style: button.data.style,
+  })));
+  assert.deepEqual(describeRows(buildTopupPaymentMethodRows("regular", 250, false)), [
+    [{ label: "街口支付", style: 4 }, { label: "線上刷卡", style: 4 }],
+    [{ label: "轉帳匯款", style: 3 }, { label: "中信無卡", style: 3 }],
+    [{ label: "加密貨幣", style: 1 }, { label: "美金轉帳", style: 1 }],
+    [{ label: "超商條碼", style: 4 }, { label: "超商代碼", style: 4 }],
+  ]);
+  assert.deepEqual(describeRows(buildTopupPaymentMethodRows("self", 250, true)), [
+    [{ label: "街口支付", style: 4 }, { label: "線上刷卡", style: 4 }],
+    [{ label: "超商代碼", style: 3 }, { label: "超商條碼", style: 3 }],
+    [{ label: "轉帳匯款", style: 1 }],
+  ]);
 });
 
 test("自助下單可使用整合後的街口支付並於付款後自動發送報單", () => {

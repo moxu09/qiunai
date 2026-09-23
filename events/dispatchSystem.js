@@ -5433,7 +5433,7 @@ async function sendJkopayTopupPanel() {
     .setDescription(
       `選擇付款方式自助購買星雨幣。\n\n` +
         `匯率：NT$1 = 1 ASD\n` +
-        `付款方式：街口支付、線上刷卡、匯款帳號、超商條碼、超商代碼\n` +
+        `付款方式：街口支付、線上刷卡、超商代碼、超商條碼、轉帳匯款\n` +
         `付款完成後系統會自動查帳並立即將星雨幣存入錢包，不需要上傳付款截圖。\n\n` +
         `可按「建立訂單」輸入其他金額，或直接使用下方快速購買按鈕。`,
     )
@@ -10870,14 +10870,25 @@ function parseTopupPresetAmount(customId) {
 }
 
 function buildTopupPaymentMethodRows(topupId, amount, selfService = false) {
-  const options = getGeneralOrderPaymentOptions({
+  const availableOptions = getGeneralOrderPaymentOptions({
     ecpayAvailable: paymentHelpers.ecpayAvailable,
     amount,
-  }).filter((option) => !["儲值卡", "員工扣薪"].includes(option.value) &&
-    (!selfService || ["街口支付", "線上刷卡", "匯款", "超商條碼", "超商代碼"].includes(option.value)))
-    .map((option) => selfService && option.value === "匯款"
-      ? { ...option, label: "匯款帳號", disabled: !paymentHelpers.ecpayAvailable || !isGeneralEcpayAmountAllowed("ATM", amount) }
-      : option);
+  });
+  const byValue = new Map(availableOptions.map((option) => [option.value, option]));
+  const order = selfService
+    ? ["街口支付", "線上刷卡", "超商代碼", "超商條碼", "匯款"]
+    : ["街口支付", "線上刷卡", "匯款", "無卡", "加密貨幣", "美金轉帳", "超商條碼", "超商代碼"];
+  const options = order.map((value) => {
+    const option = byValue.get(value);
+    if (selfService && value === "匯款") return {
+      ...option, label: "轉帳匯款", style: ButtonStyle.Primary,
+      disabled: !paymentHelpers.ecpayAvailable || !isGeneralEcpayAmountAllowed("ATM", amount),
+    };
+    if (selfService && ["超商代碼", "超商條碼"].includes(value))
+      return { ...option, style: ButtonStyle.Success };
+    if (!selfService && value === "美金轉帳") return { ...option, style: ButtonStyle.Primary };
+    return option;
+  });
   return buildPaymentMethodButtonRows(
     `topup_payment_method_${topupId}`,
     options,
@@ -15839,6 +15850,7 @@ module.exports = {
   parseSelfServiceClaimAction,
   stripSelfServiceClaimNotes,
   TOPUP_PRESET_AMOUNTS,
+  buildTopupPaymentMethodRows,
   parseTopupPresetAmount,
   parseJkopayTopupPresetAmount,
   shouldPreserveDispatchedOrder,
