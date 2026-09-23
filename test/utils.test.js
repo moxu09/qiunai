@@ -118,6 +118,14 @@ test("自助購幣面板沿用自助下單付款方式並支援快速購買", ()
   assert.match(indexSource, /街口自助購幣面板/);
 });
 
+test("一般購幣只顯示指定的六種付款方式，自助購幣維持原有選項", () => {
+  const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
+  const dispatchSource = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+  assert.match(indexSource, /支援付款方式：街口支付 \/ 線上刷卡 \/ 匯款轉帳 \/ 無卡存款 \/ 美金轉帳 \/ 加密貨幣/);
+  assert.match(dispatchSource, /selfService\s*\? \["街口支付", "線上刷卡", "匯款", "超商條碼", "超商代碼"\]/);
+  assert.match(dispatchSource, /: \["街口支付", "線上刷卡", "匯款", "無卡", "美金轉帳", "加密貨幣"\]/);
+});
+
 test("自助下單可使用整合後的街口支付並於付款後自動發送報單", () => {
   const dispatchSource = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
   assert.match(dispatchSource, /self_service_pay_jkopay_/);
