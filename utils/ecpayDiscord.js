@@ -27,7 +27,6 @@ function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = nu
   for (const [method, limit] of Object.entries(METHODS)) {
     if (onlyMethod && onlyMethod !== method) continue;
     if (method === "ATM" && !selfService && !isEcpayAtmAvailable()) continue;
-    if (topup && method !== "ATM") continue;
     if (amount < limit.min || amount > limit.max) continue;
     buttons.push(new ButtonBuilder().setCustomId(`ecpay_direct_${method}_${order}`)
       .setLabel(limit.label).setStyle(ButtonStyle.Primary));
@@ -81,8 +80,7 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
         !(payment.organization_code === "qiunai" && payment.metadata?.flow === "self_service"))
       throw new Error("綠界虛擬 ATM 將於 9 月 28 日開放");
     const limit = METHODS[method];
-    if (payment.amount < limit.min || payment.amount > limit.max ||
-        (payment.payment_kind === "topup" && method !== "ATM"))
+    if (payment.amount < limit.min || payment.amount > limit.max)
       throw new Error("此付款方式不適用這筆金額或訂單");
     const issuedMethod = payment.raw_result?.PaymentType || payment.metadata?.ecpay_direct_method;
     if (issuedMethod && issuedMethod !== method)

@@ -21,7 +21,7 @@ test("綠界刷卡留在站內；ATM 與超商由機器人直接取號", () => {
   assert.deepEqual(buttons.slice(1).map(button => button.custom_id), [
     `ecpay_direct_ATM_${order}`, `ecpay_direct_CVS_${order}`, `ecpay_direct_BARCODE_${order}`,
   ]);
-  assert.equal(buildEcpayPaymentRows(payment, 100, { topup: true })[0].components.length, 2);
+  assert.equal(buildEcpayPaymentRows(payment, 100, { topup: true })[0].components.length, 4);
   } finally { Date.now = originalNow; }
 });
 

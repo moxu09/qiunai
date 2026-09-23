@@ -4015,7 +4015,7 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
   const paymentRows = buildEcpayPaymentRows(payment, Number(amount), {
     topup: label.includes("儲值"),
     onlyMethod: payment.onlyMethod || null,
-    selfService: label === "自助訂單",
+    selfService: label === "自助訂單" || payment.selfService === true,
   });
   const message = await channel.send({
     content: `<@${userId}>`,
@@ -5431,13 +5431,13 @@ async function sendJkopayTopupPanel() {
     .setColor(QIUNAI_WATER_BLUE)
     .setTitle("💳 自助購買星雨幣")
     .setDescription(
-      `使用街口支付自助購買星雨幣。\n\n` +
+      `選擇付款方式自助購買星雨幣。\n\n` +
         `匯率：NT$1 = 1 ASD\n` +
-        `付款方式：僅限街口支付\n` +
+        `付款方式：街口支付、線上刷卡、匯款帳號、超商條碼、超商代碼\n` +
         `付款完成後系統會自動查帳並立即將星雨幣存入錢包，不需要上傳付款截圖。\n\n` +
         `可按「建立訂單」輸入其他金額，或直接使用下方快速購買按鈕。`,
     )
-    .setFooter({ text: "秋奈電競｜街口支付自助購幣" })
+    .setFooter({ text: "秋奈電競｜自助購幣" })
     .setTimestamp();
   const components = [
     new ActionRowBuilder().addComponents(
@@ -5503,9 +5503,6 @@ async function createTopupTicket(interaction, presetAmount = null, { jkopayOnly 
   if (presetAmount !== null && normalizedPreset === null) {
     return interaction.editReply({ content: "❌ 不支援的星雨幣購買金額。" });
   }
-  if (jkopayOnly && (!paymentHelpers.jkopayAvailable || !paymentHelpers.createJkopayTopup)) {
-    return interaction.editReply({ content: "❌ 街口支付目前無法使用，請稍後再試。" });
-  }
 
   const guild = interaction.guild;
   const topupNo = await getNextTopupNumber(supabase);
@@ -5564,14 +5561,25 @@ async function createTopupTicket(interaction, presetAmount = null, { jkopayOnly 
       .setStyle(ButtonStyle.Danger)
   );
 
-  const checkout = normalizedPreset && !jkopayOnly
+  const checkout = normalizedPreset
     ? prepareTopupCheckout({
         userId: interaction.user.id,
         amount: normalizedPreset,
         note: "快捷金額",
         topupNo,
+        selfService: jkopayOnly,
       })
     : null;
+  const checkoutRows = checkout ? [...checkout.rows] : null;
+  if (checkoutRows) {
+    const cancelButton = new ButtonBuilder()
+      .setCustomId("owner_cancel_ticket")
+      .setLabel("取消訂單並關閉頻道")
+      .setEmoji("🗑️")
+      .setStyle(ButtonStyle.Danger);
+    if (checkoutRows.length < 5) checkoutRows.push(new ActionRowBuilder().addComponents(cancelButton));
+    else checkoutRows[checkoutRows.length - 1].addComponents(cancelButton);
+  }
 
   await channel.send({
     content: jkopayOnly ? `<@${interaction.user.id}>` : `<@${interaction.user.id}> <@&${process.env.STAFF_ROLE}>`,
@@ -5582,44 +5590,16 @@ async function createTopupTicket(interaction, presetAmount = null, { jkopayOnly 
         .setDescription(
           `訂單編號：${topupNo}\n` +
             (normalizedPreset
-              ? `購買金額：NT$${normalizedPreset.toLocaleString("zh-TW")}\n${jkopayOnly ? "街口付款連結將直接建立於下方。" : "請直接選擇付款方式。"}\n\n`
+              ? `購買金額：NT$${normalizedPreset.toLocaleString("zh-TW")}\n請直接選擇付款方式。\n\n`
               : `請輸入購買金額後繼續付款。\n\n`) +
-            `${jkopayOnly ? "本訂單僅限街口支付。" : "使用街口支付完成付款後，"}系統會自動核帳並將 ASD 存入錢包。`,
+            `線上付款成功後系統會自動核帳並將 ASD 存入錢包；客服付款方式須待人工核帳。`,
         ),
     ],
-    components: checkout ? [...checkout.rows, new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("owner_cancel_ticket")
-        .setLabel("取消訂單並關閉頻道")
-        .setEmoji("🗑️")
-        .setStyle(ButtonStyle.Danger),
-    )] : jkopayOnly && normalizedPreset
-      ? [new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("owner_cancel_ticket")
-            .setLabel("取消訂單並關閉頻道")
-            .setEmoji("🗑️")
-            .setStyle(ButtonStyle.Danger),
-        )]
-      : [actionRow],
+    components: checkoutRows || [actionRow],
   });
 
-  if (jkopayOnly && normalizedPreset) {
-    try {
-      await createJkopayTopupPaymentMessage({
-        channel,
-        userId: interaction.user.id,
-        amount: normalizedPreset,
-        topupNo,
-      });
-    } catch (error) {
-      await channel.send(`❌ 街口付款單建立失敗：${error.message || error}`);
-      return interaction.editReply({ content: `❌ 已建立訂單頻道，但街口付款連結建立失敗：<#${channel.id}>` });
-    }
-  }
-
   return interaction.editReply({
-    content: `✅ 已建立購買星雨幣訂單：<#${channel.id}>${jkopayOnly && normalizedPreset ? "，街口付款連結已產生。" : ""}`,
+    content: `✅ 已建立購買星雨幣訂單：<#${channel.id}>`,
   });
 }
 async function createTipTicket(interaction, mode = "tip") {
@@ -10881,19 +10861,27 @@ function parseTopupPresetAmount(customId) {
   return TOPUP_PRESET_AMOUNTS.includes(amount) ? amount : null;
 }
 
-function buildTopupPaymentMethodRows(topupId) {
+function buildTopupPaymentMethodRows(topupId, amount, selfService = false) {
+  const options = getGeneralOrderPaymentOptions({
+    ecpayAvailable: paymentHelpers.ecpayAvailable,
+    amount,
+  }).filter((option) => !["儲值卡", "員工扣薪"].includes(option.value) &&
+    (!selfService || ["街口支付", "線上刷卡", "匯款", "超商條碼", "超商代碼"].includes(option.value)))
+    .map((option) => selfService && option.value === "匯款"
+      ? { ...option, label: "匯款帳號", disabled: !paymentHelpers.ecpayAvailable || !isGeneralEcpayAmountAllowed("ATM", amount) }
+      : option);
   return buildPaymentMethodButtonRows(
     `topup_payment_method_${topupId}`,
-    getCanonicalPaymentOptions({ includeEcpay: paymentHelpers.ecpayAvailable }),
+    options,
   );
 }
 
-function prepareTopupCheckout({ userId, amount, note = "無", topupNo }) {
+function prepareTopupCheckout({ userId, amount, note = "無", topupNo, selfService = false }) {
   const topupId = `${userId}_${Date.now()}`;
-  pendingTopups.set(topupId, { userId, amount, note, topupNo });
+  pendingTopups.set(topupId, { userId, amount, note, topupNo, selfService });
   const expiryTimer = setTimeout(() => pendingTopups.delete(topupId), 30 * 60 * 1000);
   expiryTimer.unref?.();
-  return { topupId, rows: buildTopupPaymentMethodRows(topupId) };
+  return { topupId, rows: buildTopupPaymentMethodRows(topupId, amount, selfService) };
 }
 
 async function submitTopupForm(interaction, { jkopayOnly = false } = {}) {
@@ -10925,27 +10913,7 @@ async function submitTopupForm(interaction, { jkopayOnly = false } = {}) {
       })
       .catch(() => {});
   }
-  if (jkopayOnly) {
-    if (!paymentHelpers.jkopayAvailable || !paymentHelpers.createJkopayTopup) {
-      return interaction.editReply({ content: "❌ 街口支付目前無法使用，請稍後再試。", components: [] });
-    }
-    try {
-      await createJkopayTopupPaymentMessage({
-        channel: interaction.channel,
-        userId: interaction.user.id,
-        amount,
-        topupNo,
-      });
-      return interaction.editReply({
-        content: `✅ 已建立街口付款單。\n訂單編號：${topupNo}\n購買金額：NT$${amount.toLocaleString("zh-TW")}\n請使用頻道中的按鈕完成付款。`,
-        components: [],
-      });
-    } catch (error) {
-      return interaction.editReply({ content: `❌ 街口付款單建立失敗：${error.message || error}`, components: [] });
-    }
-  }
-
-  const { rows } = prepareTopupCheckout({ userId: interaction.user.id, amount, note, topupNo });
+  const { rows } = prepareTopupCheckout({ userId: interaction.user.id, amount, note, topupNo, selfService: jkopayOnly });
 
   return interaction.editReply({
     content:
@@ -11020,9 +10988,20 @@ async function handleTopupPaymentMethodSelect(interaction) {
     });
   }
 
-  const method = selection?.paymentMethod;
+  const method = pending.selfService && selection?.paymentMethod === "匯款" &&
+    paymentHelpers.ecpayAvailable ? "綠界支付" : selection?.paymentMethod;
+  const requestedMethod = pending.selfService && selection?.paymentMethod === "匯款" &&
+    paymentHelpers.ecpayAvailable ? "ATM" : selection?.requestedMethod;
 
   const { amount, note, topupNo } = pending;
+
+  if (!method || ["儲值卡", "員工扣薪", "月結"].includes(method) ||
+      (pending.selfService && !["街口支付", "綠界支付"].includes(method))) {
+    return interaction.editReply({ content: "❌ 此購幣訂單不支援這種付款方式，請重新選擇。", components: [] });
+  }
+  if (requestedMethod && !isGeneralEcpayAmountAllowed(requestedMethod, amount)) {
+    return interaction.editReply({ content: "❌ 此金額不適用所選的綠界付款方式。", components: [] });
+  }
 
   if (method === "綠界支付") {
     if (!paymentHelpers.ecpayAvailable || !paymentHelpers.createEcpayServicePayment)
@@ -11032,8 +11011,13 @@ async function handleTopupPaymentMethodSelect(interaction) {
         kind: "topup", entityKey: String(topupNo), userId: interaction.user.id,
         amount, channelId: interaction.channel.id,
         description: `秋奈星雨幣儲值 ${topupNo}`,
-        metadata: { topupNo: String(topupNo), guildId: interaction.guildId || process.env.GUILD_ID, note },
+        metadata: { topupNo: String(topupNo), guildId: interaction.guildId || process.env.GUILD_ID, note, ...(pending.selfService ? { flow: "self_service" } : {}) },
       });
+      if (requestedMethod) {
+        payment.onlyMethod = requestedMethod;
+        if (requestedMethod !== "CARD") payment.preferredMethod = requestedMethod;
+      }
+      if (pending.selfService) payment.selfService = true;
       await sendEcpayPaymentPrompt(interaction.channel, interaction.user.id, amount, payment, "ASD 儲值");
       pendingTopups.delete(topupId);
       return interaction.editReply({

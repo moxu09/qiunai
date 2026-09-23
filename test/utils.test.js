@@ -101,7 +101,7 @@ test("購買星雨幣面板提供快捷金額並直接進入付款流程", () =>
   assert.doesNotMatch(`${indexSource}\n${dispatchSource}`, /儲值星雨幣|建立儲值單/);
 });
 
-test("街口自助購幣面板只走整合後的街口支付並支援快速購買", () => {
+test("自助購幣面板沿用自助下單付款方式並支援快速購買", () => {
   for (const amount of TOPUP_PRESET_AMOUNTS) {
     assert.equal(parseJkopayTopupPresetAmount(`jkopay_topup_amount_${amount}`), amount);
   }
@@ -109,7 +109,9 @@ test("街口自助購幣面板只走整合後的街口支付並支援快速購�
   const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
   const dispatchSource = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
   assert.match(dispatchSource, /1546726352240115712/);
-  assert.match(dispatchSource, /付款方式：僅限街口支付/);
+  assert.match(dispatchSource, /付款方式：街口支付、線上刷卡、匯款帳號、超商條碼、超商代碼/);
+  assert.match(dispatchSource, /selfService: jkopayOnly/);
+  assert.match(dispatchSource, /pending\.selfService \? \{ flow: "self_service" \}/);
   assert.match(dispatchSource, /jkopay_topup_start/);
   assert.match(dispatchSource, /jkopay_topup_amount_/);
   assert.match(dispatchSource, /createJkopayTopupPaymentMessage/);
@@ -473,7 +475,7 @@ test("街口支付在各付款選單只出現一次且加時可使用月結付�
   const menuSlices = [
     ["async function sendPaymentMethodSelect", "async function handleQuotePaymentMethodSelect", "getGeneralOrderPaymentOptions"],
     ["async function sendExtensionPaymentMethodSelect", "async function handleExtensionPaymentMethodSelect", "getCanonicalPaymentOptions"],
-    ["function buildTopupPaymentMethodRows", "function prepareTopupCheckout", "getCanonicalPaymentOptions"],
+    ["function buildTopupPaymentMethodRows", "function prepareTopupCheckout", "getGeneralOrderPaymentOptions"],
     ["async function sendServicePaymentMethodSelect", "function resetServiceCouponSelection", "getGeneralOrderPaymentOptions"],
   ];
   for (const [start, end, optionsBuilder] of menuSlices) {
