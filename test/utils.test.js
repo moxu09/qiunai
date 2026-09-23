@@ -64,7 +64,12 @@ const {
   getSelfServiceDispatchAt,
   getSelfServiceSelectionDeadline,
   extendSelfServiceSelectionDeadline,
+  getSelfServiceThreadName,
+  getDispatchResultThreadName,
   getSelfServiceDispatchRoleIds,
+  getManualDispatchChannelId,
+  getClaimDispatchChannelId,
+  isManualDispatchOrder,
   stripSelfServiceClaimNotes,
   resolveSelfServicePlayerNumbers,
   getPaidOrderPriceAdjustment,
@@ -546,7 +551,7 @@ test("自助派單 15 分鐘倒數使用固定派單時間，不受後續扣 1 �
   );
 });
 
-test("自助派單選人時間每次延長五分鐘並保留在訂單註記", () => {
+test("人工與自助派單每筆只能延長一次五分鐘，並保留原本接單資料", () => {
   const order = {
     note: "[SELF_SERVICE] [SELF_CLAIM:808875987034308618:可以接] [DISPATCH_AT:2026-09-04T05:00:00.000Z]",
     updated_at: "2026-09-04T05:10:00.000Z",
@@ -556,10 +561,23 @@ test("自助派單選人時間每次延長五分鐘並保留在訂單註記", ()
   assert.equal(extended.deadlineAt, Date.parse("2026-09-04T05:20:00.000Z"));
   assert.match(extended.note, /\[SELF_CLAIM:808875987034308618:可以接\]/);
   assert.match(extended.note, /\[DISPATCH_AT:2026-09-04T05:05:00\.000Z\]/);
+  assert.match(extended.note, /\[DISPATCH_EXTENDED:1\]/);
   assert.equal(
     getSelfServiceSelectionDeadline({ note: extended.note }),
     Date.parse("2026-09-04T05:20:00.000Z"),
   );
+  assert.throws(() => extendSelfServiceSelectionDeadline({ note: extended.note }), /最多只能延長一次/);
+  assert.throws(
+    () => extendSelfServiceSelectionDeadline({ note: `${extended.note} [MANUAL_DISPATCH]` }),
+    /最多只能延長一次/,
+  );
+});
+
+test("派單討論串依狀態使用派單中、接單成功、訂單棄單", () => {
+  const order = { id: "order-1", order_no: "ORD-123", note: "[MANUAL_DISPATCH]" };
+  assert.equal(getSelfServiceThreadName(order), "派單中-ORD-123-order-1");
+  assert.equal(getDispatchResultThreadName(order, true), "接單成功-ORD-123");
+  assert.equal(getDispatchResultThreadName(order, false), "訂單棄單-ORD-123");
 });
 
 test("自助派單湊足後依客人選擇的數字對應陪陪", () => {
@@ -582,10 +600,10 @@ test("自助派單湊足需求人數後仍持續開放兩種接單，直到客�
     path.join(__dirname, "..", "events", "dispatchSystem.js"),
     "utf8",
   );
-  assert.match(source, /\["self_dispatching", "self_choosing_open"\]\.includes\(order\.quote_status\)/);
-  assert.match(source, /quote_status: success \? "self_choosing_open" : "self_dispatching"/);
+  assert.match(source, /getClaimDispatchStatuses\(order\)\.includes\(order\.quote_status\)/);
+  assert.match(source, /quote_status: success \? getClaimChoosingStatus\(order\) : getClaimDispatchingStatus\(order\)/);
   assert.match(source, /老闆選定前兩種接單仍會持續開放/);
-  assert.match(source, /content: `\$\{selectedIds\.map\(\(id\) => `<@\$\{id\}>`\)\.join\(" "\)\} 接！`/);
+  assert.match(source, /接單成功！/);
   assert.doesNotMatch(source, /playerIds\.length >= needCount\) return interaction\.editReply\(\{ content: "❌ 這張訂單人數已滿/);
   assert.doesNotMatch(source, /只有秋奈在職陪陪可以扣 1/);
   assert.doesNotMatch(source, /你的身分組不符合這筆訂單/);
@@ -593,7 +611,7 @@ test("自助派單湊足需求人數後仍持續開放兩種接單，直到客�
   assert.match(source, /setLabel\("1"\)/);
   assert.match(source, /setLabel\("PM"\)/);
   assert.match(source, /getSelfServiceClaimTypeLabel\(claimTypes\.get\(id\)\)/);
-  assert.match(source, /\.in\("quote_status", \["self_dispatching", "self_choosing_open"\]\)/);
+  assert.match(source, /getClaimTimeoutStatuses\(sourceOrder\)/);
   assert.doesNotMatch(source, /if \(firstReady\)/);
   assert.match(source, /選人期限內客人未完成陪陪選擇，已自動棄單/);
   assert.match(source, /self-service-timeout-refund:/);
@@ -601,14 +619,13 @@ test("自助派單湊足需求人數後仍持續開放兩種接單，直到客�
   assert.match(source, /頻道將於 10 秒後關閉/);
   assert.match(source, /派單開始後 15 分鐘內未完成陪陪選擇，系統將自動棄單/);
   assert.match(source, /15 分鐘內未選擇陪陪將自動棄單/);
-  assert.match(source, /setLabel\("加長選人時間（\+5 分鐘）"\)/);
+  assert.match(source, /setLabel\("延長派單時間（\+5 分鐘，限一次）"\)/);
   assert.match(source, /setLabel\("棄單"\)/);
   assert.match(source, /self_selection_extend_/);
   assert.match(source, /老闆已將選人時間延長 5 分鐘/);
   assert.match(source, /dispatchMessage\.startThread/);
-  assert.match(source, /自助單-\$\{orderLabel\}-\$\{order\.id\}/);
   assert.match(source, /請在這個討論串內選擇「1」或「PM」並填寫接單備註/);
-  assert.match(source, /claimMessage\.channel\.setArchived\(true/);
+  assert.match(source, /setName\(getDispatchResultThreadName/);
   const selfServiceFlowSource = source.slice(
     source.indexOf("async function sendSelfServiceDispatch"),
     source.indexOf("async function sendTipOrderPanel"),
@@ -627,6 +644,34 @@ test("自助派單湊足需求人數後仍持續開放兩種接單，直到客�
     indexSource.indexOf("// ===== 使用者按錯建立訂單"),
   );
   assert.match(modalButtonRoutes, /customId\.startsWith\("self_service_claim_"\)/);
+});
+
+test("人工下單依遊戲分流，先報價與派單選人後才付款", () => {
+  assert.equal(getManualDispatchChannelId({ game: "特戰英豪" }), "1223723419061850224");
+  assert.equal(getManualDispatchChannelId({ game: "三角洲行動" }), "1336712064995037255");
+  assert.equal(getManualDispatchChannelId({ game: "英雄聯盟" }), "1546494242246103090");
+  assert.equal(getManualDispatchChannelId({ game: "Apex" }), "1546494309941903360");
+  assert.equal(getManualDispatchChannelId({ game: "其他", order_item: "傳說對決" }), "1548732212491587634");
+  assert.equal(getManualDispatchChannelId({ game: "其他", order_item: "語音聊天" }), "1548954895133053018");
+  assert.equal(getManualDispatchChannelId({ game: "其他", order_item: "Minecraft" }), "1546519988901257246");
+  assert.equal(getClaimDispatchChannelId({ game: "valorant", note: "[SELF_SERVICE]" }), "1223723419061850224");
+  assert.equal(getClaimDispatchChannelId({ game: "delta", note: "[SELF_SERVICE]" }), "1336712064995037255");
+  assert.equal(getClaimDispatchChannelId({ game: "lol", note: "[SELF_SERVICE]" }), "1546494242246103090");
+  assert.equal(getClaimDispatchChannelId({ game: "apex", note: "[SELF_SERVICE]" }), "1546494309941903360");
+  assert.equal(getClaimDispatchChannelId({ game: "voice_chat", note: "[SELF_SERVICE]" }), "1548954895133053018");
+  assert.equal(isManualDispatchOrder({ note: "需求 [MANUAL_DISPATCH]" }), true);
+
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "events", "dispatchSystem.js"),
+    "utf8",
+  );
+  assert.match(source, /setCustomId\(`manual_quote_dispatch_\$\{orderId\}`\)/);
+  assert.match(source, /setLabel\("確認報價並正式派單"\)/);
+  assert.match(source, /選定接單陪陪後，才會進入優惠券與付款流程/);
+  assert.match(source, /已將接單方式由/);
+  assert.match(source, /確認選擇 PM 陪陪/);
+  assert.match(source, /files: \[\{ attachment: SELF_SERVICE_FAILED_IMAGE, name: "dispatch-failed\.png" \}\]/);
+  assert.match(source, /getDispatchResultThreadName\(order, succeeded\)/);
 });
 
 test("自助派單兩種接單的類型與備註可保存、讀取並清除", () => {
@@ -915,6 +960,7 @@ const {
 } = require("../utils/redPackets");
 const {
   buildReportAmounts,
+  buildSavedWorkReportSupplement,
   canCorrectFirstSegmentStart,
   calculateCrownEndAt,
   isStaffInteraction,
@@ -928,6 +974,26 @@ const {
   shouldAutomaticallyFinalizeWorkReport,
   splitStaffLookupInput,
 } = require("../events/workReportSystem");
+
+test("存單補時會累加既有時段，足額後才進入完成流程", () => {
+  const meta = {
+    expectedDurationMinutes: 120,
+    segments: [{ startedAt: "2026-09-20T10:00:00.000Z", endedAt: "2026-09-20T11:00:00.000Z", minutes: 60 }],
+  };
+  const short = buildSavedWorkReportSupplement(meta, new Date("2026-09-21T10:00:00.000Z"), new Date("2026-09-21T10:30:00.000Z"), Date.parse("2026-09-21T11:00:00.000Z"));
+  assert.equal(short.totalMinutes, 90);
+  assert.equal(short.shortageMinutes, 30);
+  assert.equal(short.isComplete, false);
+  const complete = buildSavedWorkReportSupplement(short.meta, new Date("2026-09-22T10:00:00.000Z"), new Date("2026-09-22T10:30:00.000Z"), Date.parse("2026-09-22T11:00:00.000Z"));
+  assert.equal(complete.totalMinutes, 120);
+  assert.equal(complete.isComplete, true);
+  assert.equal(complete.meta.segments.length, 3);
+  assert.throws(() => buildSavedWorkReportSupplement(meta, new Date("2026-09-20T10:30:00.000Z"), new Date("2026-09-20T11:30:00.000Z"), Date.parse("2026-09-21T11:00:00.000Z")), /重疊/);
+  const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
+  assert.match(indexSource, /customId\.startsWith\("work_report_supplement_"\)/);
+  const reportSource = fs.readFileSync(path.join(__dirname, "..", "events", "workReportSystem.js"), "utf8");
+  assert.match(reportSource, /customId\.startsWith\("submit_work_report_supplement_"\)/);
+});
 
 test("work reports accept raw channel IDs and Discord channel URLs", () => {
   assert.equal(parseChannelId("1538937975629418587"), "1538937975629418587");

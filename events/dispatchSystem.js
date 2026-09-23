@@ -98,6 +98,15 @@ const SELF_SERVICE_ORDER_CHANNEL_ID =
   process.env.SELF_SERVICE_ORDER_CHANNEL_ID || "1540650652215017533";
 const SELF_SERVICE_DISPATCH_CHANNEL_ID =
   process.env.SELF_SERVICE_DISPATCH_CHANNEL_ID || "1540653111670997092";
+const MANUAL_DISPATCH_CHANNEL_IDS = Object.freeze({
+  valorant: "1223723419061850224",
+  delta: "1336712064995037255",
+  lol: "1546494242246103090",
+  apex: "1546494309941903360",
+  arena: "1548732212491587634",
+  voice: "1548954895133053018",
+  other: "1546519988901257246",
+});
 const JKOPAY_TOPUP_CHANNEL_ID =
   process.env.JKOPAY_TOPUP_CHANNEL_ID || "1546726352240115712";
 const SELF_SERVICE_DISPATCH_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1100,7 +1109,14 @@ function getSelfServiceSelectionDeadline(order) {
   return getSelfServiceDispatchAt(order) + SELF_SERVICE_DISPATCH_TIMEOUT_MS;
 }
 
+function hasExtendedDispatchTime(order) {
+  return String(order?.note || "").includes("[DISPATCH_EXTENDED:1]");
+}
+
 function extendSelfServiceSelectionDeadline(order) {
+  if (hasExtendedDispatchTime(order)) {
+    throw new Error("每筆訂單最多只能延長一次 5 分鐘");
+  }
   const dispatchAt = getSelfServiceDispatchAt(order);
   if (!Number.isFinite(dispatchAt)) {
     throw new Error("找不到這張訂單的選人開始時間");
@@ -1112,7 +1128,7 @@ function extendSelfServiceSelectionDeadline(order) {
     deadlineAt: nextDispatchAt + SELF_SERVICE_DISPATCH_TIMEOUT_MS,
     note: `${String(order?.note || "")
       .replace(/\s*\[DISPATCH_AT:[^\]]+\]/g, "")
-      .trim()} [DISPATCH_AT:${dispatchAtIso}]`.trim(),
+      .trim()} [DISPATCH_AT:${dispatchAtIso}] [DISPATCH_EXTENDED:1]`.trim(),
   };
 }
 
@@ -1137,6 +1153,14 @@ function stripSelfServiceClaimNotes(note) {
     .replace(/\s*\[SELF_CLAIM:\d{16,22}:[A-Za-z0-9_-]*\]/g, "")
     .replace(/\s*\[SELF_CLAIM_TYPE:\d{16,22}:(?:can|want)\]/g, "")
     .trim();
+}
+
+function getPublicOrderNote(note) {
+  return stripSelfServiceClaimNotes(note)
+    .replace(/\s*\[(?:SELF_SERVICE(?:_MANUAL)?|MANUAL_DISPATCH)\]/g, "")
+    .replace(/\s*\[DISPATCH_AT:[^\]]+\]/g, "")
+    .replace(/\s*\[SELECTION_EXTENSION_MINUTES:\d+\]/g, "")
+    .trim() || "無";
 }
 
 function normalizeSelfServiceClaimType(claimType) {
@@ -1232,23 +1256,68 @@ function buildSelfServiceClaimButtons(orderId) {
   );
 }
 
+function buildDispatchTimeExtensionButton(order) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`self_selection_extend_${order.id}`)
+      .setLabel("延長派單時間（+5 分鐘，限一次）")
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(hasExtendedDispatchTime(order)),
+  );
+}
+
 function getSelfServiceThreadName(order) {
   const orderLabel = String(order?.order_no || "未編號").replace(/[^\p{L}\p{N}_-]+/gu, "-");
-  return `自助單-${orderLabel}-${order.id}`.slice(0, 100);
+  return `派單中-${orderLabel}-${order.id}`.slice(0, 100);
 }
 
 async function createSelfServiceClaimThread(dispatchMessage, order) {
-  if (!dispatchMessage?.startThread) return null;
+  if (!dispatchMessage?.startThread) throw new Error("派單訊息無法建立討論串");
   try {
     return await dispatchMessage.startThread({
       name: getSelfServiceThreadName(order),
       autoArchiveDuration: 60,
-      reason: `自助訂單 ${order.order_no || order.id} 跳單討論串`,
+      reason: `${isManualDispatchOrder(order) ? "人工" : "自助"}訂單 ${order.order_no || order.id} 跳單討論串`,
     });
   } catch (error) {
-    console.error("[自助派單] 建立跳單討論串失敗，改用主頻道按鈕", error);
-    return null;
+    await dispatchMessage.delete().catch(() => null);
+    throw new Error(`建立派單討論串失敗：${error.message || error}`, { cause: error });
   }
+}
+
+function getDispatchResultThreadName(order, succeeded) {
+  const orderLabel = String(order?.order_no || order?.id || "未編號")
+    .replace(/[^\p{L}\p{N}_-]+/gu, "-");
+  return `${succeeded ? "接單成功" : "訂單棄單"}-${orderLabel}`.slice(0, 100);
+}
+
+async function finishClaimThread(order, { succeeded, reason }) {
+  const claimMessage = await findSelfServiceClaimMessage(order.id, order);
+  const thread = claimMessage?.channel?.isThread?.() ? claimMessage.channel : null;
+  if (!thread) return null;
+  await claimMessage.edit({ components: [] }).catch(() => null);
+  await thread.setName(getDispatchResultThreadName(order, succeeded), reason).catch((error) =>
+    console.error("[派單討論串] 更名失敗", error),
+  );
+  return thread;
+}
+
+async function publishClaimSuccess(order, selectedIds) {
+  const claimMessage = await findSelfServiceClaimMessage(order.id, order);
+  const resultChannel = claimMessage?.channel?.isThread?.()
+    ? claimMessage.channel
+    : await client.channels.fetch(getClaimDispatchChannelId(order)).catch(() => null);
+  await resultChannel?.send({
+    content: `${selectedIds.map((id) => `<@${id}>`).join(" ")} 接單成功！`,
+    files: [{ attachment: SELF_SERVICE_SUCCESS_IMAGE, name: "dispatch-success.png" }],
+    allowedMentions: { users: selectedIds },
+  }).catch(() => null);
+  const thread = await finishClaimThread(order, {
+    succeeded: true,
+    reason: "老闆已確認接單陪陪",
+  });
+  await thread?.setArchived(true, "派單成功").catch(() => null);
+  pendingSelfServiceOrders.delete(`claimMessage:${order.id}`);
 }
 
 async function rememberSelfServiceClaimMessage(orderId, message) {
@@ -1278,14 +1347,32 @@ function safeSelfServiceClaimNote(note, maxLength = 30) {
 
 async function failSelfServiceDispatch(orderId, messageId = null) {
   selfServiceDispatchTimers.delete(String(orderId));
+  const current = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+  if (current.error || !current.data || !isClaimDispatchOrder(current.data)) return;
+  const sourceOrder = current.data;
+  if (Date.now() < getSelfServiceSelectionDeadline(sourceOrder)) {
+    scheduleSelfServiceDispatchTimeout(sourceOrder, messageId);
+    return;
+  }
+  const cancellingStatus = isManualDispatchOrder(sourceOrder)
+    ? "manual_cancelling"
+    : "self_cancelling";
   const { data: order, error } = await supabase
     .from("play_orders")
-    .update({ quote_status: "self_cancelling", updated_at: new Date().toISOString() })
+    .update({ quote_status: cancellingStatus, updated_at: new Date().toISOString() })
     .eq("id", orderId)
-    .in("quote_status", ["self_dispatching", "self_choosing_open"])
+    .in("quote_status", getClaimTimeoutStatuses(sourceOrder))
+    .eq("updated_at", sourceOrder.updated_at)
     .select()
     .maybeSingle();
-  if (error || !order) return;
+  if (error) throw error;
+  if (!order) {
+    const latest = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+    if (latest.data && getClaimTimeoutStatuses(latest.data).includes(latest.data.quote_status)) {
+      scheduleSelfServiceDispatchTimeout(latest.data, messageId);
+    }
+    return;
+  }
   const candidateIds = String(order.preferred_player || "")
     .split(",")
     .map((id) => id.trim())
@@ -1296,11 +1383,24 @@ async function failSelfServiceDispatch(orderId, messageId = null) {
     ? "選人期限內客人未完成陪陪選擇，已自動棄單。"
     : "派單期限內未湊足陪陪，已判定失敗。";
   const restoreQuoteStatus = wasWaitingForCustomer
-    ? "self_choosing_open"
-    : "self_dispatching";
+    ? getClaimChoosingStatus(order)
+    : getClaimDispatchingStatus(order);
   let refundAmount = 0;
   let refundedBalance = null;
   try {
+    if (isManualDispatchOrder(order)) {
+      const { error: manualCancelError } = await supabase
+        .from("play_orders")
+        .update({
+          status: "cancelled",
+          quote_status: "manual_dispatch_failed",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", order.id)
+        .eq("paid", false)
+        .eq("quote_status", "manual_cancelling");
+      if (manualCancelError) throw manualCancelError;
+    } else {
     const { data: cancellation, error: cancelError } = await supabase.rpc(
       "qiunai_cancel_self_service_order",
       {
@@ -1334,30 +1434,27 @@ async function failSelfServiceDispatch(orderId, messageId = null) {
       (effectError) =>
         console.error("[自助派單逾時退款] VIP/會計已排入持久補償", effectError),
     );
+    }
   } catch (refundError) {
     // RPC 失敗會整筆 rollback，只有此時才把「取消中」恢復成可繼續選人。
     await supabase
       .from("play_orders")
       .update({ quote_status: restoreQuoteStatus, updated_at: new Date().toISOString() })
       .eq("id", order.id)
-      .eq("quote_status", "self_cancelling");
+      .eq("quote_status", cancellingStatus);
     throw refundError;
   }
-  const dispatchChannel = await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
-  const claimMessage = await findSelfServiceClaimMessage(order.id);
-  if (dispatchChannel?.isTextBased()) {
-    await claimMessage?.edit({ components: [] }).catch(() => null);
-    await dispatchChannel.send({
-      content: `訂單 ${order.order_no || order.id} ${failureReason}`,
-      files: [{ attachment: SELF_SERVICE_FAILED_IMAGE, name: "self-service-dispatch-failed.png" }],
-    });
-  }
-  if (claimMessage?.channel?.isThread?.()) {
-    await claimMessage.channel.send({
-      content: `此討論串已結束：${failureReason}`,
-      allowedMentions: { parse: [] },
-    }).catch(() => null);
-  }
+  const dispatchChannel = await client.channels.fetch(getClaimDispatchChannelId(order)).catch(() => null);
+  const claimMessage = await findSelfServiceClaimMessage(order.id, order);
+  const resultChannel = claimMessage?.channel?.isThread?.()
+    ? claimMessage.channel
+    : dispatchChannel;
+  await claimMessage?.edit({ components: [] }).catch(() => null);
+  await resultChannel?.send({
+    content: `訂單 ${order.order_no || order.id} ${failureReason}`,
+    files: [{ attachment: SELF_SERVICE_FAILED_IMAGE, name: "dispatch-failed.png" }],
+    allowedMentions: { parse: [] },
+  }).catch(() => null);
   const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
   const promptKey = `candidatePrompt:${order.id}`;
   const candidatePromptId = pendingSelfServiceOrders.get(promptKey)?.messageId;
@@ -1369,7 +1466,6 @@ async function failSelfServiceDispatch(orderId, messageId = null) {
   }
   pendingSelfServiceOrders.delete(promptKey);
   pendingSelfServiceOrders.delete(`selection:${order.id}`);
-  pendingSelfServiceOrders.delete(`claimMessage:${order.id}`);
   await orderChannel?.send({
     content: wasWaitingForCustomer
       ? `<@${order.customer_id}> 這筆訂單在選人期限內未選擇陪陪，已自動${refundAmount > 0 ? `退款 ${refundAmount.toLocaleString("zh-TW")} ASD 並` : ""}棄單。頻道將於 10 秒後關閉。`
@@ -1378,16 +1474,18 @@ async function failSelfServiceDispatch(orderId, messageId = null) {
   if (orderChannel) {
     setTimeout(() => orderChannel.delete().catch(() => null), 10_000).unref?.();
   }
-  if (claimMessage?.channel?.isThread?.()) {
-    await claimMessage.channel.setArchived(true, failureReason).catch(() => null);
-  }
+  const resultThread = await finishClaimThread(order, {
+    succeeded: false,
+    reason: failureReason,
+  });
+  await resultThread?.setArchived(true, "訂單棄單").catch(() => null);
+  pendingSelfServiceOrders.delete(`claimMessage:${order.id}`);
 }
 
 function scheduleSelfServiceDispatchTimeout(order, messageId = null) {
   const orderId = String(order.id);
   const oldTimer = selfServiceDispatchTimers.get(orderId);
   if (oldTimer) clearTimeout(oldTimer);
-  const dispatchAt = getSelfServiceDispatchAt(order);
   const remaining = Math.max(0, getSelfServiceSelectionDeadline(order) - Date.now());
   const timer = setTimeout(
     () => failSelfServiceDispatch(order.id, messageId).catch((error) => console.error("[自助派單逾時]", error)),
@@ -1402,7 +1500,14 @@ async function restoreSelfServiceDispatchTimers() {
   const { data: orders, error } = await supabase
     .from("play_orders")
     .select("*")
-    .in("quote_status", ["self_dispatching", "self_choosing_open"])
+    .in("quote_status", [
+      "self_dispatching",
+      "self_choosing_open",
+      "confirming_players",
+      "manual_dispatching",
+      "manual_choosing_open",
+      "manual_confirming_players",
+    ])
     .or("is_deleted.eq.false,is_deleted.is.null");
   if (error) throw error;
   for (const order of orders || []) scheduleSelfServiceDispatchTimeout(order);
@@ -1454,6 +1559,53 @@ function isSelfServiceOrder(order) {
   return /\[SELF_SERVICE(?:_MANUAL)?\]/.test(String(order?.note || ""));
 }
 
+function isManualDispatchOrder(order) {
+  return String(order?.note || "").includes("[MANUAL_DISPATCH]");
+}
+
+function isClaimDispatchOrder(order) {
+  return isSelfServiceOrder(order) || isManualDispatchOrder(order);
+}
+
+function getManualDispatchChannelId(order) {
+  const game = String(order?.game || "").toLowerCase();
+  const text = `${game} ${order?.service || ""} ${order?.order_item || ""}`;
+  if (game === "valorant" || text.includes("特戰")) return MANUAL_DISPATCH_CHANNEL_IDS.valorant;
+  if (game === "delta" || text.includes("三角洲")) return MANUAL_DISPATCH_CHANNEL_IDS.delta;
+  if (game === "lol" || game === "tft" || text.includes("英雄聯盟") || text.includes("ARAM") || text.includes("聯盟戰棋")) {
+    return MANUAL_DISPATCH_CHANNEL_IDS.lol;
+  }
+  if (/apex/i.test(text)) return MANUAL_DISPATCH_CHANNEL_IDS.apex;
+  if (text.includes("傳說對決")) return MANUAL_DISPATCH_CHANNEL_IDS.arena;
+  if (game === "voice_chat" || text.includes("語音聊天") || text.includes("陪聊")) return MANUAL_DISPATCH_CHANNEL_IDS.voice;
+  return MANUAL_DISPATCH_CHANNEL_IDS.other;
+}
+
+function getClaimDispatchChannelId(order) {
+  return getManualDispatchChannelId(order);
+}
+
+function getClaimDispatchStatuses(order) {
+  return isManualDispatchOrder(order)
+    ? ["manual_dispatching", "manual_choosing_open"]
+    : ["self_dispatching", "self_choosing_open"];
+}
+
+function getClaimTimeoutStatuses(order) {
+  return [
+    ...getClaimDispatchStatuses(order),
+    isManualDispatchOrder(order) ? "manual_confirming_players" : "confirming_players",
+  ];
+}
+
+function getClaimDispatchingStatus(order) {
+  return isManualDispatchOrder(order) ? "manual_dispatching" : "self_dispatching";
+}
+
+function getClaimChoosingStatus(order) {
+  return isManualDispatchOrder(order) ? "manual_choosing_open" : "self_choosing_open";
+}
+
 function isManualQuoteSelfServiceOrder(order) {
   return String(order?.note || "").includes("[SELF_SERVICE_MANUAL]");
 }
@@ -1467,23 +1619,23 @@ function getSelfServiceRankFieldLabel(order) {
 
 async function sendSelfServiceDispatch(order) {
   const dispatchChannel = await client.channels
-    .fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID)
+    .fetch(getClaimDispatchChannelId(order))
     .catch(() => null);
   if (!dispatchChannel?.isTextBased()) {
-    throw new Error("找不到自助派單廳，請聯繫管理員。");
+    throw new Error(`找不到${isManualDispatchOrder(order) ? "遊戲對應" : "自助"}派單頻道，請聯繫管理員。`);
   }
   const { genderRoleIds, serviceRoleIds } =
     getSelfServiceDispatchRoleIds(order);
   const roleIds = [...new Set([...genderRoleIds, ...serviceRoleIds])];
   const embed = new EmbedBuilder()
     .setColor(QIUNAI_WATER_BLUE)
-    .setTitle("🖨️ 自助派單需求")
+    .setTitle(`🖨️ ${isManualDispatchOrder(order) ? "人工下單" : "自助派單"}需求`)
     .setDescription(
       `訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n${getSelfServiceRankFieldLabel(order)}：${order.rank_preference || "無"}\n需求：${order.player_count} 位\n目前：0 / ${order.player_count}\n訂單頻道：<#${order.channel_id}>\n\n請進入本單的討論串，並在派單開始後 15 分鐘內選擇「1」或「PM」；未選擇人員將自動棄單。`,
     )
     .setTimestamp();
   const dispatchMessage = await dispatchChannel.send({
-    content: `${roleIds.map((id) => `<@&${id}>`).join(" ")} 新的自助訂單，請進入討論串跳單。`,
+    content: `${roleIds.map((id) => `<@&${id}>`).join(" ")} 新的${isManualDispatchOrder(order) ? "人工" : "自助"}訂單，請進入討論串跳單。`,
     embeds: [
       embed,
     ],
@@ -1502,6 +1654,16 @@ async function sendSelfServiceDispatch(order) {
     : await dispatchMessage.edit({ components: [buildSelfServiceClaimButtons(order.id)] });
   await rememberSelfServiceClaimMessage(order.id, claimMessage);
   scheduleSelfServiceDispatchTimeout(order, claimMessage.id);
+  const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
+  const threadLink = claimThread ? `<#${claimThread.id}>` : dispatchMessage.url;
+  await orderChannel?.send({
+    content:
+      `<@${order.customer_id}> ✅ 已開始派單：${threadLink}\n` +
+      `陪陪可在討論串選擇「1」或「PM」。派單開始後 15 分鐘內未完成陪陪選擇，系統將自動棄單。\n` +
+      `截止時間：<t:${Math.floor(getSelfServiceSelectionDeadline(order) / 1000)}:F>；每筆訂單最多可延長一次 5 分鐘。`,
+    components: [buildDispatchTimeExtensionButton(order)],
+    allowedMentions: { users: [String(order.customer_id)] },
+  }).catch((error) => console.error("[派單] 通知老闆失敗", error));
   return claimMessage;
 }
 
@@ -2077,7 +2239,7 @@ async function getSelfServiceOrder(interaction, prefix) {
     .select("*")
     .eq("id", orderId)
     .maybeSingle();
-  if (error || !order || !isSelfServiceOrder(order)) return null;
+  if (error || !order || !isClaimDispatchOrder(order)) return null;
   return order;
 }
 
@@ -2106,7 +2268,6 @@ async function confirmSelfServiceQuote(interaction) {
     return interaction.editReply({ content: `❌ ${dispatchError.message || dispatchError}` });
   }
   await interaction.message.edit({ components: [] }).catch(() => null);
-  await interaction.channel.send("✅ 已統一送往自助派單廳；陪陪可選擇「1」或「PM」並填寫備註。派單開始後 15 分鐘內未完成陪陪選擇，系統將自動棄單。");
   return interaction.editReply({ content: "✅ 已確認報價並送出派單。" });
 }
 
@@ -2144,8 +2305,9 @@ async function showSelfServiceCandidatePrompt(order, playerIds, messageId = null
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId(`self_selection_extend_${order.id}`)
-          .setLabel("加長選人時間（+5 分鐘）")
-          .setStyle(ButtonStyle.Primary),
+          .setLabel("延長派單時間（+5 分鐘，限一次）")
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(hasExtendedDispatchTime(order)),
         new ButtonBuilder()
           .setCustomId(`self_service_cancel_refund_${order.id}`)
           .setLabel("棄單")
@@ -2173,8 +2335,11 @@ async function extendSelfServiceSelectionTime(interaction) {
   if (interaction.user.id !== order.customer_id) {
     return interaction.editReply({ content: "❌ 只有原下單者可以延長選人時間。" });
   }
-  if (order.quote_status !== "self_choosing_open") {
-    return interaction.editReply({ content: "❌ 這張訂單目前不在選人階段。" });
+  if (!getClaimDispatchStatuses(order).includes(order.quote_status)) {
+    return interaction.editReply({ content: "❌ 這張訂單目前不在派單或選人階段。" });
+  }
+  if (hasExtendedDispatchTime(order)) {
+    return interaction.editReply({ content: "❌ 每筆訂單最多只能延長一次 5 分鐘。" });
   }
   if (processingSelfServiceSelectionExtensions.has(order.id)) {
     return interaction.editReply({ content: "⚠️ 正在延長選人時間，請勿重複點擊。" });
@@ -2197,7 +2362,7 @@ async function extendSelfServiceSelectionTime(interaction) {
       })
       .eq("id", order.id)
       .eq("customer_id", order.customer_id)
-      .eq("quote_status", "self_choosing_open")
+      .eq("quote_status", order.quote_status)
       .eq("updated_at", order.updated_at)
       .select()
       .maybeSingle();
@@ -2213,16 +2378,25 @@ async function extendSelfServiceSelectionTime(interaction) {
       .split(",")
       .map((id) => id.trim())
       .filter(Boolean);
-    await showSelfServiceCandidatePrompt(
-      updatedOrder,
-      playerIds,
-      interaction.message?.id,
-    );
+    if (playerIds.length >= Number(updatedOrder.player_count || 1)) {
+      await showSelfServiceCandidatePrompt(updatedOrder, playerIds);
+    }
+    if (interaction.message?.components?.length) {
+      const components = interaction.message.components.map((row) =>
+        ActionRowBuilder.from(row),
+      );
+      for (const row of components) {
+        for (const component of row.components) {
+          if (component.data?.custom_id === interaction.customId) component.setDisabled(true);
+        }
+      }
+      await interaction.message.edit({ components }).catch(() => null);
+    }
 
     const deadlineUnix = Math.floor(extension.deadlineAt / 1000);
     const notifyChannel = dispatchMessage?.channel?.isThread?.()
       ? dispatchMessage.channel
-      : await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
+      : await client.channels.fetch(getClaimDispatchChannelId(updatedOrder)).catch(() => null);
     await notifyChannel?.send({
       content:
         `⏱️ 訂單 ${order.order_no || order.id}：老闆已將選人時間延長 5 分鐘。\n` +
@@ -2244,7 +2418,7 @@ async function closeSelfServiceClaimButton(orderId) {
   await dispatchMessage?.edit({ components: [] }).catch(() => null);
 }
 
-async function findSelfServiceClaimMessage(orderId) {
+async function findSelfServiceClaimMessage(orderId, knownOrder = null) {
   const cacheKey = `claimMessage:${orderId}`;
   const cached = pendingSelfServiceOrders.get(cacheKey);
   if (cached?.channelId && cached?.messageId) {
@@ -2256,34 +2430,43 @@ async function findSelfServiceClaimMessage(orderId) {
     pendingSelfServiceOrders.delete(cacheKey);
   }
 
-  const dispatchChannel = await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
-  if (!dispatchChannel?.isTextBased()) return null;
-  const messages = await dispatchChannel.messages.fetch({ limit: 100 }).catch(() => null);
-  const legacyMessage = messages?.find((message) =>
-    message.components.some((row) => row.components.some(
-      (component) => parseSelfServiceClaimAction(component.customId)?.orderId === String(orderId),
-    )),
-  ) || null;
-  if (legacyMessage) {
-    await rememberSelfServiceClaimMessage(orderId, legacyMessage);
-    return legacyMessage;
+  let sourceOrder = knownOrder;
+  if (!sourceOrder) {
+    const current = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+    sourceOrder = current.data || null;
   }
-
-  const activeThreads = dispatchChannel.threads?.fetchActive
-    ? await dispatchChannel.threads.fetchActive().catch(() => null)
-    : null;
-  const matchingThreads = [...(activeThreads?.threads?.values?.() || [])]
-    .filter((thread) => thread.name.includes(String(orderId)));
-  for (const thread of matchingThreads) {
-    const threadMessages = await thread.messages.fetch({ limit: 100 }).catch(() => null);
-    const claimMessage = threadMessages?.find((message) =>
+  // 切換為遊戲分流後，仍要能找回部署前位於舊自助派單廳的進行中訂單。
+  const channelIds = [...new Set([getClaimDispatchChannelId(sourceOrder), SELF_SERVICE_DISPATCH_CHANNEL_ID])];
+  for (const channelId of channelIds) {
+    const dispatchChannel = await client.channels.fetch(channelId).catch(() => null);
+    if (!dispatchChannel?.isTextBased()) continue;
+    const messages = await dispatchChannel.messages.fetch({ limit: 100 }).catch(() => null);
+    const legacyMessage = messages?.find((message) =>
       message.components.some((row) => row.components.some(
         (component) => parseSelfServiceClaimAction(component.customId)?.orderId === String(orderId),
       )),
-    );
-    if (claimMessage) {
-      await rememberSelfServiceClaimMessage(orderId, claimMessage);
-      return claimMessage;
+    ) || null;
+    if (legacyMessage) {
+      await rememberSelfServiceClaimMessage(orderId, legacyMessage);
+      return legacyMessage;
+    }
+
+    const activeThreads = dispatchChannel.threads?.fetchActive
+      ? await dispatchChannel.threads.fetchActive().catch(() => null)
+      : null;
+    const matchingThreads = [...(activeThreads?.threads?.values?.() || [])]
+      .filter((thread) => thread.name.includes(String(orderId)));
+    for (const thread of matchingThreads) {
+      const threadMessages = await thread.messages.fetch({ limit: 100 }).catch(() => null);
+      const claimMessage = threadMessages?.find((message) =>
+        message.components.some((row) => row.components.some(
+          (component) => parseSelfServiceClaimAction(component.customId)?.orderId === String(orderId),
+        )),
+      );
+      if (claimMessage) {
+        await rememberSelfServiceClaimMessage(orderId, claimMessage);
+        return claimMessage;
+      }
     }
   }
   return null;
@@ -2324,8 +2507,8 @@ async function claimSelfServiceOrder(interaction) {
   processingSelfServiceClaims.add(orderId);
   try {
     const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
-    if (error || !order || !isSelfServiceOrder(order)) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
-    if (!["self_dispatching", "self_choosing_open"].includes(order.quote_status)) return interaction.editReply({ content: "❌ 這張訂單已經結束派單。" });
+    if (error || !order || !isClaimDispatchOrder(order)) return interaction.editReply({ content: "❌ 找不到這張派單。" });
+    if (!getClaimDispatchStatuses(order).includes(order.quote_status)) return interaction.editReply({ content: "❌ 這張訂單已經結束派單。" });
     if (Date.now() >= getSelfServiceSelectionDeadline(order)) {
       const dispatchMessage = await findSelfServiceClaimMessage(order.id);
       await failSelfServiceDispatch(order.id, dispatchMessage?.id);
@@ -2333,10 +2516,14 @@ async function claimSelfServiceOrder(interaction) {
     }
     if (interaction.user.id === order.customer_id) return interaction.editReply({ content: "❌ 不能接自己的訂單。" });
     const playerIds = String(order.preferred_player || "").split(",").map((id) => id.trim()).filter(Boolean);
-    if (playerIds.includes(interaction.user.id)) return interaction.editReply({ content: "⚠️ 你已經加入候選名單了。" });
+    const alreadyClaimed = playerIds.includes(interaction.user.id);
+    const oldClaimType = getSelfServiceClaimTypes(order.note).get(interaction.user.id);
+    if (alreadyClaimed && oldClaimType === claimType) {
+      return interaction.editReply({ content: `⚠️ 你目前已經是「${claimTypeLabel}」，如要更換請按另一個按鈕。` });
+    }
     const needCount = Number(order.player_count || 1);
-    if (playerIds.length >= 25) return interaction.editReply({ content: "❌ 候選名單已達 Discord 選單上限 25 位。" });
-    playerIds.push(interaction.user.id);
+    if (!alreadyClaimed && playerIds.length >= 25) return interaction.editReply({ content: "❌ 候選名單已達 Discord 選單上限 25 位。" });
+    if (!alreadyClaimed) playerIds.push(interaction.user.id);
     const success = playerIds.length >= needCount;
     const updatedNote = appendSelfServiceClaimNote(
       order.note,
@@ -2346,18 +2533,36 @@ async function claimSelfServiceOrder(interaction) {
     );
     const { data: updated, error: updateError } = await supabase
       .from("play_orders")
-      .update({ preferred_player: playerIds.join(","), quote_status: success ? "self_choosing_open" : "self_dispatching", note: updatedNote, updated_at: new Date().toISOString() })
+      .update({
+        preferred_player: playerIds.join(","),
+        quote_status: success ? getClaimChoosingStatus(order) : getClaimDispatchingStatus(order),
+        note: updatedNote,
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", order.id)
       .eq("quote_status", order.quote_status)
+      .eq("updated_at", order.updated_at)
       .select()
       .maybeSingle();
     if (updateError || !updated) return interaction.editReply({ content: "❌ 接單登記失敗，訂單狀態可能已更新。" });
+    const changeText = alreadyClaimed
+      ? `${interaction.user} 已將接單方式由「${getSelfServiceClaimTypeLabel(oldClaimType)}」改為「${claimTypeLabel}」`
+      : `${interaction.user} ${claimTypeLabel}（${playerIds.length}/${needCount}）`;
     await interaction.channel.send({
       content:
-        `${interaction.user} ${claimTypeLabel}（${playerIds.length}/${needCount}）` +
+        changeText +
         (claimNote ? `｜備註：${safeSelfServiceClaimNote(claimNote, 80)}` : ""),
       allowedMentions: { users: [interaction.user.id] },
     });
+    if (alreadyClaimed) {
+      const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
+      await orderChannel?.send({
+        content:
+          `🔄 候選陪陪 <@${interaction.user.id}> 已將接單方式由「${getSelfServiceClaimTypeLabel(oldClaimType)}」改為「${claimTypeLabel}」` +
+          (claimNote ? `｜備註：${safeSelfServiceClaimNote(claimNote, 80)}` : ""),
+        allowedMentions: { users: [String(order.customer_id)] },
+      }).catch(() => null);
+    }
     if (!success) {
       const dispatchMessage = await findSelfServiceClaimMessage(order.id);
       const embed = dispatchMessage?.embeds?.[0]
@@ -2368,10 +2573,10 @@ async function claimSelfServiceOrder(interaction) {
       if (dispatchMessage && embed) {
         await dispatchMessage.edit({ embeds: [embed] }).catch(() => null);
       }
-      return interaction.editReply({ content: `✅ ${claimTypeLabel} 已登記，正在等待其他陪陪。` });
+      return interaction.editReply({ content: `✅ ${alreadyClaimed ? `已改為 ${claimTypeLabel}` : `${claimTypeLabel} 已登記`}，正在等待其他陪陪。` });
     }
     await showSelfServiceCandidatePrompt(updated, playerIds);
-    return interaction.editReply({ content: `✅ ${claimTypeLabel} 已登記並加入候選名單；老闆選定前兩種接單仍會持續開放。` });
+    return interaction.editReply({ content: `✅ ${alreadyClaimed ? `已改為 ${claimTypeLabel}` : `${claimTypeLabel} 已登記並加入候選名單`}；老闆選定前兩種接單仍會持續開放。` });
   } finally {
     processingSelfServiceClaims.delete(orderId);
   }
@@ -2382,7 +2587,7 @@ async function selectSelfServicePlayerNumbers(interaction) {
   const order = await getSelfServiceOrder(interaction, "self_customer_numbers_");
   if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
   if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以選擇陪陪。" });
-  if (!["self_choosing_open", "choosing_players"].includes(order.quote_status)) return interaction.editReply({ content: "❌ 這份數字名單已失效，請重新派單。" });
+  if (![getClaimChoosingStatus(order), "choosing_players", "manual_choosing_players"].includes(order.quote_status)) return interaction.editReply({ content: "❌ 這份數字名單已失效，請重新派單。" });
   if (Date.now() >= getSelfServiceSelectionDeadline(order)) {
     const dispatchMessage = await findSelfServiceClaimMessage(order.id);
     await failSelfServiceDispatch(order.id, dispatchMessage?.id);
@@ -2401,34 +2606,25 @@ async function selectSelfServicePlayerNumbers(interaction) {
   const claimTypes = getSelfServiceClaimTypes(order.note);
   const { data: selectedOrder, error } = await supabase
     .from("play_orders")
-    .update({ preferred_player: selectedIds.join(","), quote_status: "confirming_players", updated_at: new Date().toISOString() })
+    .update({
+      preferred_player: selectedIds.join(","),
+      quote_status: isManualDispatchOrder(order) ? "manual_confirming_players" : "confirming_players",
+      updated_at: new Date().toISOString(),
+    })
     .eq("id", order.id)
     .eq("quote_status", order.quote_status)
     .select("id")
     .maybeSingle();
   if (error || !selectedOrder) return interaction.editReply({ content: "❌ 儲存數字選擇失敗，名單可能已由其他操作更新。" });
-  const timer = selfServiceDispatchTimers.get(String(order.id));
-  if (timer) clearTimeout(timer);
-  selfServiceDispatchTimers.delete(String(order.id));
   pendingSelfServiceOrders.set(`selection:${order.id}`, {
     customerId: order.customer_id,
     selectedIds,
   });
   pendingSelfServiceOrders.delete(`candidatePrompt:${order.id}`);
   await interaction.message.edit({ components: [] }).catch(() => null);
-  const claimMessage = await findSelfServiceClaimMessage(order.id);
+  const claimMessage = await findSelfServiceClaimMessage(order.id, order);
   await closeSelfServiceClaimButton(order.id);
-  const resultChannel = claimMessage?.channel?.isThread?.()
-    ? claimMessage.channel
-    : await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
-  await resultChannel?.send({
-    content: `${selectedIds.map((id) => `<@${id}>`).join(" ")} 接！`,
-    files: [{ attachment: SELF_SERVICE_SUCCESS_IMAGE, name: "self-service-dispatch-success.png" }],
-  }).catch(() => null);
-  pendingSelfServiceOrders.delete(`claimMessage:${order.id}`);
-  if (claimMessage?.channel?.isThread?.()) {
-    await claimMessage.channel.setArchived(true, "老闆已完成陪陪選擇").catch(() => null);
-  }
+  const includesPm = selectedIds.some((id) => claimTypes.get(id) === "want");
   await interaction.channel.send({
     content:
       `<@${order.customer_id}> 你選擇的編號：${selectedNumbers.join("、")}\n` +
@@ -2436,9 +2632,11 @@ async function selectSelfServicePlayerNumbers(interaction) {
         const claimNote = safeSelfServiceClaimNote(claimNotes.get(id), 80);
         return `<@${id}>｜${getSelfServiceClaimTypeLabel(claimTypes.get(id))}${claimNote ? `｜備註：${claimNote}` : ""}`;
       }).join("\n")}\n\n` +
-      `請確認是否選擇以上陪陪。`,
+      (includesPm
+        ? `你選到至少一位「PM」陪陪，請再次確認是否確定選擇。`
+        : `請確認是否選擇以上陪陪。`),
     components: [new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`self_players_confirm_${order.id}`).setLabel("確定選擇").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`self_players_confirm_${order.id}`).setLabel(includesPm ? "確認選擇 PM 陪陪" : "確定選擇").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`self_players_reselect_${order.id}`).setLabel("重新派單").setStyle(ButtonStyle.Secondary),
     )],
   });
@@ -2489,27 +2687,44 @@ async function cancelAndRefundSelfServiceOrder(interaction) {
   let refundAmount = 0;
   let refundedBalance = null;
   try {
-    if (!["self_choosing_open", "choosing_players"].includes(previousQuoteStatus)) {
+    const cancellableStatuses = isManualDispatchOrder(order)
+      ? ["manual_choosing_open", "manual_choosing_players"]
+      : ["self_choosing_open", "choosing_players"];
+    if (!cancellableStatuses.includes(previousQuoteStatus)) {
       return interaction.editReply({ content: "❌ 這張訂單已不在選擇陪陪階段，無法重複取消。" });
     }
-    const { data: cancellation, error: cancelError } = await supabase.rpc(
-      "qiunai_cancel_self_service_order",
-      {
-        p_order_id: String(order.id),
-        p_customer_id: String(order.customer_id),
-        p_expected_quote_status: [previousQuoteStatus],
-        p_final_quote_status: "cancelled",
-        p_operation_key: `self-service-cancel-refund:${order.id}`,
-        p_reason: "沒有心儀的陪陪，取消並退款",
-      },
-    );
-    if (cancelError || !cancellation) {
-      throw new Error(cancelError?.message || "取消訂單原子退款失敗");
+    let cancellation = null;
+    if (isManualDispatchOrder(order)) {
+      const { data: cancelled, error: cancelError } = await supabase
+        .from("play_orders")
+        .update({ status: "cancelled", quote_status: "cancelled", updated_at: new Date().toISOString() })
+        .eq("id", order.id)
+        .eq("paid", false)
+        .eq("quote_status", previousQuoteStatus)
+        .select("id")
+        .maybeSingle();
+      if (cancelError || !cancelled) throw new Error(cancelError?.message || "取消訂單失敗");
+    } else {
+      const result = await supabase.rpc(
+        "qiunai_cancel_self_service_order",
+        {
+          p_order_id: String(order.id),
+          p_customer_id: String(order.customer_id),
+          p_expected_quote_status: [previousQuoteStatus],
+          p_final_quote_status: "cancelled",
+          p_operation_key: `self-service-cancel-refund:${order.id}`,
+          p_reason: "沒有心儀的陪陪，取消並退款",
+        },
+      );
+      cancellation = result.data;
+      if (result.error || !cancellation) {
+        throw new Error(result.error?.message || "取消訂單原子退款失敗");
+      }
+      refundAmount = Number(cancellation.refund_amount || 0);
+      refundedBalance = Number(cancellation.balance || 0);
     }
-    refundAmount = Number(cancellation.refund_amount || 0);
-    refundedBalance = Number(cancellation.balance || 0);
 
-    if (refundAmount > 0) {
+    if (refundAmount > 0 && cancellation) {
       if (!cancellation.already_processed) {
         // wallet_logs 已由 RPC 寫入；這裡只發送通知。
         await paymentHelpers.sendWalletLog?.(
@@ -2522,7 +2737,7 @@ async function cancelAndRefundSelfServiceOrder(interaction) {
         );
       }
     }
-    await processFinancialEffect(`self-service-cancel-refund:${order.id}`).catch(
+    if (!isManualDispatchOrder(order)) await processFinancialEffect(`self-service-cancel-refund:${order.id}`).catch(
       (effectError) =>
         console.error("[自助下單取消退款] VIP/會計已排入持久補償", effectError),
     );
@@ -2533,7 +2748,19 @@ async function cancelAndRefundSelfServiceOrder(interaction) {
     pendingSelfServiceOrders.delete(`selection:${order.id}`);
     pendingSelfServiceOrders.delete(`candidatePrompt:${order.id}`);
     await closeSelfServiceClaimButton(order.id);
-    await archiveSelfServiceClaimThread(order.id, "老闆已手動棄單");
+    const claimMessage = await findSelfServiceClaimMessage(order.id, order);
+    const dispatchChannel = await client.channels.fetch(getClaimDispatchChannelId(order)).catch(() => null);
+    const resultChannel = claimMessage?.channel?.isThread?.() ? claimMessage.channel : dispatchChannel;
+    await resultChannel?.send({
+      content: `訂單 ${order.order_no || order.id} 已由老闆手動棄單。`,
+      files: [{ attachment: SELF_SERVICE_FAILED_IMAGE, name: "dispatch-failed.png" }],
+      allowedMentions: { parse: [] },
+    }).catch(() => null);
+    const resultThread = await finishClaimThread(order, {
+      succeeded: false,
+      reason: "老闆已手動棄單",
+    });
+    await resultThread?.setArchived(true, "自動棄單").catch(() => null);
     pendingSelfServiceOrders.delete(`claimMessage:${order.id}`);
     await interaction.message.edit({ components: [] }).catch(() => null);
     await interaction.channel.send(
@@ -2565,7 +2792,69 @@ async function confirmSelfServicePlayers(interaction) {
   const selectedIds = selection?.customerId === interaction.user.id
     ? selection.selectedIds
     : String(order.preferred_player || "").split(",").filter(Boolean);
-  if (!selectedIds.length || order.quote_status !== "confirming_players") return interaction.editReply({ content: "❌ 接單名單已過期，請重新派單。" });
+  const expectedConfirmStatus = isManualDispatchOrder(order)
+    ? "manual_confirming_players"
+    : "confirming_players";
+  if (!selectedIds.length || order.quote_status !== expectedConfirmStatus) return interaction.editReply({ content: "❌ 接單名單已過期，請重新派單。" });
+  if (Date.now() >= getSelfServiceSelectionDeadline(order)) {
+    await failSelfServiceDispatch(order.id);
+    return interaction.editReply({ content: "❌ 派單時間已結束，這張訂單已自動棄單。" });
+  }
+  if (isManualDispatchOrder(order)) {
+    const { data: quotedOrder, error } = await supabase
+      .from("play_orders")
+      .update({
+        preferred_player: selectedIds.join(","),
+        status: "quoted",
+        quote_status: "quoted",
+        payment_method: "未選擇",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", order.id)
+      .eq("paid", false)
+      .eq("quote_status", "manual_confirming_players")
+      .select()
+      .maybeSingle();
+    if (error || !quotedOrder) {
+      return interaction.editReply({ content: "❌ 確認陪陪失敗，請稍後再試。" });
+    }
+    const selectionTimer = selfServiceDispatchTimers.get(String(order.id));
+    if (selectionTimer) clearTimeout(selectionTimer);
+    selfServiceDispatchTimers.delete(String(order.id));
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await publishClaimSuccess(quotedOrder, selectedIds);
+    pendingSelfServiceOrders.delete(`selection:${order.id}`);
+    pendingSelfServiceOrders.delete(`candidatePrompt:${order.id}`);
+    await interaction.channel.send({
+      content: `<@${order.customer_id}> 已確認接單陪陪，現在請選擇是否使用優惠券，接著完成付款。`,
+      embeds: [
+        new EmbedBuilder()
+          .setColor(QIUNAI_WATER_BLUE)
+          .setTitle("✅ 接單成功｜進入付款流程")
+          .setDescription(
+            `訂單：${order.order_no || order.id}\n` +
+            `陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n` +
+            `應付：NT$${Number(order.final_price || order.price || 0).toLocaleString("zh-TW")}\n\n` +
+            `請先選擇是否使用優惠券。`,
+          )
+          .setTimestamp(),
+      ],
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`quote_use_coupon_${order.id}`)
+            .setLabel("使用優惠券")
+            .setEmoji("🎟️")
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(`quote_no_coupon_${order.id}`)
+            .setLabel("不使用優惠券")
+            .setStyle(ButtonStyle.Secondary),
+        ),
+      ],
+    });
+    return interaction.editReply({ content: "✅ 已確認陪陪，現在進入付款流程。" });
+  }
   if (order.paid) {
     const { data: acceptedOrder, error } = await supabase
       .from("play_orders")
@@ -2584,6 +2873,9 @@ async function confirmSelfServicePlayers(interaction) {
     if (error || !acceptedOrder) {
       return interaction.editReply({ content: "❌ 確認陪陪失敗，請稍後再試。" });
     }
+    const selectionTimer = selfServiceDispatchTimers.get(String(order.id));
+    if (selectionTimer) clearTimeout(selectionTimer);
+    selfServiceDispatchTimers.delete(String(order.id));
     for (const playerId of selectedIds) {
       await interaction.channel.permissionOverwrites.edit(playerId, {
         ViewChannel: true,
@@ -2594,6 +2886,7 @@ async function confirmSelfServicePlayers(interaction) {
     await workReportSystem.sendForAcceptedOrder(acceptedOrder, selectedIds);
     await sendStaffOrderControlPanel(interaction.channel, acceptedOrder);
     await interaction.message.edit({ components: [] }).catch(() => null);
+    await publishClaimSuccess(acceptedOrder, selectedIds);
     await interaction.channel.send({
       content: `<@${order.customer_id}> ${selectedIds.map((id) => `<@${id}>`).join(" ")}`,
       embeds: [
@@ -2767,18 +3060,35 @@ async function reselectSelfServicePlayers(interaction) {
   const order = await getSelfServiceOrder(interaction, "self_players_reselect_");
   if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
   if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以重新派單。" });
-  const dispatchAtIso = new Date().toISOString();
-  const dispatchNote = `${stripSelfServiceClaimNotes(String(order.note || "").replace(/\[DISPATCH_AT:[^\]]+\]/g, ""))} [DISPATCH_AT:${dispatchAtIso}]`;
+  if (Date.now() >= getSelfServiceSelectionDeadline(order)) {
+    await failSelfServiceDispatch(order.id);
+    return interaction.editReply({ content: "❌ 派單時間已結束，這張訂單已自動棄單。" });
+  }
+  const dispatchNote = stripSelfServiceClaimNotes(order.note);
   const { data: redispatchOrder, error } = await supabase
     .from("play_orders")
-    .update({ preferred_player: null, status: "pending", quote_status: "self_dispatching", note: dispatchNote, updated_at: dispatchAtIso })
+    .update({ preferred_player: null, status: "pending", quote_status: getClaimDispatchingStatus(order), note: dispatchNote, updated_at: new Date().toISOString() })
     .eq("id", order.id)
     .eq("paid", false)
+    .eq("quote_status", isManualDispatchOrder(order) ? "manual_confirming_players" : "confirming_players")
     .select()
     .single();
   if (error || !redispatchOrder) return interaction.editReply({ content: "❌ 重新派單失敗。" });
   pendingSelfServiceOrders.delete(`selection:${order.id}`);
   await interaction.message.edit({ components: [] }).catch(() => null);
+  const oldClaimMessage = await findSelfServiceClaimMessage(order.id, order);
+  await oldClaimMessage?.edit({ components: [] }).catch(() => null);
+  const oldThread = oldClaimMessage?.channel?.isThread?.() ? oldClaimMessage.channel : null;
+  if (oldThread) {
+    await oldThread.send({
+      content: `訂單 ${order.order_no || order.id} 已重新派單，本討論串不再受理接單。`,
+      files: [{ attachment: SELF_SERVICE_FAILED_IMAGE, name: "dispatch-failed.png" }],
+      allowedMentions: { parse: [] },
+    }).catch(() => null);
+    await oldThread.setName(getDispatchResultThreadName(order, false), "老闆重新派單").catch(() => null);
+    await oldThread.setArchived(true, "老闆重新派單").catch(() => null);
+  }
+  pendingSelfServiceOrders.delete(`claimMessage:${order.id}`);
   await sendSelfServiceDispatch(redispatchOrder);
   return interaction.editReply({ content: "✅ 已要求重新派單。" });
 }
@@ -4261,9 +4571,14 @@ async function findMessageByButton(channel, customId) {
 
 async function findExistingStaffOrderMessage(order) {
   const channel = await client.channels
-    .fetch(process.env.PLAYER_ORDER_CHANNEL)
+    .fetch(isManualDispatchOrder(order) ? getManualDispatchChannelId(order) : process.env.PLAYER_ORDER_CHANNEL)
     .catch(() => null);
-  return findMessageByButton(channel, `accept_play_order_${order.id}`);
+  return findMessageByButton(
+    channel,
+    isManualDispatchOrder(order)
+      ? `manual_preselected_order_${order.id}`
+      : `accept_play_order_${order.id}`,
+  );
 }
 
 async function findExistingStaffControlMessage(channel, order) {
@@ -4551,7 +4866,11 @@ function startFinancialEffectsRecovery() {
 }
 
 async function sendOrderToStaffChannel(order) {
-  const channel = await client.channels.fetch(process.env.PLAYER_ORDER_CHANNEL);
+  const channel = await client.channels.fetch(
+    isManualDispatchOrder(order)
+      ? getManualDispatchChannelId(order)
+      : process.env.PLAYER_ORDER_CHANNEL,
+  );
 
   const preferredText = buildPreferredPlayerText(order.preferred_player);
 
@@ -4598,7 +4917,7 @@ async function sendOrderToStaffChannel(order) {
       },
       {
         name: "📝 備註需求",
-        value: order.note || "無",
+        value: getPublicOrderNote(order.note),
         inline: false,
       }
     )
@@ -4608,10 +4927,16 @@ async function sendOrderToStaffChannel(order) {
     .setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`accept_play_order_${order.id}`)
-      .setLabel("接單")
-      .setStyle(ButtonStyle.Success)
+    isManualDispatchOrder(order)
+      ? new ButtonBuilder()
+          .setCustomId(`manual_preselected_order_${order.id}`)
+          .setLabel("老闆已選定陪陪")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(true)
+      : new ButtonBuilder()
+          .setCustomId(`accept_play_order_${order.id}`)
+          .setLabel("接單")
+          .setStyle(ButtonStyle.Success)
   );
 
   const playerRoleMention = process.env.PLAYER_ROLE_ID
@@ -4619,7 +4944,9 @@ async function sendOrderToStaffChannel(order) {
     : "";
   return channel.send({
     content:
-      order.dispatch_type === "reserve"
+      isManualDispatchOrder(order)
+        ? `${preferredText} ✅ 老闆已選定陪陪並完成付款，不再開放其他人接單。`
+        : order.dispatch_type === "reserve"
         ? `${playerRoleMention} 🕒 預約派單：<@${order.reserved_player}>｜時間：${order.reserved_time}`
         : order.preferred_player
         ? `${playerRoleMention} 🌟 指定陪陪派單：${preferredText}`
@@ -4629,6 +4956,43 @@ async function sendOrderToStaffChannel(order) {
   });
 }
 async function sendStaffOrderControlPanel(channel, order) {
+  if (isManualDispatchOrder(order) && order.paid) {
+    const selectedIds = String(order.preferred_player || "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+    if (!selectedIds.length) throw new Error("人工派單已付款，但缺少老闆選定的陪陪");
+    for (const playerId of selectedIds) {
+      await channel.permissionOverwrites?.edit(playerId, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+      });
+    }
+    const { data: acceptedOrder, error } = await supabase
+      .from("play_orders")
+      .update({
+        assigned_player: selectedIds.join(","),
+        status: "accepted",
+        accepted_at: order.accepted_at || new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", order.id)
+      .eq("paid", true)
+      .select()
+      .maybeSingle();
+    if (error || !acceptedOrder) throw new Error(error?.message || "完成人工派單指派失敗");
+    order = acceptedOrder;
+    await workReportSystem.sendForAcceptedOrder(order, selectedIds);
+    await channel.send({
+      content:
+        `<@${order.customer_id}> ${selectedIds.map((id) => `<@${id}>`).join(" ")}\n` +
+        `✅ 付款已完成，系統已將老闆選定的陪陪加入頻道並發送報單。`,
+      allowedMentions: {
+        users: [String(order.customer_id), ...selectedIds],
+      },
+    });
+  }
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`staff_edit_order_${order.id}`)
@@ -6562,11 +6926,11 @@ async function askNewOrderNoteChoice(interaction, flowId, pending) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`new_order_note_yes_${flowId}`)
-      .setLabel("我要填備註")
+      .setLabel("填寫備註並確認下單")
       .setStyle(ButtonStyle.Primary),
     new ButtonBuilder()
       .setCustomId(`new_order_note_no_${flowId}`)
-      .setLabel("不填備註")
+      .setLabel("無備註，確認下單")
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(`new_order_back_duration_${flowId}`)
@@ -6578,7 +6942,7 @@ async function askNewOrderNoteChoice(interaction, flowId, pending) {
 
   const payload = {
     content:
-      `📝 需求即將送出，是否要填寫備註？\n\n` +
+      `📝 請確認需求；你可以填寫備註後下單，或直接以「無備註」確認下單。\n\n` +
       `🎮 遊戲：${pending.game}\n` +
       `📌 項目：${pending.item}\n` +
       (pending.game === "特戰英豪"
@@ -6955,6 +7319,123 @@ async function submitNewOrderNote(interaction) {
 
   return await createWaitingQuoteOrder(interaction, flowId, pending);
 }
+
+function buildManualQuoteDispatchComponents(orderId) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`manual_quote_dispatch_${orderId}`)
+        .setLabel("確認報價並正式派單")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`manual_quote_cancel_${orderId}`)
+        .setLabel("取消訂單")
+        .setStyle(ButtonStyle.Danger),
+    ),
+  ];
+}
+
+async function sendManualQuoteDispatchPrompt(channel, order, { quotedBy = null } = {}) {
+  const price = Number(order.final_price || order.price || 0);
+  return channel.send({
+    content: `<@${order.customer_id}> 報價已完成，請確認後正式派單。`,
+    embeds: [
+      new EmbedBuilder()
+        .setColor(QIUNAI_WATER_BLUE)
+        .setTitle("💰 報價完成｜等待正式派單")
+        .setDescription(
+          `訂單編號：${order.order_no || order.id}\n` +
+          `報價金額：NT$${price.toLocaleString("zh-TW")}\n` +
+          (quotedBy ? `報價客服：<@${quotedBy}>\n` : "系統已依現行價目表自動報價。\n") +
+          `\n按下「確認報價並正式派單」後，系統會依遊戲送到對應派單區並建立討論串。\n` +
+          `選定接單陪陪後，才會進入優惠券與付款流程。`,
+        )
+        .setTimestamp(),
+    ],
+    components: buildManualQuoteDispatchComponents(order.id),
+  });
+}
+
+async function confirmManualQuoteAndDispatch(interaction) {
+  await deferReplyOnce(interaction);
+  const orderId = interaction.customId.replace("manual_quote_dispatch_", "");
+  const { data: order, error } = await supabase
+    .from("play_orders")
+    .select("*")
+    .eq("id", orderId)
+    .maybeSingle();
+  if (error || !order || !isManualDispatchOrder(order)) {
+    return interaction.editReply({ content: "❌ 找不到這張人工下單需求。" });
+  }
+  if (!canCustomerOrStaffSubmit(interaction, order.customer_id)) {
+    return interaction.editReply({ content: "❌ 只有下單者、客服或管理員可以確認正式派單。" });
+  }
+  if (order.paid) {
+    return interaction.editReply({ content: "❌ 這張訂單已經付款，不能重新派單。" });
+  }
+  if (getClaimDispatchStatuses(order).includes(order.quote_status) || order.preferred_player) {
+    return interaction.editReply({ content: "⚠️ 這張訂單已正式派出，請使用原本的討論串。" });
+  }
+  if (order.quote_status !== "quoted" || Number(order.final_price || order.price || 0) <= 0) {
+    return interaction.editReply({ content: "❌ 這張訂單尚未完成報價。" });
+  }
+  const dispatchAtIso = new Date().toISOString();
+  const dispatchNote = `${String(order.note || "").replace(/\[DISPATCH_AT:[^\]]+\]/g, "").trim()} [DISPATCH_AT:${dispatchAtIso}]`;
+  const { data: dispatchOrder, error: updateError } = await supabase
+    .from("play_orders")
+    .update({
+      status: "pending",
+      quote_status: "manual_dispatching",
+      confirmed_by_customer: true,
+      preferred_player: null,
+      note: dispatchNote,
+      updated_at: dispatchAtIso,
+    })
+    .eq("id", order.id)
+    .eq("quote_status", "quoted")
+    .eq("paid", false)
+    .select()
+    .maybeSingle();
+  if (updateError || !dispatchOrder) {
+    return interaction.editReply({ content: "⚠️ 訂單狀態已更新，請勿重複操作。" });
+  }
+  try {
+    await sendSelfServiceDispatch(dispatchOrder);
+    await interaction.message?.edit({ components: [] }).catch(() => null);
+    return interaction.editReply({ content: "✅ 已正式派單，等待陪陪登記接單。" });
+  } catch (dispatchError) {
+    await supabase
+      .from("play_orders")
+      .update({ quote_status: "quoted", status: "quoted", updated_at: new Date().toISOString() })
+      .eq("id", order.id)
+      .eq("quote_status", "manual_dispatching");
+    return interaction.editReply({ content: `❌ 正式派單失敗：${dispatchError.message || dispatchError}` });
+  }
+}
+
+async function cancelManualQuotedOrder(interaction) {
+  await deferReplyOnce(interaction);
+  const orderId = interaction.customId.replace("manual_quote_cancel_", "");
+  const { data: order } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+  if (!order || !isManualDispatchOrder(order)) {
+    return interaction.editReply({ content: "❌ 找不到這張人工下單需求。" });
+  }
+  if (!canCustomerOrStaffSubmit(interaction, order.customer_id)) {
+    return interaction.editReply({ content: "❌ 只有下單者、客服或管理員可以取消。" });
+  }
+  const { data: cancelled, error } = await supabase
+    .from("play_orders")
+    .update({ status: "cancelled", quote_status: "cancelled", updated_at: new Date().toISOString() })
+    .eq("id", order.id)
+    .eq("paid", false)
+    .in("quote_status", ["quoted", "waiting_quote"])
+    .select("id")
+    .maybeSingle();
+  if (error || !cancelled) return interaction.editReply({ content: "⚠️ 訂單已進入下一階段，無法重複取消。" });
+  await interaction.message?.edit({ components: [] }).catch(() => null);
+  return interaction.editReply({ content: "✅ 已取消尚未派出的訂單。" });
+}
+
 async function createWaitingQuoteOrder(interaction, flowId, pending) {
   const orderNo = await getNextPlayOrderNumber();
 
@@ -6992,7 +7473,7 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
       duration_minutes: pending.durationMinutes || 0,
       duration_text: timeText || "未填寫",
 
-      note: pending.note || "無",
+      note: `${pending.note || "無"} [MANUAL_DISPATCH]`.trim(),
       price: autoPrice,
       final_price: autoPrice,
       original_price: autoPrice,
@@ -7091,7 +7572,7 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
       }
     )
     .setDescription(autoQuote.ok
-      ? `系統已依現行價目表自動報價 NT$${autoPrice.toLocaleString("zh-TW")}。\n請繼續選擇優惠券與付款方式。`
+      ? `系統已依現行價目表自動報價 NT$${autoPrice.toLocaleString("zh-TW")}。\n請確認報價後正式派單；選定陪陪後才會進入付款。`
       : `系統無法自動計算：${autoQuote.reason}\n已轉交客服報價；客服填寫金額後，系統會讓你選擇優惠券與付款方式。`)
     .setTimestamp();
 
@@ -7143,7 +7624,7 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
     }
   }
   if (autoQuote.ok) {
-    await sendOrderQuotePriceConfirm(interaction.channel, order);
+    await sendManualQuoteDispatchPrompt(interaction.channel, order);
   } else {
     await sendStaffQuotePanel(order);
   }
@@ -7166,7 +7647,7 @@ async function sendStaffQuotePanel(order) {
       .setEmoji("💰")
       .setStyle(ButtonStyle.Primary),
   ];
-  if (!isManualQuoteSelfServiceOrder(order)) {
+  if (!isManualDispatchOrder(order) && !isManualQuoteSelfServiceOrder(order)) {
     controls.push(
       new ButtonBuilder()
         .setCustomId(`dispatch_assign_players_${order.id}`)
@@ -7194,7 +7675,9 @@ async function sendStaffQuotePanel(order) {
   await channel.send({
     content:
       `<@&${process.env.STAFF_ROLE}> 有新的需求等待報價。\n` +
-      `請客服確認陪陪與金額後，再讓闆闆選擇付款方式。`,
+      (isManualDispatchOrder(order)
+        ? `請客服只需確認金額；老闆確認報價後，系統會自動派單選人。`
+        : `請客服確認陪陪與金額後，再讓闆闆選擇付款方式。`),
     embeds: [
       new EmbedBuilder()
         .setColor(QIUNAI_WATER_BLUE)
@@ -7239,7 +7722,7 @@ async function sendStaffQuotePanel(order) {
           },
           {
             name: "📝 備註",
-            value: order.note || "無",
+            value: getPublicOrderNote(order.note),
             inline: false,
           }
         )
@@ -7365,6 +7848,15 @@ async function submitStaffQuotePrice(interaction) {
     console.error("[客服報價] 更新金額失敗", error);
     return interaction.editReply({
       content: "❌ 更新報價失敗",
+    });
+  }
+
+  if (isManualDispatchOrder(order)) {
+    await sendManualQuoteDispatchPrompt(interaction.channel, order, {
+      quotedBy: interaction.user.id,
+    });
+    return interaction.editReply({
+      content: `✅ 已填寫報價 NT$${price.toLocaleString("zh-TW")}，等待老闆確認正式派單。`,
     });
   }
 
@@ -8282,7 +8774,7 @@ async function sendCustomerFinalConfirm(channel, order) {
       },
       {
         name: "📝 備註",
-        value: order.note || "無",
+        value: getPublicOrderNote(order.note),
         inline: false,
       }
     )
@@ -14153,6 +14645,14 @@ async function handleDispatchInteractionInner(interaction) {
       await cancelAndRefundSelfServiceOrder(interaction);
       return true;
     }
+    if (interaction.customId.startsWith("manual_quote_dispatch_")) {
+      await confirmManualQuoteAndDispatch(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("manual_quote_cancel_")) {
+      await cancelManualQuotedOrder(interaction);
+      return true;
+    }
     if (interaction.customId.startsWith("self_selection_extend_")) {
       await extendSelfServiceSelectionTime(interaction);
       return true;
@@ -14938,10 +15438,15 @@ module.exports = {
   sendDailyPlayerSummary,
   getNewOrderGameOptions,
   getOrderItemOptions,
+  getManualDispatchChannelId,
+  getClaimDispatchChannelId,
+  isManualDispatchOrder,
   getSelfServiceDispatchRoleIds,
   getSelfServiceDispatchAt,
   getSelfServiceSelectionDeadline,
   extendSelfServiceSelectionDeadline,
+  getSelfServiceThreadName,
+  getDispatchResultThreadName,
   resolveSelfServicePlayerNumbers,
   getPaidOrderPriceAdjustment,
   getSelfServiceCancellationRefundAmount,

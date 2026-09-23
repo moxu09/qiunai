@@ -11,7 +11,7 @@ test("自助下單選擇陪陪階段顯示延長與棄單按鈕及十秒關閉�
     path.join(__dirname, "..", "events", "dispatchSystem.js"),
     "utf8",
   );
-  assert.match(source, /加長選人時間（\+5 分鐘）/);
+  assert.match(source, /延長派單時間（\+5 分鐘，限一次）/);
   assert.match(source, /setLabel\("棄單"\)/);
   assert.match(source, /self_selection_extend_/);
   assert.match(source, /self_service_cancel_refund_/);
