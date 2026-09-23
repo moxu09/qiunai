@@ -122,6 +122,12 @@ test("自助購幣面板沿用自助下單付款方式並支援快速購買", ()
   assert.match(indexSource, /街口自助購幣面板/);
 });
 
+test("綠界購幣商品名稱為購買ASD，不沿用儲值字樣", () => {
+  const dispatchSource = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+  assert.match(dispatchSource, /kind: "topup", entityKey: String\(topupNo\)[\s\S]*?description: "購買ASD"/);
+  assert.doesNotMatch(dispatchSource, /description: `秋奈星雨幣儲值/);
+});
+
 test("一般購幣面板顯示指定的六種付款方式，不改動實際付款選單", () => {
   const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
   const dispatchSource = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");

@@ -11061,7 +11061,7 @@ async function handleTopupPaymentMethodSelect(interaction) {
       const payment = await paymentHelpers.createEcpayServicePayment({
         kind: "topup", entityKey: String(topupNo), userId: interaction.user.id,
         amount, channelId: interaction.channel.id,
-        description: `秋奈星雨幣儲值 ${topupNo}`,
+        description: "購買ASD",
         metadata: { topupNo: String(topupNo), guildId: interaction.guildId || process.env.GUILD_ID, note, ...(pending.selfService ? { flow: "self_service" } : {}) },
       });
       if (requestedMethod) {
