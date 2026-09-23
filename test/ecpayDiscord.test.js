@@ -96,7 +96,8 @@ test("自助單自動取號時先隱藏條碼按鈕，失敗才開放重試", ()
   const prompt = source.split("async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {")[1]
     .split("async function sendBankTransferInfo")[0];
   assert.match(prompt, /components: autoIssueMethod \? \[\] : paymentRows/);
-  assert.match(prompt, /if \(!issued\) await message\.edit\(\{ components: paymentRows \}\)/);
+  assert.match(prompt, /if \(!issued\) \{/);
+  assert.match(prompt, /throw new Error\("綠界取號資訊未成功送出/);
 });
 
 test("虛擬 ATM 取號後直接發到原付款頻道，未標記已付款", async () => {
@@ -179,4 +180,18 @@ test("超商條碼在 Discord 產生單張白底 PNG；已 defer 的互動不重
     assert.equal(sent.length, 1);
     assert.match(replies.at(-1).content, /已發送過/);
   } finally { global.fetch = originalFetch; if (originalSecret === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = originalSecret; }
+});
+
+test("已取超商條碼的付款編號，不可誤回覆 ATM 資訊已送出", async () => {
+  const replies = [];
+  const interaction = { customId: `ecpay_direct_ATM_${order}`, user: { id: "123" }, channelId: "456", deferred: true,
+    async editReply(payload) { replies.push(payload); },
+    channel: { async send() { throw new Error("不應發送 ATM 付款資訊"); } } };
+  const supabase = { from() { return { select() { return this; }, eq() { return this; },
+    async maybeSingle() { return { data: { user_id: "123", channel_id: "456", status: "pending", amount: 280,
+      payment_kind: "order", organization_code: "qiunai", raw_result: { PaymentType: "BARCODE" },
+      metadata: { flow: "self_service", ecpay_direct_method: "BARCODE", ecpay_direct_message_id: "old-message" } }, error: null }; } }; } };
+  await handleEcpayDirect(interaction, supabase, "https://pay.example");
+  assert.match(replies.at(-1).content, /無法改成ATM/);
+  assert.doesNotMatch(replies.at(-1).content, /已發送過/);
 });

@@ -38,6 +38,19 @@ test("建立綠界服務付款使用獨立付款表與 20 字元內交易編號"
   await assert.rejects(service.createServicePayment({ kind: "order", entityKey: "x", userId: "1", amount: 5 }), /金額/);
 });
 
+test("已有超商條碼時，不得把同一綠界編號當作新的 ATM 付款單", async () => {
+  const supabase = { from() { return { select() { return this; }, eq() { return this; },
+    async maybeSingle() { return { data: {
+      user_id: "123", amount: 280, status: "pending", created_at: new Date().toISOString(),
+      merchant_trade_no: "QNOLD", metadata: { ecpay_direct_method: "BARCODE" },
+      raw_result: { PaymentType: "BARCODE" },
+    }, error: null }; } }; } };
+  const service = createEcpayService({ supabase,
+    env: { ECPAY_PUBLIC_BASE_URL: "https://pay.example", ECPAY_ACCEPT_PAYMENTS: "true" } });
+  await assert.rejects(service.createServicePayment({ kind: "order", entityKey: "order-1",
+    userId: "123", amount: 280, requestedMethod: "ATM" }), /不能沿用同一編號改成ATM/);
+});
+
 test("停止接受新付款後仍會補處理已入帳的綠界訂單", async () => {
   const payment = { id: "payment-1", merchant_trade_no: "QN123", amount: 100, status: "paid", payment_kind: "tip", trade_no: "trade-1" };
   const calls = [];

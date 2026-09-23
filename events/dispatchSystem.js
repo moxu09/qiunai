@@ -3246,6 +3246,7 @@ async function paySelfServiceOrderByGateway(interaction) {
         entityKey: String(order.id),
         userId: order.customer_id,
         amount,
+        ...(ecpay ? { requestedMethod: { card: "CARD", atm: "ATM", cvs: "CVS", barcode: "BARCODE" }[selectedMethod] } : {}),
         channelId: interaction.channel.id,
         description: `自助陪玩訂單 ${order.order_no || order.id}`,
         metadata: {
@@ -4028,7 +4029,10 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
   await paymentHelpers.attachEcpayPaymentMessage?.(payment.platformOrderId, message.id);
   if (autoIssueMethod) {
     const issued = await sendPreferredEcpayDirect(channel, userId, payment.platformOrderId, supabase, process.env.ECPAY_PUBLIC_BASE_URL, autoIssueMethod);
-    if (!issued) await message.edit({ components: paymentRows }).catch(() => null);
+    if (!issued) {
+      await message.edit({ components: paymentRows }).catch(() => null);
+      throw new Error("綠界取號資訊未成功送出，請查看頻道中的錯誤訊息；尚未取得可付款的帳號或代碼");
+    }
   }
   return message;
 }

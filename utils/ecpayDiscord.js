@@ -73,7 +73,7 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
   if (!interaction.deferred && !interaction.replied) await interaction.deferReply({ flags: 64 });
   try {
     const { data: payment, error } = await supabase.from("ecpay_service_payments")
-      .select("user_id,channel_id,status,amount,payment_kind,organization_code,metadata").eq("merchant_trade_no", order).maybeSingle();
+      .select("user_id,channel_id,status,amount,payment_kind,organization_code,metadata,raw_result").eq("merchant_trade_no", order).maybeSingle();
     if (error || !payment || payment.status !== "pending" ||
         payment.user_id !== interaction.user.id || String(payment.channel_id) !== String(interaction.channelId))
       throw new Error("這筆付款不屬於你，或已完成付款");
@@ -84,6 +84,9 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
     if (payment.amount < limit.min || payment.amount > limit.max ||
         (payment.payment_kind === "topup" && method !== "ATM"))
       throw new Error("此付款方式不適用這筆金額或訂單");
+    const issuedMethod = payment.raw_result?.PaymentType || payment.metadata?.ecpay_direct_method;
+    if (issuedMethod && issuedMethod !== method)
+      throw new Error(`這筆綠界付款單已產生${issuedMethod}繳費資訊，無法改成${method}；請勿重複付款，請聯繫客服處理`);
     const deliveredId = payment.metadata?.ecpay_direct_message_id || directDeliveries.get(order)?.messageId;
     if (deliveredId) {
       await interaction.editReply({ content: `✅ 此筆繳費資訊已發送過，請使用原訊息：https://discord.com/channels/${interaction.guildId || interaction.channel?.guildId || "@me"}/${interaction.channelId}/${deliveredId}` });
