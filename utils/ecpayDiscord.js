@@ -9,20 +9,25 @@ const METHODS = Object.freeze({
   BARCODE: { label: "超商條碼", min: 18, max: 20_000 },
 });
 
-function buildEcpayPaymentRows(payment, amount, { topup = false } = {}) {
+function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = null } = {}) {
   const order = String(payment.platformOrderId || "");
   const base = String(payment.paymentUrl || "").split("/payments/ecpay/service/checkout")[0];
   if (!/^[A-Za-z0-9]{1,20}$/.test(order) || !/^https:\/\//.test(base))
     throw new Error("綠界付款連結不正確");
-  const buttons = [new ButtonBuilder().setLabel("站內刷卡").setEmoji("💳")
-    .setStyle(ButtonStyle.Link).setURL(`${base}/payments/ecpay/service/insite?order=${encodeURIComponent(order)}`)];
+  const buttons = [];
+  if (!onlyMethod || onlyMethod === "CARD") {
+    buttons.push(new ButtonBuilder().setLabel("站內刷卡").setEmoji("💳")
+      .setStyle(ButtonStyle.Link).setURL(`${base}/payments/ecpay/service/insite?order=${encodeURIComponent(order)}`));
+  }
   for (const [method, limit] of Object.entries(METHODS)) {
+    if (onlyMethod && onlyMethod !== method) continue;
     if (method === "ATM" && !isEcpayAtmAvailable()) continue;
     if (topup && method !== "ATM") continue;
     if (amount < limit.min || amount > limit.max) continue;
     buttons.push(new ButtonBuilder().setCustomId(`ecpay_direct_${method}_${order}`)
       .setLabel(limit.label).setStyle(ButtonStyle.Primary));
   }
+  if (!buttons.length) throw new Error("此訂單金額不適用所選的綠界付款方式");
   return [new ActionRowBuilder().addComponents(buttons)];
 }
 
@@ -82,14 +87,15 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
   return true;
 }
 
-async function sendPreferredEcpayDirect(channel, userId, order, supabase, baseUrl) {
+async function sendPreferredEcpayDirect(channel, userId, order, supabase, baseUrl, method = "ATM") {
   let failure = null;
   await handleEcpayDirect({
-    customId: `ecpay_direct_ATM_${order}`, user: { id: userId }, channelId: channel.id, channel,
+    customId: `ecpay_direct_${method}_${order}`, user: { id: userId }, channelId: channel.id, channel,
     deferReply: async () => {},
     editReply: async ({ content }) => { if (content.startsWith("❌")) failure = content; },
   }, supabase, baseUrl);
-  if (failure) await channel.send({ content: `<@${userId}> ${failure} 已建立付款單但尚未取得虛擬帳號；請勿改用舊匯款帳號。` });
+  if (failure) await channel.send({ content: `<@${userId}> ${failure} 已建立付款單但尚未取得繳費資訊；請勿重複建立付款單。` });
+  return !failure;
 }
 
 module.exports = { buildEcpayPaymentRows, handleEcpayDirect, sendPreferredEcpayDirect };

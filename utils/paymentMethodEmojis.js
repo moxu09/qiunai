@@ -195,7 +195,7 @@ function buildPaymentMethodButtonRows(baseCustomId, options = []) {
     const code = PAYMENT_METHOD_CODES[method];
     if (!code) throw new Error(`未設定付款方式按鈕代碼：${method}`);
     const button = new ButtonBuilder()
-      .setCustomId(`${baseCustomId}${PAYMENT_BUTTON_MARKER}${code}`)
+      .setCustomId(`${baseCustomId}${PAYMENT_BUTTON_MARKER}${code}__review`)
       .setLabel(String(option.label || method))
       .setStyle(getPaymentButtonStyle(Math.floor(index / 2)));
     if (option.emoji) button.setEmoji(option.emoji);
@@ -228,10 +228,12 @@ function getPaymentMethodSelection(interaction, prefix) {
   }
   const markerIndex = remainder.lastIndexOf(PAYMENT_BUTTON_MARKER);
   if (markerIndex < 0) return null;
-  const code = remainder.slice(markerIndex + PAYMENT_BUTTON_MARKER.length);
+  const rawCode = remainder.slice(markerIndex + PAYMENT_BUTTON_MARKER.length);
+  const requiresConfirmation = rawCode.endsWith("__review");
+  const code = requiresConfirmation ? rawCode.slice(0, -"__review".length) : rawCode;
   const paymentMethod = PAYMENT_METHOD_BY_CODE[code];
   if (!paymentMethod) return null;
-  return { entityId: remainder.slice(0, markerIndex), ...resolveBankMethod(paymentMethod) };
+  return { entityId: remainder.slice(0, markerIndex), ...resolveBankMethod(paymentMethod), requiresConfirmation };
 }
 
 async function ensurePaymentMethodEmojis(client) {

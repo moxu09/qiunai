@@ -24,6 +24,19 @@ test("綠界刷卡留在站內；ATM 與超商由機器人直接取號", () => {
   } finally { Date.now = originalNow; }
 });
 
+test("自助訂單選擇單一綠界方式時只顯示該方式", () => {
+  const originalNow = Date.now;
+  Date.now = () => ECPAY_ATM_START;
+  try {
+    const card = buildEcpayPaymentRows(payment, 100, { onlyMethod: "CARD" })[0].components.map(button => button.toJSON());
+    assert.deepEqual(card.map(button => button.label), ["站內刷卡"]);
+    const cvs = buildEcpayPaymentRows(payment, 100, { onlyMethod: "CVS" })[0].components.map(button => button.toJSON());
+    assert.deepEqual(cvs.map(button => button.label), ["超商代碼"]);
+    const barcode = buildEcpayPaymentRows(payment, 100, { onlyMethod: "BARCODE" })[0].components.map(button => button.toJSON());
+    assert.deepEqual(barcode.map(button => button.label), ["超商條碼"]);
+  } finally { Date.now = originalNow; }
+});
+
 test("虛擬 ATM 開放日前，按鈕隱藏且匯款仍走原帳號", () => {
   assert.equal(isEcpayAtmAvailable(ECPAY_ATM_START - 1), false);
   assert.equal(isEcpayAtmAvailable(ECPAY_ATM_START), true);
@@ -95,11 +108,34 @@ test("虛擬 ATM 取號後直接發到原付款頻道，未標記已付款", asy
       bankCode: "822", virtualAccount: "1234567890123456" } }; } };
   };
   try {
-    await sendPreferredEcpayDirect(channel, "123", order, supabase, "https://pay.example");
+    assert.equal(await sendPreferredEcpayDirect(channel, "123", order, supabase, "https://pay.example"), true);
     assert.equal(sent.length, 1);
     assert.match(sent[0].content, /虛擬帳號：`1234567890123456`/);
     assert.match(sent[0].content, /取號不代表已付款/);
   } finally { Date.now = originalNow; global.fetch = originalFetch; if (originalSecret === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = originalSecret; }
+});
+
+test("自助單超商代碼選定後可直接取號，且只在實際繳款後核帳", async () => {
+  const sent = [];
+  const channel = { id: "456", async send(payload) { sent.push(payload); } };
+  const supabase = { from() { return { select() { return this; }, eq() { return this; },
+    async maybeSingle() { return { data: { user_id: "123", channel_id: "456", status: "pending", amount: 100, payment_kind: "order" } }; } }; } };
+  const originalFetch = global.fetch;
+  const originalSecret = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-secret";
+  global.fetch = async (_url, init) => {
+    assert.equal(JSON.parse(init.body).method, "CVS");
+    return { ok: true, async json() { return { payment_info: { method: "CVS", expireDate: "2026/09/26", paymentNo: "AB12345678" } }; } };
+  };
+  try {
+    assert.equal(await sendPreferredEcpayDirect(channel, "123", order, supabase, "https://pay.example", "CVS"), true);
+    assert.match(sent[0].content, /超商繳費代碼：`AB12345678`/);
+    assert.match(sent[0].content, /取號不代表已付款/);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalSecret === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = originalSecret;
+  }
 });
 
 test("超商條碼在 Discord 直接產生三張 PNG", async () => {

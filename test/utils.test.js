@@ -121,8 +121,9 @@ test("自助下單可使用整合後的街口支付並於付款後自動發送�
   assert.match(dispatchSource, /self_service_pay_jkopay_/);
   assert.match(dispatchSource, /flow: "self_service"/);
   assert.match(dispatchSource, /selectedPlayerIds: selectedIds/);
-  assert.match(dispatchSource, /街口付款核對完成，報單已發送/);
-  assert.match(dispatchSource, /ASD 錢包或街口支付/);
+  assert.match(dispatchSource, /\$\{paymentLabel\}付款核對完成，報單已發送/);
+  assert.match(dispatchSource, /jkopay: "街口支付"/);
+  assert.match(dispatchSource, /wallet: "錢包扣款"/);
 });
 
 test("歷史互動錯誤的防護仍保留", () => {

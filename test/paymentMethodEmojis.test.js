@@ -40,6 +40,10 @@ test("付款方式圖片完整且可套用到選單", () => {
   assert.ok(options.every((option) => option.emoji));
 
   const rows = buildPaymentMethodButtonRows("quote_payment_method_order-1", options);
+  const firstButtonId = rows[0].components[0].data.custom_id;
+  assert.match(firstButtonId, /__review$/);
+  assert.equal(getPaymentMethodSelection({ customId: firstButtonId }, "quote_payment_method_").requiresConfirmation, true);
+  assert.equal(getPaymentMethodSelection({ customId: firstButtonId.replace(/__review$/, "") }, "quote_payment_method_").requiresConfirmation, false);
   assert.equal(rows.length, 4);
   assert.deepEqual(rows.map((row) => row.components.length), [2, 2, 2, 1]);
   assert.deepEqual(

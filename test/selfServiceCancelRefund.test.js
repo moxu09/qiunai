@@ -55,3 +55,14 @@ test("派單逾時時已付款的非 ASD 訂單必須保留供人工處理", () 
   assert.equal(requiresManualTimeoutReview({ paid: false, payment_method: "匯款" }), false);
   assert.equal(requiresManualTimeoutReview({ paid: true, payment_method: "ASD", note: "[MANUAL_DISPATCH]" }), true);
 });
+
+test("自助付款六種選項與一般訂單選項分流，先確認才建立付款", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+  const selfPayment = source.split("const SELF_SERVICE_PAYMENT_CHOICES = Object.freeze({")[1].split("});")[0];
+  for (const label of ["街口支付", "線上刷卡", "匯款帳號", "超商條碼", "超商代碼", "錢包扣款"])
+    assert.match(selfPayment, new RegExp(label));
+  assert.match(source, /self_service_prepare_\$\{method\}_\$\{order\.id\}/);
+  assert.match(source, /self_service_payment_back_\$\{orderId\}/);
+  assert.ok(source.includes("const ecpayMatch = /^self_service_pay_ecpay_"));
+  assert.match(source, /if \(isManualDispatchOrder\(order\)\) \{/);
+});
