@@ -6580,6 +6580,14 @@ async function sendTopupPanel(client) {
         .setStyle(ButtonStyle.Primary),
     ),
   );
+  const quickAmountThirdRow = new ActionRowBuilder().addComponents(
+    ...[20000, 30000, 40000, 49999].map((amount) =>
+      new ButtonBuilder()
+        .setCustomId(`order_start_topup_amount_${amount}`)
+        .setLabel(`${amount}元`)
+        .setStyle(ButtonStyle.Primary),
+    ),
+  );
 
   const panel = await getPanelMessage("order_topup", process.env.GUILD_ID);
 
@@ -6589,7 +6597,7 @@ async function sendTopupPanel(client) {
 
       await oldMessage.edit({
         embeds: [embed],
-        components: [row, quickAmountLabelRow, quickAmountRow, quickAmountFinalRow],
+        components: [row, quickAmountLabelRow, quickAmountRow, quickAmountFinalRow, quickAmountThirdRow],
       });
 
       console.log("[TOPUP PANEL] 已更新");
@@ -6601,7 +6609,7 @@ async function sendTopupPanel(client) {
 
   const newMessage = await channel.send({
     embeds: [embed],
-    components: [row, quickAmountLabelRow, quickAmountRow, quickAmountFinalRow],
+    components: [row, quickAmountLabelRow, quickAmountRow, quickAmountFinalRow, quickAmountThirdRow],
   });
 
   await savePanelMessage(

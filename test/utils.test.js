@@ -82,7 +82,7 @@ const {
 } = require("../utils/paymentMethodEmojis");
 
 test("購買星雨幣面板提供快捷金額並直接進入付款流程", () => {
-  assert.deepEqual(TOPUP_PRESET_AMOUNTS, [100, 250, 500, 1000, 3000, 5000, 10000, 15000]);
+  assert.deepEqual(TOPUP_PRESET_AMOUNTS, [100, 250, 500, 1000, 3000, 5000, 10000, 15000, 20000, 30000, 40000, 49999]);
   for (const amount of TOPUP_PRESET_AMOUNTS) {
     assert.equal(parseTopupPresetAmount(`order_start_topup_amount_${amount}`), amount);
   }
@@ -95,8 +95,9 @@ test("購買星雨幣面板提供快捷金額並直接進入付款流程", () =>
   assert.match(indexSource, /\.setLabel\("建立訂單"\)/);
   assert.match(indexSource, /\[100, 250, 500, 1000\]/);
   assert.match(indexSource, /\[3000, 5000, 10000, 15000\]/);
+  assert.match(indexSource, /\[20000, 30000, 40000, 49999\]/);
   assert.match(indexSource, /\.setLabel\("快速金額"\)[\s\S]*?\.setDisabled\(true\)/);
-  assert.match(indexSource, /components: \[row, quickAmountLabelRow, quickAmountRow, quickAmountFinalRow\]/);
+  assert.match(indexSource, /components: \[row, quickAmountLabelRow, quickAmountRow, quickAmountFinalRow, quickAmountThirdRow\]/);
   assert.match(dispatchSource, /const checkout = normalizedPreset[\s\S]*prepareTopupCheckout/);
   assert.doesNotMatch(`${indexSource}\n${dispatchSource}`, /儲值星雨幣|建立儲值單/);
 });
@@ -114,6 +115,8 @@ test("自助購幣面板沿用自助下單付款方式並支援快速購買", ()
   assert.match(dispatchSource, /pending\.selfService \? \{ flow: "self_service" \}/);
   assert.match(dispatchSource, /jkopay_topup_start/);
   assert.match(dispatchSource, /jkopay_topup_amount_/);
+  assert.match(dispatchSource, /TOPUP_PRESET_AMOUNTS\.slice\(4, 8\)/);
+  assert.match(dispatchSource, /TOPUP_PRESET_AMOUNTS\.slice\(8, 12\)/);
   assert.match(dispatchSource, /createJkopayTopupPaymentMessage/);
   assert.match(indexSource, /街口自助購幣面板/);
 });

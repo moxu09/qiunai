@@ -71,7 +71,7 @@ let financialEffectsRecoveryRunning = false;
 
 let pendingNewOrders;
 const pendingTopups = new Map();
-const TOPUP_PRESET_AMOUNTS = Object.freeze([100, 250, 500, 1000, 3000, 5000, 10000, 15000]);
+const TOPUP_PRESET_AMOUNTS = Object.freeze([100, 250, 500, 1000, 3000, 5000, 10000, 15000, 20000, 30000, 40000, 49999]);
 let pendingServiceOrders;
 const processingSalaryPayments = new Set();
 const JKOPAY_METHOD = "街口支付";
@@ -5463,7 +5463,15 @@ async function sendJkopayTopupPanel() {
       ),
     ),
     new ActionRowBuilder().addComponents(
-      ...TOPUP_PRESET_AMOUNTS.slice(4).map((amount) =>
+      ...TOPUP_PRESET_AMOUNTS.slice(4, 8).map((amount) =>
+        new ButtonBuilder()
+          .setCustomId(`jkopay_topup_amount_${amount}`)
+          .setLabel(`${amount}元`)
+          .setStyle(ButtonStyle.Primary),
+      ),
+    ),
+    new ActionRowBuilder().addComponents(
+      ...TOPUP_PRESET_AMOUNTS.slice(8, 12).map((amount) =>
         new ButtonBuilder()
           .setCustomId(`jkopay_topup_amount_${amount}`)
           .setLabel(`${amount}元`)
