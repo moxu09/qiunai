@@ -1711,7 +1711,11 @@ async function sendSelfServiceDispatch(order) {
       `<@${order.customer_id}> ✅ 已開始派單：${threadLink}\n` +
       `陪陪可在討論串選擇「1」或「PM」。派單開始後 15 分鐘內未完成陪陪選擇，系統將自動棄單。\n` +
       `截止時間：<t:${Math.floor(getSelfServiceSelectionDeadline(order) / 1000)}:F>；每筆訂單最多可延長一次 5 分鐘。`,
-    components: [buildDispatchTimeExtensionButton(order)],
+    components: isSelfServiceOrder(order) && !isManualDispatchOrder(order)
+      ? [buildDispatchTimeExtensionButton(order), new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`self_service_cancel_refund_${order.id}`).setLabel("按錯了，取消訂單").setStyle(ButtonStyle.Danger),
+      )]
+      : [buildDispatchTimeExtensionButton(order)],
     allowedMentions: { users: [String(order.customer_id)] },
   }).catch((error) => console.error("[派單] 通知老闆失敗", error));
   return claimMessage;
@@ -2274,7 +2278,7 @@ async function finalizeSelfServiceRequirement(interaction, flowId, pending, inpu
     components: [
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`self_service_quote_yes_${order.id}`).setLabel("接受報價並派單").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`self_service_quote_no_${order.id}`).setLabel("不接受，取消訂單").setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`self_service_quote_no_${order.id}`).setLabel("按錯了，取消訂單").setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId(`self_service_extend_${order.id}`).setLabel("我要加時").setStyle(ButtonStyle.Secondary).setDisabled(true),
       ),
     ],
@@ -2360,7 +2364,7 @@ async function showSelfServiceCandidatePrompt(order, playerIds, messageId = null
           .setDisabled(hasExtendedDispatchTime(order)),
         new ButtonBuilder()
           .setCustomId(`self_service_cancel_refund_${order.id}`)
-          .setLabel("棄單")
+          .setLabel("按錯了，取消訂單")
           .setStyle(ButtonStyle.Danger),
       ),
     ],
@@ -2688,6 +2692,7 @@ async function selectSelfServicePlayerNumbers(interaction) {
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`self_players_confirm_${order.id}`).setLabel(includesPm ? "確認選擇 PM 陪陪" : "確定選擇").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`self_players_reselect_${order.id}`).setLabel("重新派單").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`self_service_cancel_refund_${order.id}`).setLabel("按錯了，取消訂單").setStyle(ButtonStyle.Danger),
     )],
   });
   return interaction.editReply({ content: "✅ 已依數字找到對應陪陪，請再次確認。" });
@@ -2698,7 +2703,11 @@ async function cancelSelfServiceOrder(interaction) {
   const order = await getSelfServiceOrder(interaction, "self_service_quote_no_");
   if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
   if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以取消。" });
-  await supabase.from("play_orders").update({ status: "cancelled", quote_status: "cancelled" }).eq("id", order.id).eq("paid", false);
+  const { data: cancelled, error } = await supabase.from("play_orders")
+    .update({ status: "cancelled", quote_status: "cancelled", updated_at: new Date().toISOString() })
+    .eq("id", order.id).eq("paid", false).eq("quote_status", "quoted")
+    .select("id").maybeSingle();
+  if (error || !cancelled) return interaction.editReply({ content: "⚠️ 訂單狀態已更新，無法在報價頁取消；請使用目前訂單畫面的取消按鈕。" });
   await interaction.message.edit({ components: [] }).catch(() => null);
   await interaction.editReply({ content: "✅ 已取消訂單，頻道將在 10 秒後關閉。" });
   scheduleChannelDeletion(interaction, 10_000);
@@ -2739,7 +2748,7 @@ async function cancelAndRefundSelfServiceOrder(interaction) {
   try {
     const cancellableStatuses = isManualDispatchOrder(order)
       ? ["manual_choosing_open", "manual_choosing_players"]
-      : ["self_choosing_open", "choosing_players"];
+      : ["self_dispatching", "self_choosing_open", "choosing_players", "confirming_players"];
     if (!cancellableStatuses.includes(previousQuoteStatus)) {
       return interaction.editReply({ content: "❌ 這張訂單已不在選擇陪陪階段，無法重複取消。" });
     }
@@ -3011,6 +3020,9 @@ async function sendSelfServicePaymentSelection(channel, order) {
         .setDisabled(!enabled(method)),
     )));
   }
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`self_service_cancel_order_${order.id}`).setLabel("按錯了，取消訂單").setStyle(ButtonStyle.Danger),
+  ));
   return channel.send({
     content: `<@${order.customer_id}> 請選擇付款方式${!isEcpayAtmAvailable() ? "（綠界虛擬 ATM 依原訂時程於 9/28 開放）" : ""}：`,
     embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle("💳 付款與自動核帳")
@@ -3037,6 +3049,7 @@ async function prepareSelfServicePayment(interaction) {
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`self_service_pay_${gatewayMethod}_${orderId}`).setLabel("確認此付款方式").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`self_service_payment_back_${orderId}`).setLabel("返回付款方式").setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`self_service_cancel_order_${orderId}`).setLabel("按錯了，取消訂單").setStyle(ButtonStyle.Danger),
     )],
   });
 }
@@ -3048,6 +3061,50 @@ async function backToSelfServicePayment(interaction) {
   if (!order || order.customer_id !== interaction.user.id || order.paid || order.quote_status !== "waiting_payment")
     return interaction.editReply({ content: "⚠️ 訂單狀態已更新，無法返回。", components: [] });
   await interaction.editReply({ content: "已返回付款方式，請使用原本的六種付款選項。", components: [] });
+}
+
+async function cancelSelfServiceBeforePayment(interaction) {
+  await deferReplyOnce(interaction);
+  const order = await getSelfServiceOrder(interaction, "self_service_cancel_order_");
+  if (!order || !isSelfServiceOrder(order)) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+  if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以取消訂單。" });
+  if (order.paid || order.quote_status !== "waiting_payment") {
+    return interaction.editReply({ content: "⚠️ 此訂單已進入付款流程或已付款，不能直接取消；請聯繫客服核帳或辦理退款。" });
+  }
+  if (processingSelfServiceCancellations.has(order.id) || processingSelfServicePayments.has(order.id)) {
+    return interaction.editReply({ content: "⚠️ 訂單正在處理，請勿重複點擊。" });
+  }
+  processingSelfServiceCancellations.add(order.id);
+  try {
+    // 曾產生金流付款單時，外部帳號或條碼可能仍可繳費，必須交由客服核帳。
+    for (const table of ["ecpay_service_payments", "jkopay_service_payments"]) {
+      const { data, error } = await supabase.from(table).select("id")
+        .eq("organization_code", "qiunai").eq("payment_kind", "order")
+        .eq("entity_key", String(order.id)).limit(1);
+      if (error) throw error;
+      if (data?.length) {
+        return interaction.editReply({ content: "⚠️ 此訂單已有付款單，為避免取消後仍被繳費，請聯繫客服核帳或辦理退款。" });
+      }
+    }
+    const { data, error } = await supabase.rpc("qiunai_cancel_self_service_order", {
+      p_order_id: String(order.id),
+      p_customer_id: String(order.customer_id),
+      p_expected_quote_status: ["waiting_payment"],
+      p_final_quote_status: "cancelled",
+      p_operation_key: `self-service-cancel-before-payment:${order.id}`,
+      p_reason: "顧客按錯了，付款前取消訂單",
+    });
+    if (error || !data) throw new Error(error?.message || "取消訂單失敗");
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.channel.send("已取消這張自助訂單，頻道將於十秒後關閉。").catch(() => null);
+    await interaction.editReply({ content: "✅ 訂單尚未付款，已取消訂單。" });
+    scheduleChannelDeletion(interaction, 10_000);
+  } catch (error) {
+    console.error("[自助訂單付款前取消] 失敗", error);
+    return interaction.editReply({ content: "❌ 暫時無法取消訂單，請勿付款並聯繫客服確認。" });
+  } finally {
+    processingSelfServiceCancellations.delete(order.id);
+  }
 }
 
 async function paySelfServiceOrderByGateway(interaction) {
@@ -14896,6 +14953,10 @@ async function handleDispatchInteractionInner(interaction) {
     }
     if (interaction.customId.startsWith("self_service_payment_back_")) {
       await backToSelfServicePayment(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_cancel_order_")) {
+      await cancelSelfServiceBeforePayment(interaction);
       return true;
     }
     if (interaction.customId.startsWith("self_service_pay_jkopay_") || interaction.customId.startsWith("self_service_pay_ecpay_")) {

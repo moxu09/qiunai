@@ -7,15 +7,21 @@ const {
   requiresManualTimeoutReview,
 } = require("../events/dispatchSystem");
 
-test("自助下單選擇陪陪階段顯示延長與棄單按鈕及十秒關閉文案", () => {
+test("自助下單報價、選人、確認與付款階段都有取消入口", () => {
   const source = fs.readFileSync(
     path.join(__dirname, "..", "events", "dispatchSystem.js"),
     "utf8",
   );
   assert.match(source, /延長派單時間（\+5 分鐘，限一次）/);
-  assert.match(source, /setLabel\("棄單"\)/);
+  assert.match(source, /self_service_quote_no_\$\{order\.id\}`\)\.setLabel\("按錯了，取消訂單"\)/);
   assert.match(source, /self_selection_extend_/);
   assert.match(source, /self_service_cancel_refund_/);
+  assert.match(source, /"confirming_players"\];/);
+  assert.match(source, /self_service_cancel_order_\$\{order\.id\}`\)\.setLabel\("按錯了，取消訂單"\)/);
+  assert.match(source, /self_service_cancel_order_\$\{orderId\}`\)\.setLabel\("按錯了，取消訂單"\)/);
+  assert.match(source, /async function cancelSelfServiceBeforePayment\(interaction\)/);
+  assert.match(source, /p_expected_quote_status: \["waiting_payment"\]/);
+  assert.match(source, /for \(const table of \["ecpay_service_payments", "jkopay_service_payments"\]\)/);
   assert.match(
     source,
     /感謝您使用自助下單系統，歡迎下次光臨，頻道將於十秒後關閉，再見/,

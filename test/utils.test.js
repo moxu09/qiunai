@@ -621,7 +621,7 @@ test("自助派單湊足需求人數後仍持續開放兩種接單，直到客�
   assert.match(source, /派單開始後 15 分鐘內未完成陪陪選擇，系統將自動棄單/);
   assert.match(source, /15 分鐘內未選擇陪陪將自動棄單/);
   assert.match(source, /setLabel\("延長派單時間（\+5 分鐘，限一次）"\)/);
-  assert.match(source, /setLabel\("棄單"\)/);
+  assert.match(source, /setLabel\("按錯了，取消訂單"\)/);
   assert.match(source, /self_selection_extend_/);
   assert.match(source, /老闆已將選人時間延長 5 分鐘/);
   assert.match(source, /dispatchMessage\.startThread/);
