@@ -4089,6 +4089,7 @@ async function sendWalletLog(
   persist = true,
 ) {
   if (amount === 0 && type !== "十抽") return;
+  const isAsdPurchase = type === "儲值" && String(note || "").includes("購買ASD");
 
   // ===== 寫入錢包明細資料庫 =====
   if (persist)
@@ -4118,17 +4119,17 @@ async function sendWalletLog(
       .addFields(
         {
           name: "📌 類型",
-          value: type,
+          value: isAsdPurchase ? "購買ASD" : type,
           inline: true,
         },
         {
           name: "💵 異動金額",
-          value: `${amount} 星雨幣`,
+          value: `${amount} ${isAsdPurchase ? "ASD" : "星雨幣"}`,
           inline: true,
         },
         {
           name: "💳 目前餘額",
-          value: `${balance} 星雨幣`,
+          value: `${balance} ${isAsdPurchase ? "ASD" : "星雨幣"}`,
           inline: true,
         },
       )
@@ -4197,7 +4198,7 @@ async function handleJkopayTopupPaid({
       "儲值",
       Number(order.amount),
       balance,
-      `💳 ${paymentLabel}支付自動儲值｜${order.topup_no}`,
+      `💳 ${paymentLabel}支付購買ASD完成｜${order.topup_no}`,
       false,
     );
   }
@@ -4209,11 +4210,11 @@ async function handleJkopayTopupPaid({
 
   const successEmbed = new EmbedBuilder()
     .setColor("#57F287")
-    .setTitle(`✅ ${paymentLabel}付款及 ASD 儲值完成`)
+    .setTitle(`✅ ${paymentLabel}付款及購買ASD完成`)
     .setDescription(
       `<@${order.user_id}> 已完成${paymentLabel}付款。\n\n` +
-        `儲值編號：${order.topup_no}\n` +
-        `儲值金額：${Number(order.amount).toLocaleString("zh-TW")} ASD\n` +
+        `購買編號：${order.topup_no}\n` +
+        `購買數量：${Number(order.amount).toLocaleString("zh-TW")} ASD\n` +
         `目前餘額：${Number(balance).toLocaleString("zh-TW")} ASD`,
     )
     .setTimestamp();
@@ -6551,9 +6552,9 @@ async function sendTopupPanel(client) {
 
   const embed = new EmbedBuilder()
     .setColor("#ffd166")
-    .setTitle("💳 購買星雨幣")
+    .setTitle("💳 購買ASD")
     .setDescription(
-      `歡迎購買星雨幣。\n\n` +
+      `歡迎購買ASD。\n\n` +
         `可自行輸入金額，或點選快捷金額直接建立訂單並進入付款流程。\n\n` +
         `匯率：1 元台幣 = 1 ASD\n` +
         `支援付款方式：街口支付 / 線上刷卡 / 匯款轉帳 / 無卡存款 / 美金轉帳 / 加密貨幣\n\n` +
@@ -6649,7 +6650,7 @@ async function sendJkopayRefundPanel() {
       `退款操作與結果紀錄統一集中在此頻道。\n\n` +
       `查詢訂單：\`/街口查詢\`\n` +
         `執行退款：\`/街口退款\`\n` +
-        `• ASD 儲值單：輸入 TOP-... 或 QIUNAI-TOP-...\n` +
+        `• 購買ASD訂單：輸入 TOP-... 或 QIUNAI-TOP-...\n` +
         `• 訂單／加時／打賞：輸入 QIUNAI-ORD/EXT/TIP-... 或 DEEPNIGHT-...\n` +
         `• 官網商品單：輸入 WASH-...\n` +
         `• 目前僅支援整筆退款\n` +
@@ -6703,7 +6704,7 @@ async function sendJkopayRefundAudit({
   }[status] || { color: "#64748b", title: "💳 街口退款紀錄" };
   const fields = [
     { name: "操作人員", value: `<@${actorId}>`, inline: true },
-    { name: "訂單類型", value: kind === "merchandise" ? "官網商品" : kind === "topup" ? "ASD 儲值" : "待確認", inline: true },
+    { name: "訂單類型", value: kind === "merchandise" ? "官網商品" : kind === "topup" ? "購買ASD" : "待確認", inline: true },
     { name: "街口訂單編號", value: `\`${String(platformOrderId || "未知").slice(0, 100)}\`` },
   ];
   if (Number.isFinite(Number(amount)) && Number(amount) > 0) {
@@ -7037,7 +7038,7 @@ async function sendOrderSystem(client) {
   const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId("order_start_topup")
-      .setLabel("購買星雨幣")
+      .setLabel("購買ASD")
       .setEmoji("💳")
       .setStyle(ButtonStyle.Success),
   );
@@ -13939,7 +13940,8 @@ async function handleButtonInteraction(interaction) {
 
         const isTopup =
           interaction.channel.name.includes("儲值-") ||
-          interaction.channel.name.includes("購買星雨幣");
+          interaction.channel.name.includes("購買星雨幣") ||
+          interaction.channel.name.includes("購買ASD");
         const archiveName = isTopup
           ? "儲值記錄"
           : classifyOrderArchive(

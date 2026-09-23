@@ -210,7 +210,7 @@ function createJkopayService({
 
   async function createTopupPayment({ userId, amount, topupNo, channelId }) {
     if (!config.enabled) throw new Error("街口支付尚未完成環境設定");
-    if (!Number.isInteger(amount) || amount <= 0) throw new Error("儲值金額錯誤");
+    if (!Number.isInteger(amount) || amount <= 0) throw new Error("購買ASD金額錯誤");
 
     const platformOrderId = buildPlatformOrderId(topupNo);
     const resultUrl = `${config.publicBaseUrl}/payments/jkopay/result`;
@@ -227,7 +227,7 @@ function createJkopayService({
       escrow: false,
       products: [
         {
-          name: `秋奈 ASD 儲值 ${topupNo}`,
+          name: "購買ASD",
           unit_count: 1,
           unit_price: amount,
           unit_final_price: amount,
@@ -987,7 +987,7 @@ function createJkopayService({
     const paid = order?.status === "paid";
     const title = paid ? "付款成功" : "付款結果確認中";
     const message = paid
-      ? `已完成 ${Number(order.amount).toLocaleString("zh-TW")} ASD 儲值，可回到 Discord 查看。`
+      ? `購買ASD已完成，入帳 ${Number(order.amount).toLocaleString("zh-TW")} ASD，可回到 Discord 查看。`
       : "系統正在向街口確認付款結果，請回到 Discord 稍候通知。";
     sendHtml(
       response,

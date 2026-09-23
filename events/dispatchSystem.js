@@ -659,9 +659,9 @@ const GAME_ORDER_PANELS = [
       { label: "輻能", value: "radiant", description: "需求的陪陪段位｜輻能" },
       { label: "頂輻", value: "top_radiant", description: "需求的陪陪段位｜頂輻" },
       {
-        label: "購買星雨幣",
+        label: "購買ASD",
         value: "topup",
-        description: "建立購買星雨幣訂單",
+        description: "建立購買ASD訂單",
       },
     ],
   },
@@ -676,9 +676,9 @@ const GAME_ORDER_PANELS = [
       { label: "電腦版", value: "pc", description: "三角洲行動｜電腦版" },
       { label: "手機版", value: "mobile", description: "三角洲行動｜手機版" },
       {
-        label: "購買星雨幣",
+        label: "購買ASD",
         value: "topup",
-        description: "建立購買星雨幣訂單",
+        description: "建立購買ASD訂單",
       },
     ],
   },
@@ -694,9 +694,9 @@ const GAME_ORDER_PANELS = [
       { label: "技術陪玩", value: "skill", description: "Apex｜技術陪玩" },
       { label: "娛樂陪玩", value: "entertain", description: "Apex｜娛樂陪玩" },
       {
-        label: "購買星雨幣",
+        label: "購買ASD",
         value: "topup",
-        description: "建立購買星雨幣訂單",
+        description: "建立購買ASD訂單",
       },
     ],
   },
@@ -712,9 +712,9 @@ const GAME_ORDER_PANELS = [
       { label: "ARAM", value: "aram", description: "咆哮深淵" },
       { label: "聯盟戰棋", value: "tft", description: "Teamfight Tactics" },
       {
-        label: "購買星雨幣",
+        label: "購買ASD",
         value: "topup",
-        description: "建立購買星雨幣訂單",
+        description: "建立購買ASD訂單",
       },
     ],
   },
@@ -731,9 +731,9 @@ const GAME_ORDER_PANELS = [
       { label: "恐怖遊戲", value: "horror", description: "Steam｜恐怖遊戲" },
       { label: "派對遊戲", value: "party", description: "Steam｜派對遊戲" },
       {
-        label: "購買星雨幣",
+        label: "購買ASD",
         value: "topup",
-        description: "建立購買星雨幣訂單",
+        description: "建立購買ASD訂單",
       },
     ],
   },
@@ -767,9 +767,9 @@ const GAME_ORDER_PANELS = [
       { label: "點歌服務", value: "song", description: "點歌服務" },
       { label: "自訂輸入", value: "custom", description: "其他項目｜自訂需求" },
       {
-        label: "購買星雨幣",
+        label: "購買ASD",
         value: "topup",
-        description: "建立購買星雨幣訂單",
+        description: "建立購買ASD訂單",
       },
     ],
   },
@@ -933,7 +933,7 @@ async function upsertGameOrderPanel(panel) {
     .setTitle(panel.title)
     .setDescription(
       `${panel.description}\n\n` +
-        `選到「購買星雨幣」會建立購買訂單。\n` +
+        `選到「購買ASD」會建立購買訂單。\n` +
         `選到「打賞」會建立打賞頻道。\n` +
         `選其他項目會建立專屬臨時下單頻道。`
     )
@@ -4045,7 +4045,7 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
         ? "系統會在本頻道顯示超商繳費資訊；實際繳費完成後才會自動核帳。"
         : `刷卡會在官網站內直接輸入卡號；${isEcpayAtmAvailable() ? "匯款虛擬帳號與" : "虛擬 ATM 於 9 月 28 日開放，"}超商繳費資訊會直接顯示在本頻道。實際付款成功後才會自動核帳。`;
   const paymentRows = buildEcpayPaymentRows(payment, Number(amount), {
-    topup: label.includes("儲值"),
+    topup: label === "購買ASD",
     onlyMethod: payment.onlyMethod || null,
     selfService: label === "自助訂單" || payment.selfService === true,
   });
@@ -5461,12 +5461,12 @@ async function sendJkopayTopupPanel() {
 
   const embed = new EmbedBuilder()
     .setColor(QIUNAI_WATER_BLUE)
-    .setTitle("💳 自助購買星雨幣")
+    .setTitle("💳 自助購買ASD")
     .setDescription(
-      `選擇付款方式自助購買星雨幣。\n\n` +
+      `選擇付款方式自助購買ASD。\n\n` +
         `匯率：NT$1 = 1 ASD\n` +
         `付款方式：街口支付、線上刷卡、超商代碼、超商條碼、轉帳匯款\n` +
-        `付款完成後系統會自動查帳並立即將星雨幣存入錢包，不需要上傳付款截圖。\n\n` +
+        `付款完成後系統會自動查帳並立即將 ASD 存入錢包，不需要上傳付款截圖。\n\n` +
         `可按「建立訂單」輸入其他金額，或直接使用下方快速購買按鈕。`,
     )
     .setFooter({ text: "秋奈電競｜自助購幣" })
@@ -5515,7 +5515,7 @@ async function sendJkopayTopupPanel() {
   const oldPanel = messages?.find(
     (message) =>
       message.author.id === client.user.id &&
-      message.embeds[0]?.title === "💳 自助購買星雨幣",
+      ["💳 自助購買星雨幣", "💳 自助購買ASD"].includes(message.embeds[0]?.title),
   );
   if (oldPanel) return oldPanel.edit({ embeds: [embed], components });
   return channel.send({ embeds: [embed], components });
@@ -5541,7 +5541,7 @@ async function createTopupTicket(interaction, presetAmount = null, { jkopayOnly 
       ? Number(presetAmount)
       : null;
   if (presetAmount !== null && normalizedPreset === null) {
-    return interaction.editReply({ content: "❌ 不支援的星雨幣購買金額。" });
+    return interaction.editReply({ content: "❌ 不支援的 ASD 購買金額。" });
   }
 
   const guild = interaction.guild;
@@ -5626,7 +5626,7 @@ async function createTopupTicket(interaction, presetAmount = null, { jkopayOnly 
     embeds: [
       new EmbedBuilder()
         .setColor(QIUNAI_WATER_BLUE)
-        .setTitle("💳 購買星雨幣訂單")
+        .setTitle("💳 購買ASD訂單")
         .setDescription(
           `訂單編號：${topupNo}\n` +
             (normalizedPreset
@@ -5639,7 +5639,7 @@ async function createTopupTicket(interaction, presetAmount = null, { jkopayOnly 
   });
 
   return interaction.editReply({
-    content: `✅ 已建立購買星雨幣訂單：<#${channel.id}>`,
+    content: `✅ 已建立購買ASD訂單：<#${channel.id}>`,
   });
 }
 async function createTipTicket(interaction, mode = "tip") {
@@ -10671,7 +10671,7 @@ async function startNewOrderFlow(channel, user, initialGame = "") {
 async function openTopupModal(interaction, { jkopayOnly = false } = {}) {
   const modal = new ModalBuilder()
     .setCustomId(jkopayOnly ? "submit_jkopay_topup_form" : "submit_topup_form")
-    .setTitle("💰 購買星雨幣");
+    .setTitle("💰 購買ASD");
 
   const amountInput = new TextInputBuilder()
     .setCustomId("amount")
@@ -10985,13 +10985,13 @@ async function createJkopayTopupPaymentMessage({ channel, userId, amount, topupN
   });
   const embed = new EmbedBuilder()
     .setColor(QIUNAI_WATER_BLUE)
-    .setTitle("街口支付｜購買星雨幣")
+    .setTitle("街口支付｜購買ASD")
     .setDescription(
       `<@${userId}> 請點擊下方按鈕完成付款。\n\n` +
         `購買編號：${topupNo}\n` +
         `付款金額：NT$${Number(amount).toLocaleString("zh-TW")}\n` +
         `入帳數量：${Number(amount).toLocaleString("zh-TW")} ASD\n\n` +
-        `付款完成後系統會自動查帳並將星雨幣存入錢包，不需要上傳付款截圖。`,
+        `付款完成後系統會自動查帳並將 ASD 存入錢包，不需要上傳付款截圖。`,
     )
     .setFooter({ text: "付款連結逾時後，可重新建立訂單取得新連結" })
     .setTimestamp();
@@ -11027,14 +11027,14 @@ async function handleTopupPaymentMethodSelect(interaction) {
 
   if (!pending) {
     return interaction.editReply({
-      content: "❌ 這筆儲值申請已過期，請重新填寫。",
+      content: "❌ 這筆購買ASD申請已過期，請重新填寫。",
       components: [],
     });
   }
 
   if (pending.userId !== interaction.user.id) {
     return interaction.editReply({
-      content: "❌ 只有建立儲值申請的人可以選擇付款方式。",
+      content: "❌ 只有建立購買ASD申請的人可以選擇付款方式。",
       components: [],
     });
   }
@@ -11069,14 +11069,14 @@ async function handleTopupPaymentMethodSelect(interaction) {
         if (requestedMethod !== "CARD") payment.preferredMethod = requestedMethod;
       }
       if (pending.selfService) payment.selfService = true;
-      await sendEcpayPaymentPrompt(interaction.channel, interaction.user.id, amount, payment, "ASD 儲值");
+      await sendEcpayPaymentPrompt(interaction.channel, interaction.user.id, amount, payment, "購買ASD");
       pendingTopups.delete(topupId);
       return interaction.editReply({
-        content: `✅ 已建立綠界付款單。\n儲值編號：${topupNo}\n付款金額：NT$${amount.toLocaleString("zh-TW")}\n完成後會自動存入 ASD 錢包。`,
+        content: `✅ 已建立綠界付款單。\n購買編號：${topupNo}\n付款金額：NT$${amount.toLocaleString("zh-TW")}\n完成後會自動存入 ASD 錢包。`,
         components: [],
       });
     } catch (error) {
-      return interaction.editReply({ content: `❌ 建立綠界儲值付款失敗：${error.message || error}`, components: [] });
+      return interaction.editReply({ content: `❌ 建立綠界購買ASD付款失敗：${error.message || error}`, components: [] });
     }
   }
 
@@ -11118,11 +11118,11 @@ async function handleTopupPaymentMethodSelect(interaction) {
 
   const embed = new EmbedBuilder()
     .setColor(QIUNAI_WATER_BLUE)
-    .setTitle("💰 儲值申請")
+    .setTitle("💰 購買ASD申請")
     .setDescription(
       `👤 會員：${interaction.user}\n\n` +
-        `🔢 儲值編號：${topupNo}\n` +
-        `💵 儲值金額：NT$${amount}\n` +
+        `🔢 購買編號：${topupNo}\n` +
+        `💵 購買金額：NT$${amount}\n` +
         `💳 付款方式：${method}\n` +
         `📝 備註：${note}`
     );
@@ -11132,7 +11132,7 @@ async function handleTopupPaymentMethodSelect(interaction) {
       .setCustomId(
         `confirm_topup_${interaction.user.id}_${amount}_${topupNo}`,
       )
-      .setLabel("確認儲值")
+      .setLabel("確認購買ASD")
       .setEmoji("✅")
       .setStyle(ButtonStyle.Success),
 
@@ -11188,7 +11188,7 @@ async function confirmTopup(interaction) {
 
   if (!isStaff) {
     return interaction.editReply({
-      content: "❌ 只有客服可以確認儲值",
+      content: "❌ 只有客服可以確認購買ASD",
     });
   }
 
@@ -11203,7 +11203,7 @@ async function confirmTopup(interaction) {
 
   if (!userId || !amount || amount <= 0) {
     return interaction.editReply({
-      content: "❌ 儲值資料錯誤",
+      content: "❌ 購買ASD資料錯誤",
     });
   }
 
@@ -11214,7 +11214,7 @@ async function confirmTopup(interaction) {
   ) {
     return interaction.editReply({
       content:
-        "❌ 儲值函式尚未完整接入，請確認會員累積與錢包紀錄設定",
+        "❌ 購買ASD功能尚未完整接入，請確認會員累積與錢包紀錄設定",
     });
   }
 
@@ -11233,7 +11233,7 @@ async function confirmTopup(interaction) {
   if (topupError || !topupResult) {
     console.error("[確認儲值] 原子儲值失敗", topupError);
     return interaction.editReply({
-      content: `❌ 儲值失敗：${topupError?.message || "未取得儲值結果"}`,
+      content: `❌ 購買ASD失敗：${topupError?.message || "未取得處理結果"}`,
     });
   }
   const finalCoins = Number(topupResult.balance || 0);
@@ -11245,7 +11245,7 @@ async function confirmTopup(interaction) {
       "儲值",
       amount,
       finalCoins,
-      `💳 自動儲值成功｜${topupKey}`,
+      `💳 購買ASD成功｜${topupKey}`,
       false,
     );
   }
@@ -11277,7 +11277,7 @@ async function confirmTopup(interaction) {
   if (alreadyProcessed) {
     return interaction.editReply({
       content:
-        `✅ ${topupKey} 先前已完成儲值，本次沒有重複增加 ASD。` +
+        `✅ ${topupKey} 先前已完成購買ASD，本次沒有重複增加 ASD。` +
         (effectsPending ? "\n⚠️ VIP／會計後處理已保留，系統會自動補做。" : ""),
     });
   }
@@ -11286,11 +11286,11 @@ async function confirmTopup(interaction) {
     embeds: [
       new EmbedBuilder()
         .setColor("#57F287")
-        .setTitle("✅ 儲值已完成")
+        .setTitle("✅ 購買ASD已完成")
         .setDescription(
-          `<@${userId}> 已成功儲值。\n\n` +
-            `儲值編號：${topupKey}\n` +
-            `儲值金額：${amount} ASD\n` +
+          `<@${userId}> 已成功購買ASD。\n\n` +
+            `購買編號：${topupKey}\n` +
+            `購買數量：${amount} ASD\n` +
             `目前餘額：${finalCoins} ASD\n` +
             `確認客服：<@${interaction.user.id}>`
         )
@@ -11300,7 +11300,7 @@ async function confirmTopup(interaction) {
 
   return interaction.editReply({
     content:
-      `✅ ${topupKey} 已幫 <@${userId}> 儲值 ${amount} ASD` +
+      `✅ ${topupKey} 已幫 <@${userId}> 完成購買 ${amount} ASD` +
       (effectsPending ? "\n⚠️ VIP／會計後處理已保留，系統會自動補做。" : ""),
   });
 }

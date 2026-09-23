@@ -82,7 +82,7 @@ const {
   getCanonicalPaymentOptions,
 } = require("../utils/paymentMethodEmojis");
 
-test("購買星雨幣面板提供快捷金額並直接進入付款流程", () => {
+test("購買ASD面板提供快捷金額並直接進入付款流程", () => {
   assert.deepEqual(TOPUP_PRESET_AMOUNTS, [100, 250, 500, 1000, 3000, 5000, 10000, 15000, 20000, 30000, 40000, 49999]);
   for (const amount of TOPUP_PRESET_AMOUNTS) {
     assert.equal(parseTopupPresetAmount(`order_start_topup_amount_${amount}`), amount);
@@ -100,6 +100,18 @@ test("購買星雨幣面板提供快捷金額並直接進入付款流程", () =>
   assert.match(indexSource, /\.setLabel\("快速金額"\)[\s\S]*?\.setDisabled\(true\)/);
   assert.match(indexSource, /components: \[row, quickAmountLabelRow, quickAmountRow, quickAmountFinalRow, quickAmountThirdRow\]/);
   assert.match(dispatchSource, /const checkout = normalizedPreset[\s\S]*prepareTopupCheckout/);
+  assert.match(indexSource, /\.setTitle\("💳 購買ASD"\)/);
+  assert.match(indexSource, /\.setLabel\("購買ASD"\)/);
+  assert.match(indexSource, /isAsdPurchase \? "購買ASD" : type/);
+  assert.match(indexSource, /kind === "topup" \? "購買ASD"/);
+  assert.match(dispatchSource, /\.setTitle\("💳 自助購買ASD"\)/);
+  assert.match(dispatchSource, /label: "購買ASD",\s*value: "topup"/);
+  assert.match(dispatchSource, /\.setTitle\("街口支付｜購買ASD"\)/);
+  assert.match(dispatchSource, /topup: label === "購買ASD"/);
+  assert.match(dispatchSource, /\["💳 自助購買星雨幣", "💳 自助購買ASD"\]/);
+  const jkopaySource = fs.readFileSync(path.join(__dirname, "..", "utils", "jkopay.js"), "utf8");
+  assert.match(jkopaySource, /name: "購買ASD"/);
+  assert.doesNotMatch(jkopaySource, /name: `秋奈 ASD 儲值/);
   assert.doesNotMatch(`${indexSource}\n${dispatchSource}`, /儲值星雨幣|建立儲值單/);
 });
 
