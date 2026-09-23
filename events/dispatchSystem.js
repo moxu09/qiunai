@@ -1112,6 +1112,10 @@ function getSelfServiceSelectionDeadline(order) {
   return getSelfServiceDispatchAt(order) + SELF_SERVICE_DISPATCH_TIMEOUT_MS;
 }
 
+function isClaimSelectionExpired(order) {
+  return !isManualDispatchOrder(order) && Date.now() >= getSelfServiceSelectionDeadline(order);
+}
+
 function hasExtendedDispatchTime(order) {
   return String(order?.note || "").includes("[DISPATCH_EXTENDED:1]");
 }
@@ -1279,7 +1283,7 @@ async function createSelfServiceClaimThread(dispatchMessage, order) {
   try {
     return await dispatchMessage.startThread({
       name: getSelfServiceThreadName(order),
-      autoArchiveDuration: 60,
+      autoArchiveDuration: isManualDispatchOrder(order) ? 1440 : 60,
       reason: `${isManualDispatchOrder(order) ? "人工" : "自助"}訂單 ${order.order_no || order.id} 跳單討論串`,
     });
   } catch (error) {
@@ -1376,6 +1380,7 @@ async function failSelfServiceDispatch(orderId, messageId = null) {
   const current = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
   if (current.error || !current.data || !isClaimDispatchOrder(current.data)) return;
   const sourceOrder = current.data;
+  if (isManualDispatchOrder(sourceOrder)) return;
   if (Date.now() < getSelfServiceSelectionDeadline(sourceOrder)) {
     scheduleSelfServiceDispatchTimeout(sourceOrder, messageId);
     return;
@@ -1558,6 +1563,8 @@ function scheduleSelfServiceDispatchTimeout(order, messageId = null) {
   const orderId = String(order.id);
   const oldTimer = selfServiceDispatchTimers.get(orderId);
   if (oldTimer) clearTimeout(oldTimer);
+  selfServiceDispatchTimers.delete(orderId);
+  if (isManualDispatchOrder(order)) return;
   const remaining = Math.max(0, getSelfServiceSelectionDeadline(order) - Date.now());
   const timer = setTimeout(
     () => failSelfServiceDispatch(order.id, messageId).catch((error) => console.error("[自助派單逾時]", error)),
@@ -1582,8 +1589,9 @@ async function restoreSelfServiceDispatchTimers() {
     ])
     .or("is_deleted.eq.false,is_deleted.is.null");
   if (error) throw error;
-  for (const order of orders || []) scheduleSelfServiceDispatchTimeout(order);
-  console.log(`[自助派單] 已恢復 ${(orders || []).length} 筆選人倒數`);
+  const timedOrders = (orders || []).filter((order) => !isManualDispatchOrder(order));
+  for (const order of timedOrders) scheduleSelfServiceDispatchTimeout(order);
+  console.log(`[自助派單] 已恢復 ${timedOrders.length} 筆選人倒數；人工派單不設時限`);
   setTimeout(() => repairSelfServiceClaimThreadNames().catch((error) =>
     console.error("[自助派單] 修復討論串名稱失敗", error)), 3_000).unref?.();
 }
@@ -1760,7 +1768,10 @@ async function sendSelfServiceDispatch(order) {
     .setColor(QIUNAI_WATER_BLUE)
     .setTitle(`🖨️ ${isManualDispatchOrder(order) ? "人工下單" : "自助派單"}需求`)
     .setDescription(
-      `訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n${getSelfServiceRankFieldLabel(order)}：${order.rank_preference || "無"}\n需求：${order.player_count} 位\n目前：0 / ${order.player_count}\n訂單頻道：<#${order.channel_id}>\n\n請進入本單的討論串，並在派單開始後 15 分鐘內選擇「1」或「PM」；未選擇人員將自動棄單。`,
+      `訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n${getSelfServiceRankFieldLabel(order)}：${order.rank_preference || "無"}\n需求：${order.player_count} 位\n目前：0 / ${order.player_count}\n訂單頻道：<#${order.channel_id}>\n\n` +
+      (isManualDispatchOrder(order)
+        ? "請進入本單的討論串選擇「1」或「PM」；本單不設 15 分鐘派單期限。"
+        : "請進入本單的討論串，並在派單開始後 15 分鐘內選擇「1」或「PM」；未選擇人員將自動棄單。"),
     )
     .setTimestamp();
   const dispatchMessage = await dispatchChannel.send({
@@ -1775,26 +1786,32 @@ async function sendSelfServiceDispatch(order) {
     ? await claimThread.send({
         content:
           `請在這個討論串內選擇「1」或「PM」並填寫接單備註。\n` +
-          `截止時間：<t:${Math.floor(getSelfServiceSelectionDeadline(order) / 1000)}:F>（<t:${Math.floor(getSelfServiceSelectionDeadline(order) / 1000)}:R>）`,
+          (isManualDispatchOrder(order)
+            ? "本單沒有 15 分鐘派單期限，老闆可在原訂單內選人。"
+            : `截止時間：<t:${Math.floor(getSelfServiceSelectionDeadline(order) / 1000)}:F>（<t:${Math.floor(getSelfServiceSelectionDeadline(order) / 1000)}:R>）`),
         embeds: [EmbedBuilder.from(embed).setColor(QIUNAI_WATER_BLUE)],
         components: [buildSelfServiceClaimButtons(order.id)],
         allowedMentions: { parse: [] },
       })
     : await dispatchMessage.edit({ components: [buildSelfServiceClaimButtons(order.id)] });
   await rememberSelfServiceClaimMessage(order.id, claimMessage);
-  scheduleSelfServiceDispatchTimeout(order, claimMessage.id);
+  if (!isManualDispatchOrder(order)) scheduleSelfServiceDispatchTimeout(order, claimMessage.id);
   const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
   const threadLink = claimThread ? `<#${claimThread.id}>` : dispatchMessage.url;
   await orderChannel?.send({
     content:
       `<@${order.customer_id}> ✅ 已開始派單：${threadLink}\n` +
-      `陪陪可在討論串選擇「1」或「PM」。派單開始後 15 分鐘內未完成陪陪選擇，系統將自動棄單。\n` +
-      `截止時間：<t:${Math.floor(getSelfServiceSelectionDeadline(order) / 1000)}:F>；每筆訂單最多可延長一次 5 分鐘。`,
-    components: isSelfServiceOrder(order) && !isManualDispatchOrder(order)
-      ? [buildDispatchTimeExtensionButton(order), new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`self_service_cancel_refund_${order.id}`).setLabel("按錯了，取消訂單").setStyle(ButtonStyle.Danger),
-      )]
-      : [buildDispatchTimeExtensionButton(order)],
+      `陪陪可在討論串選擇「1」或「PM」。` +
+      (isManualDispatchOrder(order)
+        ? "本單不設選人期限，可在原訂單選定陪陪後繼續付款。"
+        : `派單開始後 15 分鐘內未完成陪陪選擇，系統將自動棄單。\n截止時間：<t:${Math.floor(getSelfServiceSelectionDeadline(order) / 1000)}:F>；每筆訂單最多可延長一次 5 分鐘。`),
+    components: isManualDispatchOrder(order)
+      ? []
+      : isSelfServiceOrder(order)
+        ? [buildDispatchTimeExtensionButton(order), new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`self_service_cancel_refund_${order.id}`).setLabel("按錯了，取消訂單").setStyle(ButtonStyle.Danger),
+        )]
+        : [buildDispatchTimeExtensionButton(order)],
     allowedMentions: { users: [String(order.customer_id)] },
   }).catch((error) => console.error("[派單] 通知老闆失敗", error));
   return claimMessage;
@@ -2408,7 +2425,8 @@ async function showSelfServiceCandidatePrompt(order, playerIds, messageId = null
   const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
   if (!orderChannel?.isTextBased()) return;
   const needCount = Number(order.player_count || 1);
-  const deadlineUnix = Math.floor(getSelfServiceSelectionDeadline(order) / 1000);
+  const manualOrder = isManualDispatchOrder(order);
+  const deadlineUnix = manualOrder ? null : Math.floor(getSelfServiceSelectionDeadline(order) / 1000);
   const claimNotes = getSelfServiceClaimNotes(order.note);
   const claimTypes = getSelfServiceClaimTypes(order.note);
   const numberOptions = playerIds.slice(0, 25).map((id, index) => ({
@@ -2425,7 +2443,9 @@ async function showSelfServiceCandidatePrompt(order, playerIds, messageId = null
         return `${index + 1}. <@${id}>｜${claimTypeLabel}${claimNote ? `｜備註：${claimNote}` : ""}`;
       }).join("\n")}\n\n` +
       `選完後，系統會依數字判斷對應人員並請你再次確認。\n` +
-      `⏰ 請於 <t:${deadlineUnix}:F>（<t:${deadlineUnix}:R>）前完成選擇，逾時系統將自動棄單。`,
+      (manualOrder
+        ? "本單不設 15 分鐘選人期限，請直接在這張訂單選人。"
+        : `⏰ 請於 <t:${deadlineUnix}:F>（<t:${deadlineUnix}:R>）前完成選擇，逾時系統將自動棄單。`),
     components: [
       new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
@@ -2436,11 +2456,13 @@ async function showSelfServiceCandidatePrompt(order, playerIds, messageId = null
           .addOptions(numberOptions),
       ),
       new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`self_selection_extend_${order.id}`)
-          .setLabel("延長派單時間（+5 分鐘，限一次）")
-          .setStyle(ButtonStyle.Primary)
-          .setDisabled(hasExtendedDispatchTime(order)),
+        ...(!manualOrder ? [
+          new ButtonBuilder()
+            .setCustomId(`self_selection_extend_${order.id}`)
+            .setLabel("延長派單時間（+5 分鐘，限一次）")
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(hasExtendedDispatchTime(order)),
+        ] : []),
         new ButtonBuilder()
           .setCustomId(`self_service_cancel_refund_${order.id}`)
           .setLabel("按錯了，取消訂單")
@@ -2464,6 +2486,9 @@ async function extendSelfServiceSelectionTime(interaction) {
   const order = await getSelfServiceOrder(interaction, "self_selection_extend_");
   if (!order) {
     return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+  }
+  if (isManualDispatchOrder(order)) {
+    return interaction.editReply({ content: "這張人工訂單沒有選人期限，不需要延長時間；請直接在原訂單選人。" });
   }
   if (interaction.user.id !== order.customer_id) {
     return interaction.editReply({ content: "❌ 只有原下單者可以延長選人時間。" });
@@ -2653,10 +2678,10 @@ async function claimSelfServiceOrder(interaction) {
     const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
     if (error || !order || !isClaimDispatchOrder(order)) return interaction.editReply({ content: "❌ 找不到這張派單。" });
     if (!getClaimDispatchStatuses(order).includes(order.quote_status)) return interaction.editReply({ content: "❌ 這張訂單已經結束派單。" });
-    if (Date.now() >= getSelfServiceSelectionDeadline(order)) {
+    if (isClaimSelectionExpired(order)) {
       const dispatchMessage = await findSelfServiceClaimMessage(order.id);
       await failSelfServiceDispatch(order.id, dispatchMessage?.id);
-      return interaction.editReply({ content: "❌ 已超過 15 分鐘，這張訂單派單失敗。" });
+      return interaction.editReply({ content: "❌ 已超過 15 分鐘，這張自助訂單派單失敗。" });
     }
     if (interaction.user.id === order.customer_id) return interaction.editReply({ content: "❌ 不能接自己的訂單。" });
     const playerIds = String(order.preferred_player || "").split(",").map((id) => id.trim()).filter(Boolean);
@@ -2711,7 +2736,10 @@ async function claimSelfServiceOrder(interaction) {
       const dispatchMessage = await findSelfServiceClaimMessage(order.id);
       const embed = dispatchMessage?.embeds?.[0]
         ? EmbedBuilder.from(dispatchMessage.embeds[0]).setDescription(
-        `訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n段位 / 地圖：${order.rank_preference || "無"}\n需求：${needCount} 位\n目前：${playerIds.length} / ${needCount}\n訂單頻道：<#${order.channel_id}>\n\n請在派單開始後 15 分鐘內完成陪陪選擇；未選擇人員將自動棄單。`,
+        `訂單：${order.order_no}\n服務：${order.service}\n性別：${order.gender_preference || "不指定"}\n段位 / 地圖：${order.rank_preference || "無"}\n需求：${needCount} 位\n目前：${playerIds.length} / ${needCount}\n訂單頻道：<#${order.channel_id}>\n\n` +
+        (isManualDispatchOrder(order)
+          ? "本單不設 15 分鐘派單期限；老闆可在原訂單選人。"
+          : "請在派單開始後 15 分鐘內完成陪陪選擇；未選擇人員將自動棄單。"),
       )
         : null;
       if (dispatchMessage && embed) {
@@ -2732,7 +2760,7 @@ async function selectSelfServicePlayerNumbers(interaction) {
   if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
   if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以選擇陪陪。" });
   if (![getClaimChoosingStatus(order), "choosing_players", "manual_choosing_players"].includes(order.quote_status)) return interaction.editReply({ content: "❌ 這份數字名單已失效，請重新派單。" });
-  if (Date.now() >= getSelfServiceSelectionDeadline(order)) {
+  if (isClaimSelectionExpired(order)) {
     const dispatchMessage = await findSelfServiceClaimMessage(order.id);
     await failSelfServiceDispatch(order.id, dispatchMessage?.id);
     return interaction.editReply({ content: "❌ 選人時間已結束，這張訂單已自動棄單。" });
@@ -2945,7 +2973,7 @@ async function confirmSelfServicePlayers(interaction) {
     ? "manual_confirming_players"
     : "confirming_players";
   if (!selectedIds.length || order.quote_status !== expectedConfirmStatus) return interaction.editReply({ content: "❌ 接單名單已過期，請重新派單。" });
-  if (Date.now() >= getSelfServiceSelectionDeadline(order)) {
+  if (isClaimSelectionExpired(order)) {
     await failSelfServiceDispatch(order.id);
     return interaction.editReply({ content: "❌ 派單時間已結束，這張訂單已自動棄單。" });
   }
@@ -3343,7 +3371,7 @@ async function reselectSelfServicePlayers(interaction) {
   const order = await getSelfServiceOrder(interaction, "self_players_reselect_");
   if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
   if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以重新派單。" });
-  if (Date.now() >= getSelfServiceSelectionDeadline(order)) {
+  if (isClaimSelectionExpired(order)) {
     await failSelfServiceDispatch(order.id);
     return interaction.editReply({ content: "❌ 派單時間已結束，這張訂單已自動棄單。" });
   }
@@ -15837,6 +15865,7 @@ module.exports = {
   getSelfServiceDispatchRoleIds,
   getSelfServiceDispatchAt,
   getSelfServiceSelectionDeadline,
+  isClaimSelectionExpired,
   extendSelfServiceSelectionDeadline,
   getSelfServiceThreadName,
   getDispatchResultThreadName,

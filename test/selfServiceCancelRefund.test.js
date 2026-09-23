@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   getSelfServiceCancellationRefundAmount,
+  isClaimSelectionExpired,
   requiresManualTimeoutReview,
 } = require("../events/dispatchSystem");
 
@@ -70,6 +71,21 @@ test("指令建立的人工派單逾時不論是否湊足陪陪都保留老闆�
   assert.match(timeout, /原訂單頻道會保留，請在這裡聯繫客服確認是否重新派單/);
   assert.match(timeout, /if \(orderChannel && !keepManualTicket\) \{\s*setTimeout\(\(\) => orderChannel\.delete/);
   assert.match(source, /channel_id: pending\.channelId \|\| interaction\.channel\.id/);
+});
+
+test("新增訂單的派單與選人不受 15 分鐘限制，原單可直接繼續", () => {
+  const past = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  assert.equal(isClaimSelectionExpired({ note: `[MANUAL_DISPATCH] [DISPATCH_AT:${past}]` }), false);
+  assert.equal(isClaimSelectionExpired({ note: `[SELF_SERVICE] [DISPATCH_AT:${past}]` }), true);
+  const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+  assert.match(source, /if \(isManualDispatchOrder\(sourceOrder\)\) return;/);
+  assert.match(source, /if \(isManualDispatchOrder\(order\)\) return;\s*const remaining =/);
+  assert.match(source, /const timedOrders = \(orders \|\| \[\]\)\.filter\(\(order\) => !isManualDispatchOrder\(order\)\);/);
+  for (const handler of ["claimSelfServiceOrder", "selectSelfServicePlayerNumbers", "confirmSelfServicePlayers", "reselectSelfServicePlayers"]) {
+    const body = source.split(`async function ${handler}(`)[1].split("\nasync function ")[0];
+    assert.match(body, /isClaimSelectionExpired\(order\)/, `${handler} 必須只限制自助單`);
+  }
+  assert.match(source, /本單不設 15 分鐘派單期限/);
 });
 
 test("自助付款六種選項與一般訂單選項分流，先確認才建立付款", () => {
