@@ -471,14 +471,14 @@ test("街口支付在各付款選單只出現一次且加時可使用月結付�
   const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
   const dispatchSource = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
   const menuSlices = [
-    ["async function sendPaymentMethodSelect", "async function handleQuotePaymentMethodSelect"],
-    ["async function sendExtensionPaymentMethodSelect", "async function handleExtensionPaymentMethodSelect"],
-    ["function buildTopupPaymentMethodRows", "function prepareTopupCheckout"],
-    ["async function sendServicePaymentMethodSelect", "function resetServiceCouponSelection"],
+    ["async function sendPaymentMethodSelect", "async function handleQuotePaymentMethodSelect", "getGeneralOrderPaymentOptions"],
+    ["async function sendExtensionPaymentMethodSelect", "async function handleExtensionPaymentMethodSelect", "getCanonicalPaymentOptions"],
+    ["function buildTopupPaymentMethodRows", "function prepareTopupCheckout", "getCanonicalPaymentOptions"],
+    ["async function sendServicePaymentMethodSelect", "function resetServiceCouponSelection", "getGeneralOrderPaymentOptions"],
   ];
-  for (const [start, end] of menuSlices) {
+  for (const [start, end, optionsBuilder] of menuSlices) {
     const source = dispatchSource.slice(dispatchSource.indexOf(start), dispatchSource.indexOf(end));
-    assert.equal((source.match(/getCanonicalPaymentOptions\(/g) || []).length, 1);
+    assert.equal(source.split(`${optionsBuilder}(`).length - 1, 1);
   }
   assert.equal(
     getCanonicalPaymentOptions().filter((option) => option.label === "街口支付").length,
@@ -1330,10 +1330,8 @@ test("秋奈員工扣薪只對在職員工顯示且後端仍驗證身分", () =>
   assert.match(source, /salary_service_split_confirm_/);
   assert.match(source, /async function isActiveSalaryDeductionStaff/);
   assert.match(source, /\.eq\("is_active", true\)/);
-  assert.equal(
-    (source.match(/includeSalary: salaryDeductionEnabled/g) || []).length,
-    3,
-  );
+  assert.equal((source.match(/includeSalary: salaryDeductionEnabled/g) || []).length, 1);
+  assert.equal((source.match(/salaryEligible: salaryDeductionEnabled/g) || []).length, 2);
   assert.match(source, /if \(!staff\) throw new Error\("扣薪付款僅限秋奈在職員工使用"\)/);
   const indexSource = fs.readFileSync(
     path.join(__dirname, "..", "index.js"),

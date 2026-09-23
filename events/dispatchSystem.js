@@ -46,7 +46,9 @@ const { createServiceFlowStore } = require("../utils/serviceFlowStore");
 const {
   buildPaymentMethodButtonRows,
   getCanonicalPaymentOptions,
+  getGeneralOrderPaymentOptions,
   getPaymentMethodSelection,
+  isGeneralEcpayAmountAllowed,
 } = require("../utils/paymentMethodEmojis");
 const { getOrCreateServiceOrder, transitionUnpaidOrders, createOperationGuard, isUnpaidWaitingOrder } = require("../utils/serviceOrderSafety");
 const { createPaidOrderDispatcher } = require("../utils/orderDispatchRecovery");
@@ -8518,10 +8520,10 @@ async function sendPaymentMethodSelect(channel, order) {
   );
   const rows = buildPaymentMethodButtonRows(
     `quote_payment_method_${order.id}`,
-    getCanonicalPaymentOptions({
-      includeWallet: true,
-      includeEcpay: paymentHelpers.ecpayAvailable,
-      includeSalary: salaryDeductionEnabled,
+    getGeneralOrderPaymentOptions({
+      ecpayAvailable: paymentHelpers.ecpayAvailable,
+      salaryEligible: salaryDeductionEnabled,
+      amount: Number(order.final_price || order.price || 0),
     }),
   );
 
@@ -8570,6 +8572,10 @@ async function handleQuotePaymentMethodSelect(interaction) {
         `目前付款方式：${order.payment_method || "已付款"}`,
     });
   }
+  if (paymentMethod === "綠界支付" && selection?.requestedMethod &&
+      !isGeneralEcpayAmountAllowed(selection.requestedMethod, Number(order.final_price || order.price || 0))) {
+    return interaction.editReply({ content: "❌ 此訂單金額不適用所選的綠界付款方式，請改選其他方式。" });
+  }
   function isWalletPayment(text = "") {
     const value = String(text || "");
     return (
@@ -8586,7 +8592,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
       value.includes("月結會員")
     );
   }
-  if (paymentMethod === "扣薪") {
+  if (paymentMethod === "員工扣薪" || paymentMethod === "扣薪") {
     const amount = Number(order.final_price || order.price || 0);
     try {
       const eligibility = await getSalaryDeductionEligibility(
@@ -8633,11 +8639,14 @@ async function handleQuotePaymentMethodSelect(interaction) {
         .eq("id", order.id)
         .eq("paid", false);
       if (updateError) throw updateError;
-      if (ecpay) payment.preferredMethod = selection?.requestedMethod;
+      if (ecpay && selection?.requestedMethod) {
+        payment.onlyMethod = selection.requestedMethod;
+        if (selection.requestedMethod !== "CARD") payment.preferredMethod = selection.requestedMethod;
+      }
       await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, order.customer_id, amount, payment, "訂單");
       return interaction.editReply({ content: `✅ 已建立${paymentMethod}付款連結，付款完成後會自動核帳。` });
     } catch (err) {
-      return interaction.editReply({ content: `❌ 建立街口付款失敗：${err.message || err}` });
+      return interaction.editReply({ content: `❌ 建立${paymentMethod}付款失敗：${err.message || err}` });
     }
   }
   let paidNow = false;
@@ -13221,10 +13230,10 @@ async function sendServicePaymentMethodSelect(channel, flowId, pending) {
   );
   const rows = buildPaymentMethodButtonRows(
     `service_payment_method_${flowId}`,
-    getCanonicalPaymentOptions({
-      includeWallet: true,
-      includeEcpay: paymentHelpers.ecpayAvailable,
-      includeSalary: salaryDeductionEnabled,
+    getGeneralOrderPaymentOptions({
+      ecpayAvailable: paymentHelpers.ecpayAvailable,
+      salaryEligible: salaryDeductionEnabled,
+      amount: getServiceFinalPrice(pending),
     }),
   );
 
@@ -14056,12 +14065,16 @@ async function handleServicePaymentMethodSelect(interaction) {
   if (paymentMethod === "綠界支付" && !paymentHelpers.ecpayAvailable) {
     return interaction.editReply({ content: "❌ 綠界信用卡付款目前尚未開放，請改選其他付款方式。" });
   }
+  if (paymentMethod === "綠界支付" && selection?.requestedMethod &&
+      !isGeneralEcpayAmountAllowed(selection.requestedMethod, getServiceFinalPrice(pending))) {
+    return interaction.editReply({ content: "❌ 此訂單金額不適用所選的綠界付款方式，請改選其他方式。" });
+  }
 
   pending.paymentMethod = paymentMethod;
   pending.checkoutStarted = true;
   await pendingServiceOrders.set(flowId, pending);
 
-  if (paymentMethod === "扣薪") {
+  if (paymentMethod === "員工扣薪" || paymentMethod === "扣薪") {
     const amount = getServiceFinalPrice(pending);
     try {
       const eligibility = await getSalaryDeductionEligibility(
@@ -14158,7 +14171,10 @@ async function handleServicePaymentMethodSelect(interaction) {
           orderGroupId: orderGroup?.groupId || null,
         },
       });
-      if (ecpay) payment.preferredMethod = selection?.requestedMethod;
+      if (ecpay && selection?.requestedMethod) {
+        payment.onlyMethod = selection.requestedMethod;
+        if (selection.requestedMethod !== "CARD") payment.preferredMethod = selection.requestedMethod;
+      }
       await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, pending.customerId, amount, payment, "訂單");
       await pendingServiceOrders.delete(flowId);
       return interaction.editReply({ content: `✅ 已建立${paymentMethod}付款連結，付款完成後會自動核帳並派單。` });
@@ -14179,11 +14195,11 @@ async function handleServicePaymentMethodSelect(interaction) {
     await sendNoCardPaymentInfo(interaction.channel);
   }
 
-  if (paymentMethod === "虛擬貨幣") {
+  if (paymentMethod === "加密貨幣" || paymentMethod === "虛擬貨幣" || paymentMethod === "美金轉帳") {
     await interaction.channel.send({
       content:
-        `<@${pending.customerId}> 你選擇了虛擬貨幣付款。\n` +
-        `請等待客服提供錢包地址，付款後請上傳付款證明。`,
+        `<@${pending.customerId}> 你選擇了${paymentMethod}付款。\n` +
+        `請等待客服提供${paymentMethod === "美金轉帳" ? "轉帳帳號" : "錢包地址"}，付款後請上傳付款證明。`,
     });
   }
 

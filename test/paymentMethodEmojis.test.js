@@ -7,7 +7,9 @@ const {
   PAYMENT_EMOJI_DEFINITIONS,
   buildPaymentMethodButtonRows,
   getCanonicalPaymentOptions,
+  getGeneralOrderPaymentOptions,
   getPaymentMethodSelection,
+  isGeneralEcpayAmountAllowed,
   withPaymentMethodEmojis,
 } = require("../utils/paymentMethodEmojis");
 
@@ -103,6 +105,34 @@ test("付款名稱與排版符合指定順序，員工扣薪固定最後", () =>
   assert.deepEqual(rows.map((row) => row.components.length), [2, 2, 2, 1]);
 });
 
+test("一般訂單固定五排十種付款方式，紅綠藍紅綠且各自路由正確", () => {
+  const options = getGeneralOrderPaymentOptions({ ecpayAvailable: true, salaryEligible: true, amount: 250 });
+  const rows = buildPaymentMethodButtonRows("service_payment_method_flow-1", options);
+  assert.deepEqual(rows.map((row) => row.components.map((button) => button.data.label)), [
+    ["街口支付", "線上刷卡"],
+    ["轉帳匯款", "中信無卡"],
+    ["錢包扣款", "加密貨幣"],
+    ["超商代碼", "超商條碼"],
+    ["美金轉帳", "員工扣薪"],
+  ]);
+  assert.deepEqual(rows.map((row) => row.components.map((button) => button.data.style)),
+    [[4, 4], [3, 3], [1, 1], [4, 4], [3, 3]]);
+  assert.equal(new Set(rows.flatMap((row) => row.components.map((button) => button.data.custom_id))).size, 10);
+  for (const [label, method] of [["線上刷卡", "CARD"], ["超商代碼", "CVS"], ["超商條碼", "BARCODE"]]) {
+    const button = rows.flatMap((row) => row.components).find((item) => item.data.label === label);
+    assert.deepEqual(getPaymentMethodSelection({ customId: button.data.custom_id }, "service_payment_method_"),
+      { entityId: "flow-1", paymentMethod: "綠界支付", requestedMethod: method, requiresConfirmation: true });
+  }
+  const unavailable = getGeneralOrderPaymentOptions({ ecpayAvailable: false, salaryEligible: false, amount: 10 });
+  assert.deepEqual(unavailable.filter((option) => option.disabled).map((option) => option.label),
+    ["線上刷卡", "超商代碼", "超商條碼"]);
+  assert.equal(unavailable.some((option) => option.label === "員工扣薪"), false);
+  assert.equal(isGeneralEcpayAmountAllowed("CARD", 250), true);
+  assert.equal(isGeneralEcpayAmountAllowed("CVS", 33), false);
+  assert.equal(isGeneralEcpayAmountAllowed("BARCODE", 17), false);
+  assert.equal(isGeneralEcpayAmountAllowed("ATM", 15), false);
+});
+
 test("一般訂單、加時、打賞、購幣與自助訂單付款方式均直接攤開", () => {
   const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
   const dispatchSource = fs.readFileSync(
@@ -122,6 +152,11 @@ test("一般訂單、加時、打賞、購幣與自助訂單付款方式均直�
       new RegExp(`buildPaymentMethodButtonRows\\([\\s\\S]*?${id}`),
     );
   }
+  assert.match(dispatchSource, /`quote_payment_method_\$\{order\.id\}`,[\s\S]*?getGeneralOrderPaymentOptions\(/);
+  assert.match(dispatchSource, /`service_payment_method_\$\{flowId\}`,[\s\S]*?getGeneralOrderPaymentOptions\(/);
+  assert.match(dispatchSource, /payment\.onlyMethod = selection\.requestedMethod/g);
+  assert.match(dispatchSource, /paymentMethod === "員工扣薪" \|\| paymentMethod === "扣薪"/);
+  assert.equal(dispatchSource.split("isGeneralEcpayAmountAllowed(selection.requestedMethod").length - 1, 2);
 });
 
 test("付款圖片按鈕不會重複 defer 並保留舊選單相容", () => {
