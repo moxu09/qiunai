@@ -1294,15 +1294,33 @@ function getDispatchResultThreadName(order, succeeded) {
   return `${succeeded ? "接單成功" : "訂單棄單"}-${orderLabel}`.slice(0, 100);
 }
 
+async function renameClaimThread(thread, expectedName, reason, orderId) {
+  for (let attempt = 1; attempt <= 3 && thread.name !== expectedName; attempt++) {
+    try {
+      thread = await thread.setName(expectedName, reason) || thread;
+    } catch (error) {
+      console.error(`[派單討論串] 訂單 ${orderId} 第 ${attempt} 次更名失敗`, error);
+    }
+    if (thread.name !== expectedName && attempt < 3) {
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+    }
+  }
+  if (thread.name !== expectedName) {
+    console.error(`[派單討論串] 訂單 ${orderId} 更名未完成，保留討論串供重新修復`);
+    return null;
+  }
+  return thread;
+}
+
 async function finishClaimThread(order, { succeeded, reason }) {
   const claimMessage = await findSelfServiceClaimMessage(order.id, order);
   const thread = claimMessage?.channel?.isThread?.() ? claimMessage.channel : null;
-  if (!thread) return null;
+  if (!thread) {
+    console.error(`[派單討論串] 找不到訂單 ${order.id} 的討論串，無法更名`);
+    return null;
+  }
   await claimMessage.edit({ components: [] }).catch(() => null);
-  await thread.setName(getDispatchResultThreadName(order, succeeded), reason).catch((error) =>
-    console.error("[派單討論串] 更名失敗", error),
-  );
-  return thread;
+  return renameClaimThread(thread, getDispatchResultThreadName(order, succeeded), reason, order.id);
 }
 
 async function publishClaimSuccess(order, selectedIds) {
@@ -1562,6 +1580,61 @@ async function restoreSelfServiceDispatchTimers() {
   if (error) throw error;
   for (const order of orders || []) scheduleSelfServiceDispatchTimeout(order);
   console.log(`[自助派單] 已恢復 ${(orders || []).length} 筆選人倒數`);
+  setTimeout(() => repairSelfServiceClaimThreadNames().catch((error) =>
+    console.error("[自助派單] 修復討論串名稱失敗", error)), 3_000).unref?.();
+}
+
+function getPendingClaimThreadOrderId(name) {
+  if (!String(name || "").startsWith("派單中-")) return null;
+  return /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(name)?.[1] || null;
+}
+
+function getClaimThreadOutcome(order) {
+  if (!order || !isSelfServiceOrder(order) || isManualDispatchOrder(order)) return null;
+  if (["cancelled", "self_dispatch_failed"].includes(order.quote_status)) return false;
+  if (["waiting_payment", "waiting_ecpay", "waiting_jkopay", "dispatched"].includes(order.quote_status)) return true;
+  return null;
+}
+
+async function repairSelfServiceClaimThreadNames() {
+  const dispatchChannel = await client.channels.fetch(SELF_SERVICE_DISPATCH_CHANNEL_ID).catch(() => null);
+  if (!dispatchChannel?.threads) return;
+  const active = await dispatchChannel.threads.fetchActive().catch(() => null);
+  const archived = await dispatchChannel.threads.fetchArchived({ type: "public", limit: 100 }).catch(() => null);
+  const threads = new Map([...active?.threads?.values?.() || [], ...archived?.threads?.values?.() || []]
+    .map((thread) => [thread.id, thread]));
+  let repaired = 0;
+  let failed = 0;
+  for (const thread of threads.values()) {
+    const orderId = getPendingClaimThreadOrderId(thread.name);
+    if (!orderId) continue;
+    const { data: order, error } = await supabase.from("play_orders")
+      .select("id,order_no,quote_status,note").eq("id", orderId).maybeSingle();
+    if (error) { failed += 1; continue; }
+    const succeeded = getClaimThreadOutcome(order);
+    if (succeeded === null) continue;
+    const wasArchived = thread.archived;
+    let editableThread = thread;
+    if (wasArchived) {
+      editableThread = await thread.setArchived(false, "補正討論串名稱").catch((unarchiveError) => {
+        console.error(`[自助派單] 訂單 ${orderId} 無法解除封存`, unarchiveError);
+        return null;
+      });
+    }
+    if (!editableThread) { failed += 1; continue; }
+    const renamed = await renameClaimThread(editableThread, getDispatchResultThreadName(order, succeeded),
+      "補正已結束派單的討論串名稱", orderId);
+    if (renamed) {
+      repaired += 1;
+      if (!renamed.archived) await renamed.setArchived(true, "派單已結束").catch(() => null);
+    } else {
+      failed += 1;
+      if (wasArchived && !editableThread.archived) {
+        await editableThread.setArchived(true, "保留原封存狀態").catch(() => null);
+      }
+    }
+  }
+  console.log(`[自助派單] 討論串名稱補正：${repaired} 筆，失敗 ${failed} 筆`);
 }
 
 async function migrateLegacySelfServiceClaimButtons() {
@@ -2474,6 +2547,15 @@ async function closeSelfServiceClaimButton(orderId) {
   await dispatchMessage?.edit({ components: [] }).catch(() => null);
 }
 
+function isSelfServiceClaimMessage(message, orderId, orderNo) {
+  if (message?.components?.some((row) => row.components?.some((component) =>
+    parseSelfServiceClaimAction(component.customId)?.orderId === String(orderId)))) return true;
+  // 選人後接單按鈕會被移除；重新啟動時仍須能以訂單編號找回原訊息。
+  return Boolean(orderNo && message?.content?.startsWith("請在這個討論串內選擇") &&
+    message.embeds?.some((embed) => String(embed.description || "").split("\n")
+      .some((line) => line.trim() === `訂單：${orderNo}`)));
+}
+
 async function findSelfServiceClaimMessage(orderId, knownOrder = null) {
   const cacheKey = `claimMessage:${orderId}`;
   const cached = pendingSelfServiceOrders.get(cacheKey);
@@ -2510,18 +2592,20 @@ async function findSelfServiceClaimMessage(orderId, knownOrder = null) {
     const activeThreads = dispatchChannel.threads?.fetchActive
       ? await dispatchChannel.threads.fetchActive().catch(() => null)
       : null;
-    const matchingThreads = [...(activeThreads?.threads?.values?.() || [])]
-      .filter((thread) => thread.name.includes(String(orderId)));
-    for (const thread of matchingThreads) {
-      const threadMessages = await thread.messages.fetch({ limit: 100 }).catch(() => null);
-      const claimMessage = threadMessages?.find((message) =>
-        message.components.some((row) => row.components.some(
-          (component) => parseSelfServiceClaimAction(component.customId)?.orderId === String(orderId),
-        )),
-      );
-      if (claimMessage) {
-        await rememberSelfServiceClaimMessage(orderId, claimMessage);
-        return claimMessage;
+    for (const source of ["active", "archived"]) {
+      const threads = source === "active" ? activeThreads?.threads : (dispatchChannel.threads?.fetchArchived
+        ? (await dispatchChannel.threads.fetchArchived({ type: "public", limit: 100 }).catch(() => null))?.threads
+        : null);
+      for (const thread of threads?.values?.() || []) {
+        if (!thread.name.includes(String(orderId))) continue;
+        const threadMessages = await thread.messages.fetch({ limit: 100 }).catch(() => null);
+        const claimMessage = threadMessages?.find((message) =>
+          isSelfServiceClaimMessage(message, orderId, sourceOrder?.order_no),
+        );
+        if (claimMessage) {
+          await rememberSelfServiceClaimMessage(orderId, claimMessage);
+          return claimMessage;
+        }
       }
     }
   }
@@ -15742,6 +15826,9 @@ module.exports = {
   extendSelfServiceSelectionDeadline,
   getSelfServiceThreadName,
   getDispatchResultThreadName,
+  getPendingClaimThreadOrderId,
+  getClaimThreadOutcome,
+  isSelfServiceClaimMessage,
   resolveSelfServicePlayerNumbers,
   getPaidOrderPriceAdjustment,
   getSelfServiceCancellationRefundAmount,
