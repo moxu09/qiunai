@@ -213,22 +213,25 @@ function getPaymentMethodSelection(interaction, prefix) {
   const customId = String(interaction?.customId || "");
   if (!customId.startsWith(prefix)) return null;
   const remainder = customId.slice(prefix.length);
+  // 舊訊息仍可能使用「匯款帳號」按鈕或選單；同樣依台灣時間切換。
+  const resolveBankMethod = (method) => {
+    const bank = ["匯款", "匯款帳號", "匯款轉帳", "匯款 / 轉帳"].includes(method);
+    if (!bank) return { paymentMethod: method };
+    if (process.env.ECPAY_ACCEPT_PAYMENTS === "true" && isEcpayAtmAvailable()) {
+      return { paymentMethod: "綠界支付", requestedMethod: "ATM" };
+    }
+    return { paymentMethod: "匯款" };
+  };
   if (Array.isArray(interaction?.values) && interaction.values[0]) {
     const selected = interaction.values[0];
-    const useAtm = selected === "匯款" && process.env.ECPAY_ACCEPT_PAYMENTS === "true" && isEcpayAtmAvailable();
-    return { entityId: remainder, paymentMethod: useAtm ? "綠界支付" : selected,
-      ...(useAtm ? { requestedMethod: "ATM" } : {}) };
+    return { entityId: remainder, ...resolveBankMethod(selected) };
   }
   const markerIndex = remainder.lastIndexOf(PAYMENT_BUTTON_MARKER);
   if (markerIndex < 0) return null;
   const code = remainder.slice(markerIndex + PAYMENT_BUTTON_MARKER.length);
   const paymentMethod = PAYMENT_METHOD_BY_CODE[code];
   if (!paymentMethod) return null;
-  return {
-    entityId: remainder.slice(0, markerIndex),
-    paymentMethod: paymentMethod === "匯款" && process.env.ECPAY_ACCEPT_PAYMENTS === "true" && isEcpayAtmAvailable() ? "綠界支付" : paymentMethod,
-    ...(paymentMethod === "匯款" && process.env.ECPAY_ACCEPT_PAYMENTS === "true" && isEcpayAtmAvailable() ? { requestedMethod: "ATM" } : {}),
-  };
+  return { entityId: remainder.slice(0, markerIndex), ...resolveBankMethod(paymentMethod) };
 }
 
 async function ensurePaymentMethodEmojis(client) {

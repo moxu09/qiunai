@@ -7143,34 +7143,7 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
     }
   }
   if (autoQuote.ok) {
-    await interaction.channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(QIUNAI_WATER_BLUE)
-          .setTitle("💰 系統自動報價")
-          .setDescription(
-            `訂單編號：${order.order_no || order.id}\n` +
-              `單價：NT$${Number(autoQuote.quote.unitPrice).toLocaleString("zh-TW")} / ${autoQuote.quote.unit}\n` +
-              `數量：${autoQuote.quote.quantity} ${autoQuote.quote.unit} × ${autoQuote.quote.playerCount} 位\n` +
-              `合計：NT$${autoPrice.toLocaleString("zh-TW")}\n\n` +
-              `<@${order.customer_id}> 請選擇是否使用優惠券。`,
-          )
-          .setTimestamp(),
-      ],
-      components: [
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`quote_use_coupon_${order.id}`)
-            .setLabel("使用優惠券")
-            .setEmoji("🎟️")
-            .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(`quote_no_coupon_${order.id}`)
-            .setLabel("不使用優惠券")
-            .setStyle(ButtonStyle.Secondary),
-        ),
-      ],
-    });
+    await sendOrderQuotePriceConfirm(interaction.channel, order);
   } else {
     await sendStaffQuotePanel(order);
   }
@@ -7395,38 +7368,52 @@ async function submitStaffQuotePrice(interaction) {
     });
   }
 
-  await interaction.channel.send({
-    embeds: [
-      new EmbedBuilder()
-        .setColor(QIUNAI_WATER_BLUE)
-        .setTitle("💰 客服已完成報價")
-        .setDescription(
-          `訂單編號：${order.order_no || order.id}\n` +
-            `報價金額：NT$${price.toLocaleString("zh-TW")}\n` +
-            `報價客服：<@${interaction.user.id}>\n\n` +
-            `<@${order.customer_id}> 請選擇是否使用優惠券。`
-        )
-        .setTimestamp(),
-    ],
-    components: [
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`quote_use_coupon_${order.id}`)
-          .setLabel("使用優惠券")
-          .setEmoji("🎟️")
-          .setStyle(ButtonStyle.Success),
-
-        new ButtonBuilder()
-          .setCustomId(`quote_no_coupon_${order.id}`)
-          .setLabel("不使用優惠券")
-          .setStyle(ButtonStyle.Secondary)
-      ),
-    ],
-  });
+  await sendOrderQuotePriceConfirm(interaction.channel, order);
 
   return interaction.editReply({
     content: `✅ 已填寫報價 NT$${price.toLocaleString("zh-TW")}`,
   });
+}
+async function sendOrderQuotePriceConfirm(channel, order) {
+  const price = Number(order.original_price || order.price || 0);
+  if (!Number.isSafeInteger(price) || price <= 0) throw new Error("報價金額無效");
+  await channel.send({
+    content: `<@${order.customer_id}> 請確認這張訂單的報價金額。`,
+    embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE)
+      .setTitle("💰 請顧客確認報價")
+      .setDescription(`訂單編號：${order.order_no || order.id}\n金額：NT$${price.toLocaleString("zh-TW")}\n\n確認後選擇優惠券與付款方式；付款完成後才會自動派單。`)
+      .setTimestamp()],
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`quote_confirm_price_${order.id}_${price}`).setLabel("確認報價金額").setStyle(ButtonStyle.Success),
+    )],
+  });
+}
+async function handleOrderQuotePriceConfirm(interaction) {
+  await deferReplyOnce(interaction);
+  const match = /^quote_confirm_price_(.+)_(\d+)$/.exec(interaction.customId);
+  if (!match) return interaction.editReply({ content: "❌ 報價確認資料無效。" });
+  const [, orderId, quotedPrice] = match;
+  const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+  if (error || !order) return interaction.editReply({ content: "❌ 找不到這張訂單。" });
+  if (order.customer_id !== interaction.user.id) return interaction.editReply({ content: "❌ 只有下單的闆闆可以確認報價。" });
+  const price = Number(order.original_price || order.price || 0);
+  if (price !== Number(quotedPrice) || price <= 0) return interaction.editReply({ content: "❌ 報價已更新，請確認最新報價。" });
+  if (order.quote_status === "price_confirmed") return interaction.editReply({ content: "✅ 報價已確認，請使用先前的優惠券選擇訊息。" });
+  if (order.quote_status !== "quoted" || order.paid) return interaction.editReply({ content: "❌ 訂單狀態已變更，請先確認最新訊息。" });
+  const { data: updated, error: updateError } = await supabase.from("play_orders")
+    .update({ quote_status: "price_confirmed", updated_at: new Date().toISOString() })
+    .eq("id", order.id).eq("customer_id", interaction.user.id).eq("quote_status", "quoted").eq("paid", false)
+    .select("id").maybeSingle();
+  if (updateError || !updated) return interaction.editReply({ content: "❌ 報價狀態已變更，請重新整理。" });
+  await interaction.channel.send({
+    content: `<@${order.customer_id}> 已確認報價 NT$${price.toLocaleString("zh-TW")}，請選擇是否使用優惠券。`,
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`quote_use_coupon_${order.id}`).setLabel("使用優惠券").setEmoji("🎟️").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`quote_no_coupon_${order.id}`).setLabel("不使用優惠券").setStyle(ButtonStyle.Secondary),
+    )],
+  });
+  await interaction.message?.edit({ components: [] }).catch(() => null);
+  return interaction.editReply({ content: "✅ 已確認報價，請繼續選擇優惠券與付款方式。" });
 }
 async function handleQuoteNoCoupon(interaction) {
   if (!interaction.deferred && !interaction.replied) {
@@ -7453,6 +7440,10 @@ async function handleQuoteNoCoupon(interaction) {
     return interaction.editReply({
       content: "❌ 只有下單的闆闆可以選擇優惠券",
     });
+  }
+  if (order.quote_status === "quoted") {
+    await sendOrderQuotePriceConfirm(interaction.channel, order);
+    return interaction.editReply({ content: "❌ 請先確認報價金額。" });
   }
 
   const { data: updatedOrder, error: updateError } = await supabase
@@ -7584,6 +7575,10 @@ async function handleQuoteUseCoupon(interaction) {
       content: "❌ 只有下單的闆闆可以選擇優惠券",
     });
   }
+  if (order.quote_status === "quoted") {
+    await sendOrderQuotePriceConfirm(interaction.channel, order);
+    return interaction.editReply({ content: "❌ 請先確認報價金額。" });
+  }
 
   const { data: coupons, error: couponError } = await supabase
     .from("user_items")
@@ -7661,6 +7656,10 @@ async function handleQuoteSelectCoupon(interaction) {
     return interaction.editReply({
       content: "❌ 只有下單的闆闆可以使用優惠券",
     });
+  }
+  if (order.quote_status === "quoted") {
+    await sendOrderQuotePriceConfirm(interaction.channel, order);
+    return interaction.editReply({ content: "❌ 請先確認報價金額。" });
   }
 
   const { data: coupon, error: couponError } = await supabase
@@ -7815,6 +7814,10 @@ async function handleQuotePaymentMethodSelect(interaction) {
     return interaction.editReply({
       content: "❌ 只有下單的闆闆可以選擇付款方式",
     });
+  }
+  if (order.quote_status === "quoted") {
+    await sendOrderQuotePriceConfirm(interaction.channel, order);
+    return interaction.editReply({ content: "❌ 請先確認報價金額。" });
   }
   if (order.paid) {
     return interaction.editReply({
@@ -8195,6 +8198,23 @@ async function handleSalaryQuoteSplitConfirm(interaction) {
   return interaction.editReply({ content: "✅ 已確認差額入帳並完成付款。" });
 }
 async function sendCustomerFinalConfirm(channel, order) {
+  if (order.paid && order.quote_status === "price_confirmed") {
+    try {
+      const { error: statusError } = await supabase.from("play_orders")
+        .update({ status: "pending", quote_status: "dispatched", dispatch_status: "pending", dispatch_last_error: null, updated_at: new Date().toISOString() })
+        .eq("id", order.id).eq("paid", true).eq("quote_status", "price_confirmed");
+      if (statusError) throw statusError;
+      const dispatchOrder = await markPaidOrderDispatchPending(order.id);
+      const result = await deliverPaidOrder(dispatchOrder, channel?.isTextBased?.() ? channel : null);
+      await channel?.send?.({
+        content: `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單${result.alreadyDispatched ? "已派單" : "已自動送往指定派單區"}。`,
+      });
+    } catch (error) {
+      console.error(`[報價確認後派單] ${order.order_no || order.id} 待補派`, error);
+      await channel?.send?.({ content: `<@${order.customer_id}> ✅ 付款已完成，不需要重複付款；派單正在自動補發，請客服查看。` })?.catch(() => null);
+    }
+    return;
+  }
   const preferredText = buildPreferredPlayerText(order.preferred_player);
 
   const embed = new EmbedBuilder()
@@ -8332,6 +8352,10 @@ async function transitionServicePayment(interaction, prefix, group, action) {
   }
   if (action === "confirm_waiting") {
     await interaction.message?.edit({ components: [] }).catch(() => null);
+    if (orders[0].quote_status === "price_confirmed") {
+      await sendCustomerFinalConfirm(interaction.channel, orders[0]);
+      return interaction.editReply({ content: "✅ 已確認付款，系統已啟動自動派單。" });
+    }
     await interaction.channel.send({ content: `✅ 已由 <@${interaction.user.id}> 確認付款。<@${orders[0].customer_id}> 現在可以按「確認正確」送出派單。` });
     return interaction.editReply({ content: "✅ 已標記為已付款。" });
   }
@@ -12078,6 +12102,7 @@ async function finishServiceNeed(interaction) {
     pending.usedCouponItemId = null;
     pending.usedCouponName = null;
     pending.serviceCouponRecorded = false;
+    pending.quoteConfirmedPrice = null;
     pending.quotedBy = null;
     pending.autoQuote = {
       unitPrice: autoQuote.quote.unitPrice,
@@ -12087,7 +12112,7 @@ async function finishServiceNeed(interaction) {
     };
     await pendingServiceOrders.set(flowId, pending);
     await interaction.message?.edit({ components: [] }).catch(() => null);
-    await sendServiceCouponPrompt(interaction.channel, flowId, pending);
+    await sendServiceQuoteConfirmPrompt(interaction.channel, flowId, pending);
     return interaction.editReply({
       content: `✅ 系統已依現行價目表自動報價：NT$${price.toLocaleString("zh-TW")}。`,
     });
@@ -12316,6 +12341,7 @@ async function submitServiceQuotePrice(interaction) {
   pending.usedCouponItemId = null;
   pending.usedCouponName = null;
   pending.serviceCouponRecorded = false;
+  pending.quoteConfirmedPrice = null;
   pending.quotedBy = hasCustomerServicePointRole(
     interaction,
     CUSTOMER_SERVICE_POINT_ROLE_ID,
@@ -12324,7 +12350,7 @@ async function submitServiceQuotePrice(interaction) {
     : null;
   await pendingServiceOrders.set(flowId, pending);
 
-  await sendServiceCouponPrompt(interaction.channel, flowId, pending);
+  await sendServiceQuoteConfirmPrompt(interaction.channel, flowId, pending);
 
   return interaction.editReply({
     content: `✅ 已送出正式報價：NT$${price.toLocaleString("zh-TW")}`,
@@ -12411,6 +12437,44 @@ async function sendServiceCouponPrompt(channel, flowId, pending) {
     components: [row],
   });
 }
+async function sendServiceQuoteConfirmPrompt(channel, flowId, pending) {
+  const price = getServiceOriginalPrice(pending);
+  if (!Number.isSafeInteger(price) || price <= 0) throw new Error("報價金額無效");
+  await channel.send({
+    content: `<@${pending.customerId}> 請先確認報價金額，確認後才會進入優惠券與付款流程。`,
+    embeds: [new EmbedBuilder()
+      .setColor(QIUNAI_WATER_BLUE)
+      .setTitle("💰 請顧客確認報價")
+      .setDescription(`服務：${getServiceName(pending.category)}\n${buildServiceQuoteAmountText(pending)}\n\n確認後請選擇優惠券及付款方式；付款完成後系統會自動派單。`)
+      .setTimestamp()],
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`service_confirm_quote_${flowId}_${price}`).setLabel("確認報價金額").setStyle(ButtonStyle.Success),
+    )],
+  });
+}
+async function handleServiceQuoteConfirm(interaction) {
+  await deferReplyOnce(interaction);
+  const match = /^service_confirm_quote_(.+)_(\d+)$/.exec(interaction.customId);
+  if (!match) return interaction.editReply({ content: "❌ 報價確認資料無效。" });
+  const [, flowId, quotedPrice] = match;
+  const pending = await pendingServiceOrders.get(flowId);
+  if (!pending) return interaction.editReply({ content: "❌ 這筆訂單流程已過期，請重新下單。" });
+  if (interaction.user.id !== pending.customerId) {
+    return interaction.editReply({ content: "❌ 只有下單的闆闆可以確認報價。" });
+  }
+  const price = getServiceOriginalPrice(pending);
+  if (price !== Number(quotedPrice) || price <= 0) {
+    return interaction.editReply({ content: "❌ 報價已更新，請確認最新的報價訊息。" });
+  }
+  if (pending.quoteConfirmedPrice === price) {
+    return interaction.editReply({ content: "✅ 報價已確認，請使用先前的優惠券選擇訊息。" });
+  }
+  pending.quoteConfirmedPrice = price;
+  await pendingServiceOrders.set(flowId, pending);
+  await sendServiceCouponPrompt(interaction.channel, flowId, pending);
+  await interaction.message?.edit({ components: [] }).catch(() => null);
+  return interaction.editReply({ content: `✅ 已確認報價 NT$${price.toLocaleString("zh-TW")}，請選擇優惠券與付款方式。` });
+}
 async function sendServicePaymentMethodSelect(channel, flowId, pending) {
   const salaryDeductionEnabled = await isActiveSalaryDeductionStaff(
     pending.customerId,
@@ -12473,6 +12537,10 @@ async function handleServiceNoCoupon(interaction) {
       content: "❌ 只有下單的闆闆可以選擇優惠券。",
     });
   }
+  if (pending.quoteConfirmedPrice !== getServiceOriginalPrice(pending)) {
+    await sendServiceQuoteConfirmPrompt(interaction.channel, flowId, pending);
+    return interaction.editReply({ content: "❌ 請先確認最新報價金額。" });
+  }
 
   resetServiceCouponSelection(pending);
   await pendingServiceOrders.set(flowId, pending);
@@ -12504,6 +12572,10 @@ async function handleServiceUseCoupon(interaction) {
     return interaction.editReply({
       content: "❌ 只有下單的闆闆可以選擇優惠券。",
     });
+  }
+  if (pending.quoteConfirmedPrice !== getServiceOriginalPrice(pending)) {
+    await sendServiceQuoteConfirmPrompt(interaction.channel, flowId, pending);
+    return interaction.editReply({ content: "❌ 請先確認最新報價金額。" });
   }
 
   const { data: coupons, error: couponError } = await supabase
@@ -13226,6 +13298,10 @@ async function handleServicePaymentMethodSelect(interaction) {
     return interaction.editReply({
       content: "❌ 只有下單的闆闆可以選擇付款方式。",
     });
+  }
+  if (pending.quoteConfirmedPrice !== getServiceOriginalPrice(pending)) {
+    await sendServiceQuoteConfirmPrompt(interaction.channel, flowId, pending);
+    return interaction.editReply({ content: "❌ 請先確認最新報價金額。" });
   }
 
   const paymentMethod = selection?.paymentMethod;
@@ -14198,6 +14274,10 @@ async function handleDispatchInteractionInner(interaction) {
       await openServiceQuotePriceModal(interaction);
       return true;
     }
+    if (interaction.customId.startsWith("service_confirm_quote_")) {
+      await handleServiceQuoteConfirm(interaction);
+      return true;
+    }
     if (interaction.customId.startsWith("service_no_coupon_")) {
       await handleServiceNoCoupon(interaction);
       return true;
@@ -14350,6 +14430,10 @@ async function handleDispatchInteractionInner(interaction) {
     }
     if (interaction.customId.startsWith("quote_no_coupon_")) {
       await handleQuoteNoCoupon(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("quote_confirm_price_")) {
+      await handleOrderQuotePriceConfirm(interaction);
       return true;
     }
     if (interaction.customId.startsWith("quote_use_coupon_")) {
@@ -14731,7 +14815,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
             allowedMentions: { users: [String(order.customer_id)] },
           }).catch(() => null);
         }
-      } else if (channel?.isTextBased()) {
+      } else if (order.quote_status === "price_confirmed" || channel?.isTextBased()) {
         await sendCustomerFinalConfirm(channel, order);
       }
     }
@@ -14760,7 +14844,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
               ? "系統已自動加入陪陪並發送報單。"
               : serviceFlow
                 ? "系統已自動派單。"
-                : "請繼續確認訂單內容。"),
+                : order.quote_status === "price_confirmed" ? "系統已自動派單。" : "請繼續確認訂單內容。"),
         ).setTimestamp()],
       });
     }
