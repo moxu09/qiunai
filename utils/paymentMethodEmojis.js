@@ -10,6 +10,7 @@ const PAYMENT_METHOD_CODES = Object.freeze({
   // 舊代碼必須永久保留，否則部署前已送出的付款按鈕會失效。
   "街口掃碼（可刷卡）": "jks",
   街口支付: "jko",
+  綠界支付: "ecp",
   匯款: "bank",
   匯款帳號: "bank_account",
   無卡: "atm",
@@ -31,6 +32,7 @@ const PAYMENT_METHOD_BY_CODE = Object.freeze(
 );
 
 const PAYMENT_EMOJI_DEFINITIONS = Object.freeze([
+  { key: "ecpay", name: null, file: null, fallback: "💳", matches: ["綠界"] },
   {
     key: "jkopay",
     // 新版只使用品牌 Logo。保留舊 pay_jkopay 應用程式表情，避免既有訂單訊息失效。
@@ -94,6 +96,7 @@ const uploadedEmojis = new Map();
 
 function getCanonicalPaymentOptions({
   includeWallet = false,
+  includeEcpay = false,
   includeMonthly = false,
   includeSalary = false,
   includeUsd = true,
@@ -105,6 +108,11 @@ function getCanonicalPaymentOptions({
       description: "線上付款連結與街口掃碼整合於同一選項",
       value: "街口支付",
     },
+    ...(includeEcpay ? [{
+      label: "綠界支付",
+      description: "使用綠界信用卡安全付款，成功後自動核帳",
+      value: "綠界支付",
+    }] : []),
     {
       label: "匯款帳號",
       description: "顯示銀行帳號，付款後上傳截圖",

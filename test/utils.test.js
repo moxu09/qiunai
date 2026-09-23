@@ -418,7 +418,7 @@ test("秋奈街口支付合併串接按鈕與交易 QR Code 並保留可用性�
   assert.match(dispatchSource, /if \(payment\.qrImg\) embed\.setImage\(payment\.qrImg\)/);
   assert.match(indexSource, /if \(payment\.qrImg\) paymentEmbed\.setImage\(payment\.qrImg\)/);
   assert.doesNotMatch(`${indexSource}\n${dispatchSource}`, /街口支付線上付款|街口掃碼（可刷卡）|JKOPAY_SCAN_METHOD/);
-  assert.match(dispatchSource, /!paymentHelpers\.jkopayAvailable/);
+  assert.match(dispatchSource, /ecpay \? paymentHelpers\.ecpayAvailable : paymentHelpers\.jkopayAvailable/);
   assert.match(indexSource, /\.setName\("街口退款"\)/);
   assert.match(indexSource, /refundPayment/);
   assert.match(indexSource, /1545380103675052092/);
@@ -445,7 +445,7 @@ test("秋奈街口支付合併串接按鈕與交易 QR Code 並保留可用性�
   assert.match(dispatchSource, /kind: "order"/);
   assert.match(dispatchSource, /kind: "extension"/);
   assert.match(indexSource, /kind: "tip"/);
-  assert.match(indexSource, /打賞街口付款完成/);
+  assert.match(indexSource, /打賞\$\{paymentLabel\}付款完成/);
   const refundMigration = fs.readFileSync(
     path.join(
       __dirname,

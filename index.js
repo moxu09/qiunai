@@ -37,6 +37,7 @@ const {
 } = require("./config/selfServicePricing");
 const { createAllianceMembership } = require("./utils/allianceMembership");
 const { createJkopayService } = require("./utils/jkopay");
+const { createEcpayService } = require("./utils/ecpay");
 const {
   createDeviceAuditReviewerSync,
 } = require("./utils/deviceAuditReviewers");
@@ -237,6 +238,21 @@ jkopayService = createJkopayService({
   onValidateServiceRefund: validateJkopayServiceRefund,
   onServiceRefunded: handleJkopayServiceRefunded,
 });
+const ecpayService = createEcpayService({ supabase, onServicePaid: handleJkopayServicePaid });
+
+async function startEcpayFulfillmentRecoveryScheduler() {
+  if (!ecpayService.config.enabled) return null;
+  const run = async () => {
+    const summary = await ecpayService.recoverPaidFulfillments();
+    if (summary.candidates || summary.failed)
+      console.log(`[ECPAY][RECOVERY] 候選 ${summary.candidates}、完成 ${summary.completed}、失敗 ${summary.failed}`);
+    return summary;
+  };
+  await run();
+  const timer = setInterval(createNonOverlappingTask("綠界付款後續補償", run), 60 * 1000);
+  timer.unref?.();
+  return true;
+}
 const shutdownRuntime = installProcessHandlers({
   client,
   server: runtimeServer,
@@ -437,6 +453,9 @@ dispatchSystem.setup(supabase, client, {
   attachJkopayPaymentMessage: jkopayService.attachPaymentMessage,
   jkopayEnabled: jkopayService.config.enabled,
   jkopayAvailable: jkopayService.config.available,
+  createEcpayServicePayment: ecpayService.createServicePayment,
+  attachEcpayPaymentMessage: ecpayService.attachPaymentMessage,
+  ecpayAvailable: ecpayService.config.available,
 });
 // ===== 轉帳冷卻 =====
 const transferCooldown = new Map();
@@ -614,6 +633,37 @@ async function startJkopayTipPayment({ tipId, tipData, channel }) {
     ],
   });
   await jkopayService.attachPaymentMessage(payment.platformOrderId, message.id);
+  return payment;
+}
+async function startEcpayTipPayment({ tipId, tipData, channel }) {
+  if (!ecpayService.config.available) throw new Error("綠界信用卡付款尚未開放");
+  const allocations = refreshTipTotals(tipData);
+  const totalAmount = getTipAllocationTotal(tipData);
+  if (!allocations.length || totalAmount <= 0) throw new Error("打賞資料不完整");
+  const payment = await ecpayService.createServicePayment({
+    kind: "tip", entityKey: String(tipId), userId: tipData.tipperId,
+    amount: totalAmount, channelId: channel.id,
+    description: `秋奈打賞 ${allocations.map((item) => item.item).join("、")}`,
+    metadata: {
+      tipId: String(tipId), guildId: tipData.guildId || channel.guildId || process.env.GUILD_ID,
+      tipperId: String(tipData.tipperId), allocations,
+      broadcastEnabled: Boolean(tipData.broadcastEnabled),
+      broadcastAnonymous: Boolean(tipData.broadcastAnonymous), crownOrder: tipData.crownOrder || null,
+    },
+  });
+  const message = await channel.send({
+    content: `<@${tipData.tipperId}>`,
+    embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle("💳 打賞綠界支付").setDescription(
+      `受賞陪陪：${formatTipStaffMentions(getTipStaffIds(tipData))}\n` +
+      `打賞明細：\n${getTipAllocationText(tipData)}\n` +
+      `總金額：NT$${totalAmount.toLocaleString("zh-TW")}\n` +
+      `綠界訂單編號：${payment.platformOrderId}\n\n` +
+      "請按下方按鈕前往綠界信用卡付款頁，成功後會自動核帳並寫入打賞薪資。",
+    ).setTimestamp()],
+    components: [new ActionRowBuilder().addComponents(new ButtonBuilder()
+      .setLabel("使用綠界支付").setEmoji("💳").setStyle(ButtonStyle.Link).setURL(payment.paymentUrl))],
+  });
+  await ecpayService.attachPaymentMessage(payment.platformOrderId, message.id);
   return payment;
 }
 async function saveTipAllocations({
@@ -893,6 +943,7 @@ function buildTipPaymentMenu(tipId, salaryDeductionEnabled = false) {
     `tip_payment_${tipId}`,
     getCanonicalPaymentOptions({
       includeWallet: true,
+      includeEcpay: ecpayService.config.available,
       includeSalary: salaryDeductionEnabled,
     }),
   );
@@ -2460,6 +2511,7 @@ async function handleTipPaymentSelect(interaction) {
     paymentMethod.includes("餘額");
   const salaryPayment = paymentMethod.includes("扣薪");
   const jkopayPayment = paymentMethod === "街口支付";
+  const ecpayPayment = paymentMethod === "綠界支付";
 
   tipData.keepForPayment = !walletPayment;
   setPendingTip(tipId, tipData);
@@ -2473,6 +2525,14 @@ async function handleTipPaymentSelect(interaction) {
       return interaction.editReply({ content: "✅ 已建立街口付款連結，付款完成後會自動完成打賞。" });
     } catch (err) {
       return interaction.editReply({ content: `❌ 建立街口付款失敗：${err.message || err}` });
+    }
+  }
+  if (ecpayPayment) {
+    try {
+      await startEcpayTipPayment({ tipId, tipData, channel: interaction.channel });
+      return interaction.editReply({ content: "✅ 已建立綠界付款連結，付款完成後會自動完成打賞。" });
+    } catch (err) {
+      return interaction.editReply({ content: `❌ 建立綠界付款失敗：${err.message || err}` });
     }
   }
 
@@ -4081,9 +4141,12 @@ async function handleJkopayTopupPaid({
   transaction,
   balance,
   alreadyProcessed,
+  provider = "jkopay",
 }) {
-  const sourceKey = `jkopay-topup:${order.platform_order_id}:${order.user_id}`;
-  const note = `${order.topup_no}｜街口交易 ${transaction.tradeNo}`;
+  const ecpay = provider === "ecpay";
+  const paymentLabel = ecpay ? "綠界" : "街口";
+  const sourceKey = `${provider}-topup:${order.platform_order_id}:${order.user_id}`;
+  const note = `${order.topup_no}｜${paymentLabel}交易 ${transaction.tradeNo}`;
 
   await allianceMembership.applyActivity({
     discordUserId: order.user_id,
@@ -4105,11 +4168,11 @@ async function handleJkopayTopupPaid({
     amount: Number(order.amount),
     cash_amount: Number(order.amount),
     liability_amount: Number(order.amount),
-    payment_method: "街口支付",
+    payment_method: `${paymentLabel}支付`,
     customer_id: order.user_id,
-    source_table: "jkopay_topup_orders",
+    source_table: ecpay ? "ecpay_service_payments" : "jkopay_topup_orders",
     source_id: order.platform_order_id,
-    dedupe_key: `jkopay-topup:${order.platform_order_id}`,
+    dedupe_key: `${provider}-topup:${order.platform_order_id}`,
     note,
     metadata: { trade_no: transaction.tradeNo },
   });
@@ -4120,7 +4183,7 @@ async function handleJkopayTopupPaid({
       "儲值",
       Number(order.amount),
       balance,
-      `💳 街口支付自動儲值｜${order.topup_no}`,
+      `💳 ${paymentLabel}支付自動儲值｜${order.topup_no}`,
       false,
     );
   }
@@ -4132,9 +4195,9 @@ async function handleJkopayTopupPaid({
 
   const successEmbed = new EmbedBuilder()
     .setColor("#57F287")
-    .setTitle("✅ 街口付款及 ASD 儲值完成")
+    .setTitle(`✅ ${paymentLabel}付款及 ASD 儲值完成`)
     .setDescription(
-      `<@${order.user_id}> 已完成街口付款。\n\n` +
+      `<@${order.user_id}> 已完成${paymentLabel}付款。\n\n` +
         `儲值編號：${order.topup_no}\n` +
         `儲值金額：${Number(order.amount).toLocaleString("zh-TW")} ASD\n` +
         `目前餘額：${Number(balance).toLocaleString("zh-TW")} ASD`,
@@ -4161,8 +4224,42 @@ async function handleJkopayTopupPaid({
 }
 
 async function handleJkopayServicePaid({ payment, transaction }) {
+  const ecpay = payment.provider === "ecpay";
+  const paymentLabel = ecpay ? "綠界" : "街口";
+  const providerKey = ecpay ? "ecpay" : "jkopay";
+  const paymentSourceTable = ecpay ? "ecpay_service_payments" : "jkopay_service_payments";
+  if (payment.payment_kind === "topup") {
+    if (!ecpay) throw new Error("此付款單不是綠界儲值單");
+    const { data: topup, error: topupError } = await supabase.rpc("qiunai_fulfill_ecpay_topup", {
+      p_merchant_trade_no: payment.platform_order_id,
+      p_guild_id: process.env.GUILD_ID,
+    });
+    if (topupError || !topup) throw new Error(topupError?.message || "綠界儲值入帳失敗");
+    await handleJkopayTopupPaid({
+      order: {
+        platform_order_id: payment.platform_order_id,
+        user_id: topup.user_id,
+        amount: topup.amount,
+        topup_no: topup.topup_no,
+        channel_id: topup.channel_id,
+        payment_message_id: topup.payment_message_id,
+      },
+      transaction,
+      balance: Number(topup.balance),
+      alreadyProcessed: Boolean(topup.already_processed),
+      provider: "ecpay",
+    });
+    return;
+  }
   if (payment.payment_kind !== "tip") {
     return dispatchSystem.handleJkopayServicePaid({ payment, transaction });
+  }
+  if (ecpay) {
+    const { data: valid, error: validationError } = await supabase.rpc("qiunai_validate_ecpay_tip", {
+      p_merchant_trade_no: payment.platform_order_id,
+      p_guild_id: process.env.GUILD_ID,
+    });
+    if (validationError || !valid) throw new Error(validationError?.message || "綠界打賞付款驗證失敗");
   }
 
   const metadata = payment.metadata || {};
@@ -4204,33 +4301,33 @@ async function handleJkopayServicePaid({ payment, transaction }) {
         amount: allocation.amount,
         channelId: payment.channel_id,
         paid: true,
-        idempotencyKey: `街口:${payment.platform_order_id}:${allocationIndex}`,
+        idempotencyKey: `${paymentLabel}:${payment.platform_order_id}:${allocationIndex}`,
       }),
     );
   }
   for (const order of tipOrders) {
-    await countOrderVipSpentOnce(order, "街口打賞付款完成");
+    await countOrderVipSpentOnce(order, `${paymentLabel}打賞付款完成`);
   }
   await recordAccountingLedger({
-    entry_type: "customer_tip_jkopay",
+    entry_type: `customer_tip_${providerKey}`,
     entry_label: "客人消費",
     amount: Number(payment.amount),
     revenue_amount: Number(payment.amount),
     cash_amount: Number(payment.amount),
-    payment_method: "街口支付",
+    payment_method: `${paymentLabel}支付`,
     customer_id: tipperId,
-    source_table: "jkopay_service_payments",
+    source_table: paymentSourceTable,
     source_id: payment.platform_order_id,
-    dedupe_key: `jkopay-service:${payment.platform_order_id}:tip`,
-    note: `打賞街口交易 ${transaction.tradeNo}`,
+    dedupe_key: `${providerKey}-service:${payment.platform_order_id}:tip`,
+    note: `打賞${paymentLabel}交易 ${transaction.tradeNo}`,
     metadata: { trade_no: transaction.tradeNo, allocations },
   });
   await allianceMembership.applyActivity({
     discordUserId: tipperId,
     activityType: "spend",
     amount: Number(payment.amount),
-    sourceKey: `jkopay-service:${payment.platform_order_id}:tip`,
-    note: "街口支付打賞",
+    sourceKey: `${providerKey}-service:${payment.platform_order_id}:tip`,
+    note: `${paymentLabel}支付打賞`,
   });
 
   const tipData = {
@@ -4252,13 +4349,13 @@ async function handleJkopayServicePaid({ payment, transaction }) {
       embeds: [
         new EmbedBuilder()
           .setColor("#57F287")
-          .setTitle("✅ 打賞街口付款完成")
+          .setTitle(`✅ 打賞${paymentLabel}付款完成`)
           .setDescription(
             `打賞人：<@${tipperId}>\n` +
               `受賞陪陪：${formatTipStaffMentions(allocations.map((item) => item.staffId))}\n` +
               `打賞明細：\n${allocations.map((item) => `<@${item.staffId}>：${item.item}｜${item.amount.toLocaleString("zh-TW")} ASD`).join("\n")}\n` +
               `總金額：NT$${Number(payment.amount).toLocaleString("zh-TW")}\n` +
-              `街口訂單編號：${payment.platform_order_id}`,
+              `${paymentLabel}訂單編號：${payment.platform_order_id}`,
           )
           .setTimestamp(),
       ],
@@ -4871,6 +4968,7 @@ async function handleSlashExtendOrder(interaction) {
     getCanonicalPaymentOptions({
       includeWallet: true,
       includeMonthly: true,
+      includeEcpay: ecpayService.config.available,
     }),
   );
 
@@ -7918,6 +8016,7 @@ client.once(Events.ClientReady, async () => {
       { name: "價目表切換排程", run: () => dispatchSystem.startPricingPanelScheduler() },
       { name: "已付款訂單補派排程", run: () => dispatchSystem.startPaidOrderDispatchRecovery() },
       { name: "VIP 與會計補償排程", run: () => dispatchSystem.startFinancialEffectsRecovery() },
+      { name: "綠界付款後續補償排程", run: startEcpayFulfillmentRecoveryScheduler },
       {
         name: "考核討論串刪除排程",
         run: () => employmentSystem.startCleanupScheduler(),
@@ -12664,6 +12763,7 @@ async function handleButtonInteraction(interaction) {
         paymentMethod.includes("餘額");
       const isSalaryPayment = paymentMethod.includes("扣薪");
       const isJkopayPayment = paymentMethod === "街口支付";
+      const isEcpayPayment = paymentMethod === "綠界支付";
       if (isSalaryPayment) {
         let eligibility;
         try {
@@ -12718,6 +12818,17 @@ async function handleButtonInteraction(interaction) {
           return await interaction.editReply({
             content: `❌ 建立街口付款失敗：${error.message || error}`,
           });
+        }
+      }
+      if (isEcpayPayment) {
+        try {
+          await startEcpayTipPayment({ tipId: tipConfirmId, tipData, channel: interaction.channel });
+          return await interaction.editReply({
+            content: "✅ 已建立綠界付款連結，付款完成後會自動完成打賞。",
+            components: [],
+          });
+        } catch (error) {
+          return await interaction.editReply({ content: `❌ 建立綠界付款失敗：${error.message || error}` });
         }
       }
       const needManualConfirm = !isWalletPayment;

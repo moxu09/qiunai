@@ -2615,13 +2615,27 @@ async function confirmSelfServicePlayers(interaction) {
     pendingSelfServiceOrders.delete(`selection:${order.id}`);
     return interaction.editReply({ content: "✅ 已確認陪陪並發送報單，不會重複扣款。" });
   }
-  await supabase.from("play_orders").update({ preferred_player: selectedIds.join(","), quote_status: "waiting_payment", payment_method: null }).eq("id", order.id).eq("paid", false);
+  const { data: waitingPaymentOrder, error: waitingPaymentError } = await supabase.from("play_orders")
+    .update({ preferred_player: selectedIds.join(","), quote_status: "waiting_payment", payment_method: null })
+    .eq("id", order.id)
+    .eq("paid", false)
+    .eq("quote_status", "confirming_players")
+    .select()
+    .maybeSingle();
+  if (waitingPaymentError || !waitingPaymentOrder) {
+    return interaction.editReply({ content: "❌ 確認陪陪失敗，請稍後再試。" });
+  }
+  const selectionTimer = selfServiceDispatchTimers.get(String(order.id));
+  if (selectionTimer) clearTimeout(selectionTimer);
+  selfServiceDispatchTimers.delete(String(order.id));
   await interaction.message.edit({ components: [] }).catch(() => null);
+  await publishClaimSuccess(waitingPaymentOrder, selectedIds);
   await interaction.channel.send({
-    embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle("💳 付款與自動核帳").setDescription(`應付：NT$${Number(order.final_price).toLocaleString("zh-TW")}\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n可使用 ASD 錢包或街口支付。街口付款會提供串接按鈕與該筆交易 QR Code，完成後系統會自動查帳、加入陪陪並發送報單。`).setTimestamp()],
+    embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle("💳 付款與自動核帳").setDescription(`應付：NT$${Number(order.final_price).toLocaleString("zh-TW")}\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n可使用 ASD 錢包或街口支付${paymentHelpers.ecpayAvailable ? "、綠界信用卡" : ""}。完成付款後系統會自動查帳、加入陪陪並發送報單。`).setTimestamp()],
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`self_service_pay_wallet_${order.id}`).setLabel("使用 ASD 付款").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`self_service_pay_jkopay_${order.id}`).setLabel(JKOPAY_METHOD).setEmoji("💳").setStyle(ButtonStyle.Primary),
+      ...(paymentHelpers.ecpayAvailable ? [new ButtonBuilder().setCustomId(`self_service_pay_ecpay_${order.id}`).setLabel("綠界支付").setEmoji("💳").setStyle(ButtonStyle.Primary)] : []),
     )],
   });
   return interaction.editReply({ content: "✅ 已確認陪陪，請先完成付款。" });
@@ -2629,18 +2643,22 @@ async function confirmSelfServicePlayers(interaction) {
 
 async function paySelfServiceOrderByJkopay(interaction) {
   await deferReplyOnce(interaction);
-  const order = await getSelfServiceOrder(interaction, "self_service_pay_jkopay_");
+  const ecpay = interaction.customId.startsWith("self_service_pay_ecpay_");
+  const paymentMethod = ecpay ? "綠界支付" : "街口支付";
+  const waitingStatus = ecpay ? "waiting_ecpay" : "waiting_jkopay";
+  const createPayment = ecpay ? paymentHelpers.createEcpayServicePayment : paymentHelpers.createJkopayServicePayment;
+  const order = await getSelfServiceOrder(interaction, ecpay ? "self_service_pay_ecpay_" : "self_service_pay_jkopay_");
   if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
   if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以付款。" });
   if (order.paid) return interaction.editReply({ content: "⚠️ 此訂單已完成付款，不會重複建立付款單。" });
   if (order.quote_status !== "waiting_payment") {
     return interaction.editReply({ content: "⚠️ 這張訂單已進入付款流程，請使用原本的付款訊息。" });
   }
-  if (!paymentHelpers.jkopayAvailable) {
-    return interaction.editReply({ content: "❌ 街口支付目前無法使用，請稍後再試。" });
+  if (!(ecpay ? paymentHelpers.ecpayAvailable : paymentHelpers.jkopayAvailable)) {
+    return interaction.editReply({ content: `❌ ${paymentMethod}目前無法使用，請稍後再試。` });
   }
-  if (!paymentHelpers.createJkopayServicePayment) {
-    return interaction.editReply({ content: "❌ 街口支付尚未完成設定。" });
+  if (!createPayment) {
+    return interaction.editReply({ content: `❌ ${paymentMethod}尚未完成設定。` });
   }
   if (processingSelfServicePayments.has(order.id)) {
     return interaction.editReply({ content: "⚠️ 系統正在建立付款單，請勿重複點擊。" });
@@ -2679,21 +2697,21 @@ async function paySelfServiceOrderByJkopay(interaction) {
           selectedPlayerIds: selectedIds,
         },
       });
-      await sendJkopayPaymentPrompt(interaction.channel, order.customer_id, amount, payment, "自助訂單");
+      await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, order.customer_id, amount, payment, "自助訂單");
       await interaction.message.edit({ components: [] }).catch(() => null);
-      return interaction.editReply({ content: "✅ 已建立街口付款連結，付款完成後會自動核帳、加入陪陪並發送報單。" });
+      return interaction.editReply({ content: `✅ 已建立${paymentMethod}付款連結，付款完成後會自動核帳、加入陪陪並發送報單。` });
     } catch (error) {
       await supabase
         .from("play_orders")
         .update({ payment_method: null, quote_status: "waiting_payment", updated_at: new Date().toISOString() })
         .eq("id", order.id)
         .eq("paid", false)
-        .eq("quote_status", "waiting_jkopay");
+        .eq("quote_status", waitingStatus);
       throw error;
     }
   } catch (error) {
-    console.error("[自助下單街口付款] 失敗", error);
-    return interaction.editReply({ content: `❌ 建立街口付款失敗：${error.message || error}` });
+    console.error(`[自助下單${paymentMethod}] 失敗`, error);
+    return interaction.editReply({ content: `❌ 建立${paymentMethod}付款失敗：${error.message || error}` });
   } finally {
     processingSelfServicePayments.delete(order.id);
   }
@@ -3395,6 +3413,20 @@ async function sendJkopayPaymentPrompt(channel, userId, amount, payment, label) 
     ],
   });
   await paymentHelpers.attachJkopayPaymentMessage?.(payment.platformOrderId, message.id);
+  return message;
+}
+async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
+  const message = await channel.send({
+    content: `<@${userId}>`,
+    embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle(`💳 ${label}綠界支付`).setDescription(
+      `應付金額：NT$${Number(amount).toLocaleString("zh-TW")}\n` +
+      `綠界訂單編號：${payment.platformOrderId}\n\n` +
+      "請按下方按鈕開啟綠界信用卡付款頁；成功後系統會自動核帳，請勿重複付款。",
+    ).setTimestamp()],
+    components: [new ActionRowBuilder().addComponents(new ButtonBuilder()
+      .setLabel("使用綠界支付").setEmoji("💳").setStyle(ButtonStyle.Link).setURL(payment.paymentUrl))],
+  });
+  await paymentHelpers.attachEcpayPaymentMessage?.(payment.platformOrderId, message.id);
   return message;
 }
 
@@ -7741,6 +7773,7 @@ async function sendPaymentMethodSelect(channel, order) {
     `quote_payment_method_${order.id}`,
     getCanonicalPaymentOptions({
       includeWallet: true,
+      includeEcpay: paymentHelpers.ecpayAvailable,
       includeSalary: salaryDeductionEnabled,
     }),
   );
@@ -7827,16 +7860,14 @@ async function handleQuotePaymentMethodSelect(interaction) {
       });
     }
   }
-  if (paymentMethod === "街口支付") {
-    if (!paymentHelpers.jkopayAvailable) {
-      return interaction.editReply({ content: "❌ 街口支付目前無法使用，請稍後再試或改選其他付款方式。" });
-    }
-    if (!paymentHelpers.createJkopayServicePayment) {
-      return interaction.editReply({ content: "❌ 街口支付尚未完成設定。" });
-    }
+  if (paymentMethod === "街口支付" || paymentMethod === "綠界支付") {
+    const ecpay = paymentMethod === "綠界支付";
+    const createPayment = ecpay ? paymentHelpers.createEcpayServicePayment : paymentHelpers.createJkopayServicePayment;
+    if (!(ecpay ? paymentHelpers.ecpayAvailable : paymentHelpers.jkopayAvailable) || !createPayment)
+      return interaction.editReply({ content: `❌ ${paymentMethod}目前無法使用，請改選其他付款方式。` });
     const amount = Number(order.final_price || order.price || 0);
     try {
-      const payment = await paymentHelpers.createJkopayServicePayment({
+      const payment = await createPayment({
         kind: "order",
         entityKey: String(order.id),
         userId: order.customer_id,
@@ -7847,12 +7878,12 @@ async function handleQuotePaymentMethodSelect(interaction) {
       });
       const { error: updateError } = await supabase
         .from("play_orders")
-        .update({ payment_method: "街口支付", status: "waiting_payment", updated_at: new Date().toISOString() })
+        .update({ payment_method: paymentMethod, status: "waiting_payment", updated_at: new Date().toISOString() })
         .eq("id", order.id)
         .eq("paid", false);
       if (updateError) throw updateError;
-      await sendJkopayPaymentPrompt(interaction.channel, order.customer_id, amount, payment, "訂單");
-      return interaction.editReply({ content: "✅ 已建立街口付款連結，付款完成後會自動核帳。" });
+      await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, order.customer_id, amount, payment, "訂單");
+      return interaction.editReply({ content: `✅ 已建立${paymentMethod}付款連結，付款完成後會自動核帳。` });
     } catch (err) {
       return interaction.editReply({ content: `❌ 建立街口付款失敗：${err.message || err}` });
     }
@@ -8920,6 +8951,7 @@ async function sendExtensionPaymentMethodSelect(channel, extension) {
     `extension_payment_method_${extension.id}`,
     getCanonicalPaymentOptions({
       includeWallet: true,
+      includeEcpay: paymentHelpers.ecpayAvailable,
       includeMonthly: true,
       includeSalary: salaryDeductionEnabled,
     }),
@@ -9029,15 +9061,13 @@ async function handleExtensionPaymentMethodSelect(interaction) {
     }
   }
 
-  if (paymentMethod === "街口支付") {
-    if (!paymentHelpers.jkopayAvailable) {
-      return interaction.editReply({ content: "❌ 街口支付目前無法使用，請稍後再試或改選其他付款方式。" });
-    }
-    if (!paymentHelpers.createJkopayServicePayment) {
-      return interaction.editReply({ content: "❌ 街口支付尚未完成設定。" });
-    }
+  if (paymentMethod === "街口支付" || paymentMethod === "綠界支付") {
+    const ecpay = paymentMethod === "綠界支付";
+    const createPayment = ecpay ? paymentHelpers.createEcpayServicePayment : paymentHelpers.createJkopayServicePayment;
+    if (!(ecpay ? paymentHelpers.ecpayAvailable : paymentHelpers.jkopayAvailable) || !createPayment)
+      return interaction.editReply({ content: `❌ ${paymentMethod}目前無法使用，請改選其他付款方式。` });
     try {
-      const payment = await paymentHelpers.createJkopayServicePayment({
+      const payment = await createPayment({
         kind: "extension",
         entityKey: String(extension.id),
         userId: extension.customer_id,
@@ -9048,12 +9078,12 @@ async function handleExtensionPaymentMethodSelect(interaction) {
       });
       const { error: updateError } = await supabase
         .from("order_extensions")
-        .update({ payment_method: "街口支付", status: "waiting_payment", updated_at: new Date().toISOString() })
+        .update({ payment_method: paymentMethod, status: "waiting_payment", updated_at: new Date().toISOString() })
         .eq("id", extension.id)
         .or("paid.eq.false,paid.is.null");
       if (updateError) throw updateError;
-      await sendJkopayPaymentPrompt(interaction.channel, extension.customer_id, amount, payment, "加時");
-      return interaction.editReply({ content: "✅ 已建立加時街口付款連結，付款完成後會自動核帳。" });
+      await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, extension.customer_id, amount, payment, "加時");
+      return interaction.editReply({ content: `✅ 已建立加時${paymentMethod}付款連結，付款完成後會自動核帳。` });
     } catch (err) {
       return interaction.editReply({ content: `❌ 建立街口付款失敗：${err.message || err}` });
     }
@@ -9987,7 +10017,7 @@ function parseTopupPresetAmount(customId) {
 function buildTopupPaymentMethodRows(topupId) {
   return buildPaymentMethodButtonRows(
     `topup_payment_method_${topupId}`,
-    getCanonicalPaymentOptions(),
+    getCanonicalPaymentOptions({ includeEcpay: paymentHelpers.ecpayAvailable }),
   );
 }
 
@@ -10126,6 +10156,27 @@ async function handleTopupPaymentMethodSelect(interaction) {
   const method = selection?.paymentMethod;
 
   const { amount, note, topupNo } = pending;
+
+  if (method === "綠界支付") {
+    if (!paymentHelpers.ecpayAvailable || !paymentHelpers.createEcpayServicePayment)
+      return interaction.editReply({ content: "❌ 綠界信用卡付款目前尚未開放，請改選其他付款方式。", components: [] });
+    try {
+      const payment = await paymentHelpers.createEcpayServicePayment({
+        kind: "topup", entityKey: String(topupNo), userId: interaction.user.id,
+        amount, channelId: interaction.channel.id,
+        description: `秋奈星雨幣儲值 ${topupNo}`,
+        metadata: { topupNo: String(topupNo), guildId: interaction.guildId || process.env.GUILD_ID, note },
+      });
+      await sendEcpayPaymentPrompt(interaction.channel, interaction.user.id, amount, payment, "ASD 儲值");
+      pendingTopups.delete(topupId);
+      return interaction.editReply({
+        content: `✅ 已建立綠界付款單。\n儲值編號：${topupNo}\n付款金額：NT$${amount.toLocaleString("zh-TW")}\n完成後會自動存入 ASD 錢包。`,
+        components: [],
+      });
+    } catch (error) {
+      return interaction.editReply({ content: `❌ 建立綠界儲值付款失敗：${error.message || error}`, components: [] });
+    }
+  }
 
   if (method === "街口支付") {
     if (!paymentHelpers.jkopayAvailable) {
@@ -12362,6 +12413,7 @@ async function sendServicePaymentMethodSelect(channel, flowId, pending) {
     `service_payment_method_${flowId}`,
     getCanonicalPaymentOptions({
       includeWallet: true,
+      includeEcpay: paymentHelpers.ecpayAvailable,
       includeSalary: salaryDeductionEnabled,
     }),
   );
@@ -13179,6 +13231,9 @@ async function handleServicePaymentMethodSelect(interaction) {
   if (paymentMethod === "街口支付" && !paymentHelpers.jkopayAvailable) {
     return interaction.editReply({ content: "❌ 街口支付目前無法使用，請稍後再試或改選其他付款方式。" });
   }
+  if (paymentMethod === "綠界支付" && !paymentHelpers.ecpayAvailable) {
+    return interaction.editReply({ content: "❌ 綠界信用卡付款目前尚未開放，請改選其他付款方式。" });
+  }
 
   pending.paymentMethod = paymentMethod;
   pending.checkoutStarted = true;
@@ -13257,10 +13312,10 @@ async function handleServicePaymentMethodSelect(interaction) {
       content: "✅ 已選擇月結付款，請確認是否使用此付款方式。",
     });
   }
-  if (paymentMethod === "街口支付") {
-    if (!paymentHelpers.createJkopayServicePayment) {
-      return interaction.editReply({ content: "❌ 街口支付尚未完成設定。" });
-    }
+  if (paymentMethod === "街口支付" || paymentMethod === "綠界支付") {
+    const ecpay = paymentMethod === "綠界支付";
+    const createPayment = ecpay ? paymentHelpers.createEcpayServicePayment : paymentHelpers.createJkopayServicePayment;
+    if (!createPayment) return interaction.editReply({ content: `❌ ${paymentMethod}尚未完成設定。` });
     const orders = orderGroup ? orderGroup.orders : [order];
     const amount = orders.reduce(
       (sum, current) => sum + Number(current.final_price || current.price || 0),
@@ -13281,9 +13336,9 @@ async function handleServicePaymentMethodSelect(interaction) {
           orderGroupId: orderGroup?.groupId || null,
         },
       });
-      await sendJkopayPaymentPrompt(interaction.channel, pending.customerId, amount, payment, "訂單");
+      await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, pending.customerId, amount, payment, "訂單");
       await pendingServiceOrders.delete(flowId);
-      return interaction.editReply({ content: "✅ 已建立街口付款連結，付款完成後會自動核帳並派單。" });
+      return interaction.editReply({ content: `✅ 已建立${paymentMethod}付款連結，付款完成後會自動核帳並派單。` });
     } catch (err) {
       return interaction.editReply({ content: `❌ 建立街口付款失敗：${err.message || err}` });
     }
@@ -14033,7 +14088,7 @@ async function handleDispatchInteractionInner(interaction) {
       await paySelfServiceOrder(interaction);
       return true;
     }
-    if (interaction.customId.startsWith("self_service_pay_jkopay_")) {
+    if (interaction.customId.startsWith("self_service_pay_jkopay_") || interaction.customId.startsWith("self_service_pay_ecpay_")) {
       await paySelfServiceOrderByJkopay(interaction);
       return true;
     }
@@ -14541,6 +14596,11 @@ async function handleDispatchInteractionInner(interaction) {
 }
 
 async function handleJkopayServicePaid({ payment, transaction }) {
+  const ecpay = payment.provider === "ecpay";
+  const paymentLabel = ecpay ? "綠界" : "街口";
+  const paymentMethod = `${paymentLabel}支付`;
+  const providerKey = ecpay ? "ecpay" : "jkopay";
+  const paymentSourceTable = ecpay ? "ecpay_service_payments" : "jkopay_service_payments";
   const metadata = payment.metadata || {};
   const channel = payment.channel_id
     ? await client.channels.fetch(payment.channel_id).catch(() => null)
@@ -14556,10 +14616,18 @@ async function handleJkopayServicePaid({ payment, transaction }) {
     const selfServicePlayerIds = Array.isArray(metadata.selectedPlayerIds)
       ? metadata.selectedPlayerIds.map(String).filter(Boolean)
       : [];
-    let { data: paidOrders, error } = await supabase
-      .from("play_orders")
-      .update({
-        payment_method: "街口支付",
+    let paidOrders;
+    let error;
+    if (ecpay) {
+      const result = await supabase.rpc("qiunai_mark_ecpay_orders_paid", {
+        p_merchant_trade_no: payment.platform_order_id,
+        p_guild_id: process.env.GUILD_ID,
+      });
+      error = result.error;
+      paidOrders = result.data?.orders || [];
+    } else {
+      const result = await supabase.from("play_orders").update({
+        payment_method: paymentMethod,
         paid: true,
         paid_at: paidAt,
         status: selfServiceFlow ? "accepted" : serviceFlow ? "pending" : "waiting_confirm",
@@ -14579,10 +14647,13 @@ async function handleJkopayServicePaid({ payment, transaction }) {
       .in("id", orderIds)
       .eq("paid", false)
       .select("*");
+      paidOrders = result.data;
+      error = result.error;
+    }
     if (error) throw new Error(error.message || "更新街口訂單付款狀態失敗");
     // 街口 callback 可能在「付款已入 DB、Discord 尚未送出」時中斷。
     // 重送 callback 時不再次改付款，只載入原 paid 訂單繼續補派。
-    if (!paidOrders?.length) {
+    if (!ecpay && !paidOrders?.length) {
       const current = await supabase
         .from("play_orders")
         .select("*")
@@ -14593,7 +14664,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
     }
     if (!paidOrders.length) throw new Error("街口付款成功，但找不到可恢復的已付款訂單");
     for (const order of paidOrders) {
-      await paymentHelpers.countOrderVipSpentOnce?.(order, "街口支付付款完成");
+      await paymentHelpers.countOrderVipSpentOnce?.(order, `${paymentMethod}付款完成`);
       if (selfServiceFlow) {
         const selectedIds = selfServicePlayerIds.length
           ? selfServicePlayerIds
@@ -14655,26 +14726,26 @@ async function handleJkopayServicePaid({ payment, transaction }) {
       }
     }
     await paymentHelpers.recordAccountingLedger?.({
-      entry_type: "customer_order_jkopay",
+      entry_type: `customer_order_${providerKey}`,
       entry_label: "客人消費",
       amount: Number(payment.amount),
       revenue_amount: Number(payment.amount),
       cash_amount: Number(payment.amount),
-      payment_method: "街口支付",
+      payment_method: paymentMethod,
       customer_id: payment.user_id,
       order_id: metadata.orderGroupId || orderIds[0],
       order_no: metadata.orderNo || metadata.orderGroupId || null,
-      source_table: "jkopay_service_payments",
+      source_table: paymentSourceTable,
       source_id: payment.platform_order_id,
-      dedupe_key: `jkopay-service:${payment.platform_order_id}:order`,
-      note: `街口交易 ${transaction.tradeNo}`,
+      dedupe_key: `${providerKey}-service:${payment.platform_order_id}:order`,
+      note: `${paymentLabel}交易 ${transaction.tradeNo}`,
       metadata: { order_ids: orderIds, trade_no: transaction.tradeNo },
     });
     if (channel?.isTextBased() && !selfServiceFlow) {
       await channel.send({
-        embeds: [new EmbedBuilder().setColor("#57F287").setTitle("✅ 街口訂單付款完成").setDescription(
-          `<@${payment.user_id}> 已完成街口支付 NT$${Number(payment.amount).toLocaleString("zh-TW")}。\n` +
-            `街口訂單編號：${payment.platform_order_id}\n` +
+        embeds: [new EmbedBuilder().setColor("#57F287").setTitle(`✅ ${paymentLabel}訂單付款完成`).setDescription(
+          `<@${payment.user_id}> 已完成${paymentMethod} NT$${Number(payment.amount).toLocaleString("zh-TW")}。\n` +
+            `${paymentLabel}訂單編號：${payment.platform_order_id}\n` +
             (selfServiceFlow
               ? "系統已自動加入陪陪並發送報單。"
               : serviceFlow
@@ -14688,10 +14759,18 @@ async function handleJkopayServicePaid({ payment, transaction }) {
 
   if (payment.payment_kind === "extension") {
     const extensionId = String(metadata.extensionId || payment.entity_key || "");
-    const { data: extension, error } = await supabase
-      .from("order_extensions")
-      .update({
-        payment_method: "街口支付",
+    let extension;
+    let error;
+    if (ecpay) {
+      const result = await supabase.rpc("qiunai_mark_ecpay_extension_paid", {
+        p_merchant_trade_no: payment.platform_order_id,
+        p_guild_id: process.env.GUILD_ID,
+      });
+      extension = result.data;
+      error = result.error;
+    } else {
+      const result = await supabase.from("order_extensions").update({
+        payment_method: paymentMethod,
         paid: true,
         status: "paid",
         paid_at: paidAt,
@@ -14701,38 +14780,41 @@ async function handleJkopayServicePaid({ payment, transaction }) {
       .or("paid.eq.false,paid.is.null")
       .select("*")
       .maybeSingle();
+      extension = result.data;
+      error = result.error;
+    }
     if (error) throw new Error(error.message || "更新街口加時付款狀態失敗");
     if (!extension) return;
-    const salaryResult = await applyExtensionToPlayOrder(extension);
+    const salaryResult = extension.applied_to_salary ? null : await applyExtensionToPlayOrder(extension);
     await paymentHelpers.recordAccountingLedger?.({
-      entry_type: "customer_extension_jkopay",
+      entry_type: `customer_extension_${providerKey}`,
       entry_label: "客人消費",
       amount: Number(payment.amount),
       revenue_amount: Number(payment.amount),
       cash_amount: Number(payment.amount),
-      payment_method: "街口支付",
+      payment_method: paymentMethod,
       customer_id: payment.user_id,
       order_id: extension.order_id || extension.order_no || null,
       order_no: extension.order_no || null,
-      source_table: "jkopay_service_payments",
+      source_table: paymentSourceTable,
       source_id: payment.platform_order_id,
-      dedupe_key: `jkopay-service:${payment.platform_order_id}:extension`,
-      note: `加時 ${extension.extension_text || ""}｜街口交易 ${transaction.tradeNo}`,
+      dedupe_key: `${providerKey}-service:${payment.platform_order_id}:extension`,
+      note: `加時 ${extension.extension_text || ""}｜${paymentLabel}交易 ${transaction.tradeNo}`,
     });
     await paymentHelpers.recordSpendActivity?.({
       userId: payment.user_id,
       amount: Number(payment.amount),
-      sourceKey: `jkopay-service:${payment.platform_order_id}:extension`,
-      note: `加時街口支付 ${extension.order_no || extension.order_id}`,
+      sourceKey: `${providerKey}-service:${payment.platform_order_id}:extension`,
+      note: `加時${paymentMethod} ${extension.order_no || extension.order_id}`,
     });
     if (channel?.isTextBased()) {
       await channel.send({
-        embeds: [new EmbedBuilder().setColor("#57F287").setTitle("✅ 加時街口付款完成").setDescription(
+        embeds: [new EmbedBuilder().setColor("#57F287").setTitle(`✅ 加時${paymentLabel}付款完成`).setDescription(
           `原訂單：${extension.order_no || extension.order_id}\n` +
             `闆闆：<@${extension.customer_id}>\n` +
             `加時內容：${extension.extension_text}\n` +
             `加時金額：NT$${Number(extension.amount).toLocaleString("zh-TW")}\n` +
-            `街口訂單編號：${payment.platform_order_id}` +
+            `${paymentLabel}訂單編號：${payment.platform_order_id}` +
             (salaryResult ? `\n薪資網金額已更新為 NT$${salaryResult.newPrice.toLocaleString("zh-TW")}` : ""),
         ).setTimestamp()],
       });
