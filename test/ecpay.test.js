@@ -1,6 +1,17 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const fs = require("node:fs");
+const path = require("node:path");
 const { createEcpayService, getEcpayConfig } = require("../utils/ecpay");
+
+test("已付款自助單的 waiting_ecpay 狀態可原子入帳且不放寬其他訂單", () => {
+  const sql = fs.readFileSync(path.join(__dirname, "..", "supabase", "migrations",
+    "20260924_qiunai_ecpay_waiting_ecpay_fulfillment.sql"), "utf8");
+  assert.match(sql, /v_self_service and v_order\.status = ''pending''/);
+  assert.match(sql, /v_order\.quote_status = ''waiting_ecpay''/);
+  assert.match(sql, /v_order\.payment_method = ''綠界支付''/);
+  assert.match(sql, /execute replace\(definition, old_predicate, new_predicate\)/);
+});
 
 test("綠界付款須同時具備 HTTPS 結帳站與收款開關", () => {
   assert.equal(getEcpayConfig({ ECPAY_PUBLIC_BASE_URL: "https://example.com", ECPAY_ACCEPT_PAYMENTS: "true" }).available, true);
