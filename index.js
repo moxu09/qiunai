@@ -2840,6 +2840,21 @@ async function saveTipToPlayOrders({
   idempotencyKey = null,
 }) {
   const note = idempotencyKey ? `打賞｜${idempotencyKey}` : "打賞";
+  const ensureSalaryOrder = async (order) => {
+    const salaryOrder = await saveQiunaiSalaryOrder({
+      orderId: order.id,
+      orderNo: order.order_no || order.id,
+      discordId: staffId,
+      staffName: null,
+      customerName: `<@${tipperId}>`,
+      serviceName: `打賞：${item}`,
+      orderAmount: Number(amount),
+      bonusAmount: 0,
+      finishedAt: order.completed_at || new Date().toISOString(),
+    });
+    if (!salaryOrder && idempotencyKey)
+      throw new Error(`打賞訂單 ${order.order_no || order.id} 的薪資紀錄尚未建立`);
+  };
   if (idempotencyKey) {
     // 冠名提醒會把 note 改成 JSON，原備註留在 originalNote；重送金流
     // callback 時仍須找到同一筆打賞，避免再次寫入訂單與薪資。
@@ -2852,7 +2867,10 @@ async function saveTipToPlayOrders({
     if (existingError) throw existingError;
     const existing = (candidates || []).find((order) =>
       matchesTipPaymentNote(order.note, note));
-    if (existing) return existing;
+    if (existing) {
+      await ensureSalaryOrder(existing);
+      return existing;
+    }
   }
   const { data, error } = await supabase
     .from("play_orders")
@@ -2886,17 +2904,7 @@ async function saveTipToPlayOrders({
     console.error("[打賞寫入薪資網失敗]", error);
     throw error;
   }
-  await saveQiunaiSalaryOrder({
-    orderId: data.id,
-    orderNo: data.order_no || data.id,
-    discordId: staffId,
-    staffName: null,
-    customerName: `<@${tipperId}>`,
-    serviceName: `打賞：${item}`,
-    orderAmount: Number(amount),
-    bonusAmount: 0,
-    finishedAt: new Date().toISOString(),
-  });
+  await ensureSalaryOrder(data);
   return data;
 }
 const {

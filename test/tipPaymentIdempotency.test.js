@@ -17,5 +17,6 @@ test("打賞入帳先檢查完整付款鍵，重送 callback 不重新新增訂�
   const section = source.match(/async function saveTipToPlayOrders\(\{([\s\S]*?)\nasync function /)?.[1];
   assert.ok(section);
   assert.match(section, /matchesTipPaymentNote\(order\.note, note\)/);
-  assert.match(section, /if \(existing\) return existing;/);
+  assert.match(section, /if \(existing\) \{\s*await ensureSalaryOrder\(existing\);\s*return existing;/);
+  assert.match(section, /if \(!salaryOrder && idempotencyKey\)/);
 });
