@@ -13,6 +13,14 @@ test("已付款自助單的 waiting_ecpay 狀態可原子入帳且不放寬其�
   assert.match(sql, /execute replace\(definition, old_predicate, new_predicate\)/);
 });
 
+test("一般訂單付款通知從已付款訂單清單判斷派單狀態", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+  const completionMessage = source.match(/if \(channel\?\.isTextBased\(\) && !selfServiceFlow\) \{([\s\S]*?)\n    return;/)?.[1];
+  assert.ok(completionMessage, "找不到訂單付款完成通知");
+  assert.match(completionMessage, /paidOrders\.some\([\s\S]*?paidOrder\.quote_status === "price_confirmed"/);
+  assert.doesNotMatch(completionMessage, /\border\.quote_status\b/);
+});
+
 test("綠界付款須同時具備 HTTPS 結帳站與收款開關", () => {
   assert.equal(getEcpayConfig({ ECPAY_PUBLIC_BASE_URL: "https://example.com", ECPAY_ACCEPT_PAYMENTS: "true" }).available, true);
   assert.equal(getEcpayConfig({ ECPAY_PUBLIC_BASE_URL: "http://example.com", ECPAY_ACCEPT_PAYMENTS: "true" }).available, false);

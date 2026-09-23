@@ -15760,6 +15760,9 @@ async function handleJkopayServicePaid({ payment, transaction }) {
       metadata: { order_ids: orderIds, trade_no: transaction.tradeNo },
     });
     if (channel?.isTextBased() && !selfServiceFlow) {
+      const hasPriceConfirmedOrder = paidOrders.some(
+        (paidOrder) => paidOrder.quote_status === "price_confirmed",
+      );
       await channel.send({
         embeds: [new EmbedBuilder().setColor("#57F287").setTitle(`✅ ${paymentLabel}訂單付款完成`).setDescription(
           `<@${payment.user_id}> 已完成${paymentMethod} NT$${Number(payment.amount).toLocaleString("zh-TW")}。\n` +
@@ -15768,7 +15771,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
               ? "系統已自動加入陪陪並發送報單。"
               : serviceFlow
                 ? "系統已自動派單。"
-                : order.quote_status === "price_confirmed" ? "系統已自動派單。" : "請繼續確認訂單內容。"),
+                : hasPriceConfirmedOrder ? "系統已自動派單。" : "請繼續確認訂單內容。"),
         ).setTimestamp()],
       });
     }
