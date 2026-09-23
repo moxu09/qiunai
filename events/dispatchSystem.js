@@ -40,6 +40,7 @@ const {
   isOctoberValorantPricingActive,
 } = require("../config/selfServicePricing");
 const path = require("node:path");
+const { buildEcpayPaymentRows, handleEcpayDirect, sendPreferredEcpayDirect } = require("../utils/ecpayDiscord");
 const { createServiceFlowStore } = require("../utils/serviceFlowStore");
 const {
   buildPaymentMethodButtonRows,
@@ -2641,7 +2642,7 @@ async function confirmSelfServicePlayers(interaction) {
   return interaction.editReply({ content: "✅ 已確認陪陪，請先完成付款。" });
 }
 
-async function paySelfServiceOrderByJkopay(interaction) {
+async function paySelfServiceOrderByGateway(interaction) {
   await deferReplyOnce(interaction);
   const ecpay = interaction.customId.startsWith("self_service_pay_ecpay_");
   const paymentMethod = ecpay ? "綠界支付" : "街口支付";
@@ -2670,7 +2671,7 @@ async function paySelfServiceOrderByJkopay(interaction) {
   try {
     const { data: lockedOrder, error: lockError } = await supabase
       .from("play_orders")
-      .update({ payment_method: "街口支付", quote_status: "waiting_jkopay", updated_at: new Date().toISOString() })
+      .update({ payment_method: paymentMethod, quote_status: waitingStatus, updated_at: new Date().toISOString() })
       .eq("id", order.id)
       .eq("paid", false)
       .eq("quote_status", "waiting_payment")
@@ -2683,7 +2684,7 @@ async function paySelfServiceOrderByJkopay(interaction) {
     try {
       const amount = Number(order.final_price ?? order.price ?? 0);
       if (!Number.isFinite(amount) || amount <= 0) throw new Error("訂單金額不正確");
-      const payment = await paymentHelpers.createJkopayServicePayment({
+      const payment = await createPayment({
         kind: "order",
         entityKey: String(order.id),
         userId: order.customer_id,
@@ -3421,12 +3422,14 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
     embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle(`💳 ${label}綠界支付`).setDescription(
       `應付金額：NT$${Number(amount).toLocaleString("zh-TW")}\n` +
       `綠界訂單編號：${payment.platformOrderId}\n\n` +
-      "請按下方按鈕選擇適用的綠界付款方式；實際付款成功後才會自動核帳，請勿重複付款。",
+      "刷卡會在官網站內直接輸入卡號；匯款與超商繳費資訊會直接顯示在本頻道。實際付款成功後才會自動核帳。",
     ).setTimestamp()],
-    components: [new ActionRowBuilder().addComponents(new ButtonBuilder()
-      .setLabel("使用綠界支付").setEmoji("💳").setStyle(ButtonStyle.Link).setURL(payment.paymentUrl))],
+    components: buildEcpayPaymentRows(payment, Number(amount), { topup: label.includes("儲值") }),
   });
   await paymentHelpers.attachEcpayPaymentMessage?.(payment.platformOrderId, message.id);
+  if (payment.preferredMethod === "ATM") {
+    await sendPreferredEcpayDirect(channel, userId, payment.platformOrderId, supabase, process.env.ECPAY_PUBLIC_BASE_URL);
+  }
   return message;
 }
 
@@ -7882,6 +7885,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
         .eq("id", order.id)
         .eq("paid", false);
       if (updateError) throw updateError;
+      if (ecpay) payment.preferredMethod = selection?.requestedMethod;
       await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, order.customer_id, amount, payment, "訂單");
       return interaction.editReply({ content: `✅ 已建立${paymentMethod}付款連結，付款完成後會自動核帳。` });
     } catch (err) {
@@ -9082,6 +9086,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
         .eq("id", extension.id)
         .or("paid.eq.false,paid.is.null");
       if (updateError) throw updateError;
+      if (ecpay) payment.preferredMethod = selection?.requestedMethod;
       await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, extension.customer_id, amount, payment, "加時");
       return interaction.editReply({ content: `✅ 已建立加時${paymentMethod}付款連結，付款完成後會自動核帳。` });
     } catch (err) {
@@ -13323,7 +13328,7 @@ async function handleServicePaymentMethodSelect(interaction) {
     );
     const entityKey = orderGroup ? `group-${orderGroup.groupId}` : String(order.id);
     try {
-      const payment = await paymentHelpers.createJkopayServicePayment({
+      const payment = await createPayment({
         kind: "order",
         entityKey,
         userId: pending.customerId,
@@ -13336,11 +13341,12 @@ async function handleServicePaymentMethodSelect(interaction) {
           orderGroupId: orderGroup?.groupId || null,
         },
       });
+      if (ecpay) payment.preferredMethod = selection?.requestedMethod;
       await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, pending.customerId, amount, payment, "訂單");
       await pendingServiceOrders.delete(flowId);
       return interaction.editReply({ content: `✅ 已建立${paymentMethod}付款連結，付款完成後會自動核帳並派單。` });
     } catch (err) {
-      return interaction.editReply({ content: `❌ 建立街口付款失敗：${err.message || err}` });
+      return interaction.editReply({ content: `❌ 建立${paymentMethod}付款失敗：${err.message || err}` });
     }
   }
 
@@ -14031,6 +14037,9 @@ async function handleDispatchInteractionInner(interaction) {
   }
 
   if (interaction.isButton()) {
+    if (interaction.customId.startsWith("ecpay_direct_")) {
+      return handleEcpayDirect(interaction, supabase, process.env.ECPAY_PUBLIC_BASE_URL);
+    }
     if (interaction.customId.startsWith("quote_payment_method_")) {
       await handleQuotePaymentMethodSelect(interaction);
       return true;
@@ -14089,7 +14098,7 @@ async function handleDispatchInteractionInner(interaction) {
       return true;
     }
     if (interaction.customId.startsWith("self_service_pay_jkopay_") || interaction.customId.startsWith("self_service_pay_ecpay_")) {
-      await paySelfServiceOrderByJkopay(interaction);
+      await paySelfServiceOrderByGateway(interaction);
       return true;
     }
     if (interaction.customId.startsWith("self_service_extend_")) {
