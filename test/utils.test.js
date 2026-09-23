@@ -654,11 +654,12 @@ test("人工下單依遊戲分流，先報價與派單選人後才付款", () =>
   assert.equal(getManualDispatchChannelId({ game: "其他", order_item: "傳說對決" }), "1548732212491587634");
   assert.equal(getManualDispatchChannelId({ game: "其他", order_item: "語音聊天" }), "1548954895133053018");
   assert.equal(getManualDispatchChannelId({ game: "其他", order_item: "Minecraft" }), "1546519988901257246");
-  assert.equal(getClaimDispatchChannelId({ game: "valorant", note: "[SELF_SERVICE]" }), "1223723419061850224");
-  assert.equal(getClaimDispatchChannelId({ game: "delta", note: "[SELF_SERVICE]" }), "1336712064995037255");
-  assert.equal(getClaimDispatchChannelId({ game: "lol", note: "[SELF_SERVICE]" }), "1546494242246103090");
-  assert.equal(getClaimDispatchChannelId({ game: "apex", note: "[SELF_SERVICE]" }), "1546494309941903360");
-  assert.equal(getClaimDispatchChannelId({ game: "voice_chat", note: "[SELF_SERVICE]" }), "1548954895133053018");
+  assert.equal(getClaimDispatchChannelId({ game: "valorant", note: "[SELF_SERVICE]" }), process.env.SELF_SERVICE_DISPATCH_CHANNEL_ID || "1540653111670997092");
+  assert.equal(getClaimDispatchChannelId({ game: "valorant", note: "[MANUAL_DISPATCH]" }), "1223723419061850224");
+  assert.equal(getClaimDispatchChannelId({ game: "delta", note: "[MANUAL_DISPATCH]" }), "1336712064995037255");
+  assert.equal(getClaimDispatchChannelId({ game: "lol", note: "[MANUAL_DISPATCH]" }), "1546494242246103090");
+  assert.equal(getClaimDispatchChannelId({ game: "apex", note: "[MANUAL_DISPATCH]" }), "1546494309941903360");
+  assert.equal(getClaimDispatchChannelId({ game: "voice_chat", note: "[MANUAL_DISPATCH]" }), "1548954895133053018");
   assert.equal(isManualDispatchOrder({ note: "需求 [MANUAL_DISPATCH]" }), true);
 
   const source = fs.readFileSync(

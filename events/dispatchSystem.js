@@ -1582,7 +1582,9 @@ function getManualDispatchChannelId(order) {
 }
 
 function getClaimDispatchChannelId(order) {
-  return getManualDispatchChannelId(order);
+  return isManualDispatchOrder(order)
+    ? getManualDispatchChannelId(order)
+    : SELF_SERVICE_DISPATCH_CHANNEL_ID;
 }
 
 function getClaimDispatchStatuses(order) {
@@ -4637,9 +4639,34 @@ async function retryPendingPaidOrderDispatches() {
       .limit(20);
     if (error) throw error;
     for (const order of orders || []) {
-      const customerChannel = order.channel_id
-        ? await client.channels.fetch(order.channel_id).catch(() => null)
-        : null;
+      // 已刪除的臨時下單頻道無法重建原訊息，保留失敗狀態供人工處理，
+      // 不要每輪再嘗試對 null 頻道發送客服面板。
+      if (String(order.dispatch_last_error || "").startsWith("customer_channel_deleted:")) continue;
+      let customerChannel = null;
+      let missingChannel = !order.channel_id;
+      if (order.channel_id) {
+        try {
+          customerChannel = await client.channels.fetch(order.channel_id, { force: true });
+        } catch (fetchError) {
+          if (Number(fetchError?.code) === 10003) missingChannel = true;
+          else {
+            console.error(`[派單恢復] ${order.order_no || order.id} 讀取客戶頻道失敗`, fetchError);
+            continue;
+          }
+        }
+      }
+      if (missingChannel || !customerChannel?.isTextBased?.()) {
+        const reason = `customer_channel_deleted: ${order.channel_id || "missing"}; requires manual recovery`;
+        const { error: markError } = await supabase.from("play_orders")
+          .update({ dispatch_status: "failed", dispatch_last_error: reason, updated_at: new Date().toISOString() })
+          .eq("id", order.id)
+          .eq("guild_id", recoveryGuildId)
+          .eq("paid", true)
+          .in("dispatch_status", ["pending", "failed"]);
+        if (markError) console.error(`[派單恢復] ${order.order_no || order.id} 記錄失聯頻道失敗`, markError);
+        else console.warn(`[派單恢復] ${order.order_no || order.id} 客戶頻道已刪除，保留待人工處理`);
+        continue;
+      }
       try {
         await deliverPaidOrder(order, customerChannel);
       } catch (dispatchError) {
@@ -4956,6 +4983,9 @@ async function sendOrderToStaffChannel(order) {
   });
 }
 async function sendStaffOrderControlPanel(channel, order) {
+  if (!channel?.isTextBased?.()) {
+    throw new Error(`訂單 ${order.order_no || order.id} 的客戶頻道不存在，無法發送客服面板`);
+  }
   if (isManualDispatchOrder(order) && order.paid) {
     const selectedIds = String(order.preferred_player || "")
       .split(",")
