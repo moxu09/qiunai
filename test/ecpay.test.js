@@ -95,3 +95,9 @@ test("停止接受新付款後仍會補處理已入帳的綠界訂單", async ()
   assert.equal((await service.recoverPaidFulfillments()).completed, 1);
   assert.deepEqual(calls, ["ecpay_claim_service_fulfillment", "ecpay_finish_service_fulfillment"]);
 });
+
+test("綠界付款回呼入帳後最多等待約十秒開始補處理，且排程不重疊", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
+  assert.match(source, /const ECPAY_FULFILLMENT_POLL_MS = 10_000;/);
+  assert.match(source, /setInterval\(createNonOverlappingTask\("綠界付款後續補償", run\), ECPAY_FULFILLMENT_POLL_MS\)/);
+});

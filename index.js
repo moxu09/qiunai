@@ -240,6 +240,7 @@ jkopayService = createJkopayService({
   onServiceRefunded: handleJkopayServiceRefunded,
 });
 const ecpayService = createEcpayService({ supabase, onServicePaid: handleJkopayServicePaid });
+const ECPAY_FULFILLMENT_POLL_MS = 10_000;
 
 async function startEcpayFulfillmentRecoveryScheduler() {
   if (!ecpayService.config.enabled) return null;
@@ -250,7 +251,7 @@ async function startEcpayFulfillmentRecoveryScheduler() {
     return summary;
   };
   await run();
-  const timer = setInterval(createNonOverlappingTask("綠界付款後續補償", run), 60 * 1000);
+  const timer = setInterval(createNonOverlappingTask("綠界付款後續補償", run), ECPAY_FULFILLMENT_POLL_MS);
   timer.unref?.();
   return true;
 }
