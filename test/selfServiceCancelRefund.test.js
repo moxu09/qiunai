@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   getSelfServiceCancellationRefundAmount,
+  requiresManualTimeoutReview,
 } = require("../events/dispatchSystem");
 
 test("自助下單選擇陪陪階段顯示延長與棄單按鈕及十秒關閉文案", () => {
@@ -44,4 +45,13 @@ test("自助取消只退款已付款的 ASD 訂單", () => {
       }),
     /不是 ASD 付款/,
   );
+});
+
+test("派單逾時時已付款的非 ASD 訂單必須保留供人工處理", () => {
+  assert.equal(requiresManualTimeoutReview({ paid: true, payment_method: "員工扣薪" }), true);
+  assert.equal(requiresManualTimeoutReview({ paid: true, payment_method: "匯款" }), true);
+  assert.equal(requiresManualTimeoutReview({ paid: true, payment_method: "信用卡" }), true);
+  assert.equal(requiresManualTimeoutReview({ paid: true, payment_method: "ASD" }), false);
+  assert.equal(requiresManualTimeoutReview({ paid: false, payment_method: "匯款" }), false);
+  assert.equal(requiresManualTimeoutReview({ paid: true, payment_method: "ASD", note: "[MANUAL_DISPATCH]" }), true);
 });

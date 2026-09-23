@@ -1346,6 +1346,11 @@ function safeSelfServiceClaimNote(note, maxLength = 30) {
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
+function requiresManualTimeoutReview(order) {
+  return Boolean(order?.paid &&
+    (isManualDispatchOrder(order) || !isWalletPaymentMethod(order.payment_method)));
+}
+
 async function failSelfServiceDispatch(orderId, messageId = null) {
   selfServiceDispatchTimers.delete(String(orderId));
   const current = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
@@ -1386,6 +1391,48 @@ async function failSelfServiceDispatch(orderId, messageId = null) {
   const restoreQuoteStatus = wasWaitingForCustomer
     ? getClaimChoosingStatus(order)
     : getClaimDispatchingStatus(order);
+  if (requiresManualTimeoutReview(order)) {
+    // 非 ASD 已付款訂單不能走 ASD 退款 RPC，也不能當作未付款訂單關閉頻道。
+    const { data: reviewOrder, error: reviewError } = await supabase
+      .from("play_orders")
+      .update({ quote_status: "self_manual_review", updated_at: new Date().toISOString() })
+      .eq("id", order.id)
+      .eq("quote_status", cancellingStatus)
+      .select()
+      .maybeSingle();
+    if (reviewError) throw reviewError;
+    if (!reviewOrder) return;
+    const reviewMessage =
+      `訂單 ${order.order_no || order.id} 派單逾時；此單已使用「${order.payment_method || "非 ASD 方式"}」付款，` +
+      "系統尚未退款，請客服核對付款並人工處理退款或續派。訂單頻道會保留。";
+    const claimMessage = await findSelfServiceClaimMessage(order.id, order).catch((lookupError) => {
+      console.error("[自助派單人工處理] 查詢討論串失敗", lookupError);
+      return null;
+    });
+    const claimThread = claimMessage?.channel?.isThread?.() ? claimMessage.channel : null;
+    await claimMessage?.edit({ components: [] }).catch(() => null);
+    await claimThread?.send({
+      content: reviewMessage,
+      files: [{ attachment: SELF_SERVICE_FAILED_IMAGE, name: "dispatch-failed.png" }],
+      allowedMentions: { parse: [] },
+    }).catch((notificationError) => console.error("[自助派單人工處理] 討論串通知失敗", notificationError));
+    await claimThread?.setName(
+      `待人工處理-${String(order.order_no || order.id).replace(/[^\p{L}\p{N}_-]+/gu, "-")}`.slice(0, 100),
+      "已付款訂單逾時，等待人工核帳",
+    ).catch(() => null);
+    const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
+    const staffRole = /^\d{16,22}$/.test(String(process.env.STAFF_ROLE || ""))
+      ? `<@&${process.env.STAFF_ROLE}> ` : "";
+    await orderChannel?.send({
+      content: `${staffRole}<@${order.customer_id}> ${reviewMessage}`,
+      allowedMentions: { roles: staffRole ? [process.env.STAFF_ROLE] : [], users: [order.customer_id] },
+    }).catch((notificationError) => console.error("[自助派單人工處理] 訂單頻道通知失敗", notificationError));
+    pendingSelfServiceOrders.delete(`candidatePrompt:${order.id}`);
+    pendingSelfServiceOrders.delete(`selection:${order.id}`);
+    pendingSelfServiceOrders.delete(`claimMessage:${order.id}`);
+    console.warn(`[自助派單人工處理] 訂單 ${order.id} 已付款但不支援自動退款，已停止逾時重試`);
+    return;
+  }
   let refundAmount = 0;
   let refundedBalance = null;
   try {
@@ -15491,6 +15538,7 @@ module.exports = {
   resolveSelfServicePlayerNumbers,
   getPaidOrderPriceAdjustment,
   getSelfServiceCancellationRefundAmount,
+  requiresManualTimeoutReview,
   appendSelfServiceClaimNote,
   getSelfServiceClaimNotes,
   getSelfServiceClaimTypes,
