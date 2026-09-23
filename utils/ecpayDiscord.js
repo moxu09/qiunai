@@ -4,6 +4,10 @@ const { PNG } = require("pngjs");
 const { createHmac } = require("node:crypto");
 const { isEcpayAtmAvailable } = require("./ecpayAtmSchedule");
 
+// Source: https://developers.ecpay.com.tw/28000/ (checked 2026-09-23).
+// A BARCODE payment has one set of three codes and must not be sent twice.
+const directDeliveries = new Map();
+
 const METHODS = Object.freeze({
   ATM: { label: "匯款／ATM 虛擬帳號", min: 16, max: 49_999 },
   CVS: { label: "超商代碼", min: 34, max: 20_000 },
@@ -80,6 +84,16 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
     if (payment.amount < limit.min || payment.amount > limit.max ||
         (payment.payment_kind === "topup" && method !== "ATM"))
       throw new Error("此付款方式不適用這筆金額或訂單");
+    const deliveredId = payment.metadata?.ecpay_direct_message_id || directDeliveries.get(order)?.messageId;
+    if (deliveredId) {
+      await interaction.editReply({ content: `✅ 此筆繳費資訊已發送過，請使用原訊息：https://discord.com/channels/${interaction.guildId || interaction.channel?.guildId || "@me"}/${interaction.channelId}/${deliveredId}` });
+      return true;
+    }
+    if (directDeliveries.has(order)) {
+      await interaction.editReply({ content: "⏳ 此筆繳費資訊正在發送，請稍候查看原頻道，勿重複取號。" });
+      return true;
+    }
+    directDeliveries.set(order, { sending: true });
     const body = JSON.stringify({ order, method, timestamp: Math.floor(Date.now() / 1000) });
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) throw new Error("付款服務尚未完成設定");
     const signature = createHmac("sha256", process.env.SUPABASE_SERVICE_ROLE_KEY).update(body).digest("hex");
@@ -108,9 +122,25 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
       files.push(new AttachmentBuilder(await renderBarcodes(info.barcode), { name: `ecpay-${order}-barcodes.png` }));
     }
     content += "\n取號不代表已付款；完成轉帳或超商繳費後，系統收到綠界通知才會自動核帳。請勿重複繳費。";
-    await interaction.channel.send({ content, files });
+    const sent = await interaction.channel.send({ content, files });
+    if (sent?.id) {
+      directDeliveries.set(order, { messageId: sent.id });
+      setTimeout(() => {
+        if (directDeliveries.get(order)?.messageId === sent.id) directDeliveries.delete(order);
+      }, 24 * 60 * 60 * 1000).unref?.();
+      try {
+        const { error: saveError } = await supabase.from("ecpay_service_payments")
+          .update({ metadata: { ...(payment.metadata || {}), ecpay_direct_message_id: sent.id, ecpay_direct_method: method } })
+          .eq("merchant_trade_no", order).eq("status", "pending");
+        if (saveError) console.error(`[ECPAY] 繳費資訊 ${order} 已發送，但訊息編號保存失敗`, saveError);
+      } catch (saveError) {
+        console.error(`[ECPAY] 繳費資訊 ${order} 已發送，但訊息編號保存失敗`, saveError);
+      }
+    }
+    await interaction.message?.edit({ components: [] }).catch(() => null);
     await interaction.editReply({ content: "✅ 綠界繳費資訊已發送到此頻道。" });
   } catch (error) {
+    if (directDeliveries.get(order)?.sending) directDeliveries.delete(order);
     await interaction.editReply({ content: `❌ ${error.message || error}` });
   }
   return true;
@@ -119,7 +149,7 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
 async function sendPreferredEcpayDirect(channel, userId, order, supabase, baseUrl, method = "ATM") {
   let failure = null;
   await handleEcpayDirect({
-    customId: `ecpay_direct_${method}_${order}`, user: { id: userId }, channelId: channel.id, channel,
+    customId: `ecpay_direct_${method}_${order}`, user: { id: userId }, channelId: channel.id, guildId: channel.guildId, channel,
     deferReply: async () => {},
     editReply: async ({ content }) => { if (content.startsWith("❌")) failure = content; },
   }, supabase, baseUrl);

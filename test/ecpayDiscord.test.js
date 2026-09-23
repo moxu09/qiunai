@@ -91,14 +91,23 @@ test("秋奈自助訂單依所選品牌建立付款，不再把綠界導到街�
   assert.doesNotMatch(flow, /const payment = await paymentHelpers\.createJkopayServicePayment/);
 });
 
+test("自助單自動取號時先隱藏條碼按鈕，失敗才開放重試", () => {
+  const source = readFileSync(join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+  const prompt = source.split("async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {")[1]
+    .split("async function sendBankTransferInfo")[0];
+  assert.match(prompt, /components: autoIssueMethod \? \[\] : paymentRows/);
+  assert.match(prompt, /if \(!issued\) await message\.edit\(\{ components: paymentRows \}\)/);
+});
+
 test("虛擬 ATM 取號後直接發到原付款頻道，未標記已付款", async () => {
+  const atmOrder = `${order.slice(0, -1)}1`;
   const originalNow = Date.now;
   Date.now = () => ECPAY_ATM_START;
   const sent = [];
-  const channel = { id: "456", async send(payload) { sent.push(payload); } };
+  const channel = { id: "456", async send(payload) { sent.push(payload); return { id: "111111111111111111" }; } };
   const supabase = { from(table) {
     assert.equal(table, "ecpay_service_payments");
-    return { select() { return this; }, eq() { return this; },
+    return { select() { return this; }, update() { return this; }, eq() { return this; },
       async maybeSingle() { return { data: { user_id: "123", channel_id: "456", status: "pending", amount: 100, payment_kind: "order" }, error: null }; } };
   } };
   const originalFetch = global.fetch;
@@ -111,7 +120,7 @@ test("虛擬 ATM 取號後直接發到原付款頻道，未標記已付款", asy
       bankCode: "822", virtualAccount: "1234567890123456" } }; } };
   };
   try {
-    assert.equal(await sendPreferredEcpayDirect(channel, "123", order, supabase, "https://pay.example"), true);
+    assert.equal(await sendPreferredEcpayDirect(channel, "123", atmOrder, supabase, "https://pay.example"), true);
     assert.equal(sent.length, 1);
     assert.match(sent[0].content, /虛擬帳號：`1234567890123456`/);
     assert.match(sent[0].content, /取號不代表已付款/);
@@ -119,9 +128,10 @@ test("虛擬 ATM 取號後直接發到原付款頻道，未標記已付款", asy
 });
 
 test("自助單超商代碼選定後可直接取號，且只在實際繳款後核帳", async () => {
+  const cvsOrder = `${order.slice(0, -1)}2`;
   const sent = [];
-  const channel = { id: "456", async send(payload) { sent.push(payload); } };
-  const supabase = { from() { return { select() { return this; }, eq() { return this; },
+  const channel = { id: "456", async send(payload) { sent.push(payload); return { id: "222222222222222222" }; } };
+  const supabase = { from() { return { select() { return this; }, update() { return this; }, eq() { return this; },
     async maybeSingle() { return { data: { user_id: "123", channel_id: "456", status: "pending", amount: 100, payment_kind: "order" } }; } }; } };
   const originalFetch = global.fetch;
   const originalSecret = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -131,7 +141,7 @@ test("自助單超商代碼選定後可直接取號，且只在實際繳款後�
     return { ok: true, async json() { return { payment_info: { method: "CVS", expireDate: "2026/09/26", paymentNo: "AB12345678" } }; } };
   };
   try {
-    assert.equal(await sendPreferredEcpayDirect(channel, "123", order, supabase, "https://pay.example", "CVS"), true);
+    assert.equal(await sendPreferredEcpayDirect(channel, "123", cvsOrder, supabase, "https://pay.example", "CVS"), true);
     assert.match(sent[0].content, /超商繳費代碼：`AB12345678`/);
     assert.match(sent[0].content, /取號不代表已付款/);
   } finally {
@@ -142,10 +152,13 @@ test("自助單超商代碼選定後可直接取號，且只在實際繳款後�
 });
 
 test("超商條碼在 Discord 產生單張白底 PNG；已 defer 的互動不重複 defer", async () => {
+  const barcodeOrder = `${order.slice(0, -1)}3`;
   const sent = [];
-  const interaction = { customId: `ecpay_direct_BARCODE_${order}`, user: { id: "123" }, channelId: "456", deferred: true,
-    channel: { async send(payload) { sent.push(payload); } }, async deferReply() { throw new Error("重複 defer"); }, async editReply() {} };
-  const supabase = { from() { return { select() { return this; }, eq() { return this; },
+  const replies = [];
+  const interaction = { customId: `ecpay_direct_BARCODE_${barcodeOrder}`, user: { id: "123" }, channelId: "456", deferred: true,
+    channel: { async send(payload) { sent.push(payload); return { id: "333333333333333333" }; } },
+    async deferReply() { throw new Error("重複 defer"); }, async editReply(payload) { replies.push(payload); } };
+  const supabase = { from() { return { select() { return this; }, update() { return this; }, eq() { return this; },
     async maybeSingle() { return { data: { user_id: "123", channel_id: "456", status: "pending", amount: 100, payment_kind: "order" }, error: null }; } }; } };
   const originalFetch = global.fetch;
   const originalSecret = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -162,5 +175,8 @@ test("超商條碼在 Discord 產生單張白底 PNG；已 defer 的互動不重
     assert.deepEqual([...image.data.subarray(0, 4)], [255, 255, 255, 255]);
     assert.equal(image.data.filter((_, index) => index % 4 === 3).every((alpha) => alpha === 255), true);
     assert.match(sent[0].content, /條碼3/);
+    await handleEcpayDirect(interaction, supabase, "https://pay.example");
+    assert.equal(sent.length, 1);
+    assert.match(replies.at(-1).content, /已發送過/);
   } finally { global.fetch = originalFetch; if (originalSecret === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = originalSecret; }
 });

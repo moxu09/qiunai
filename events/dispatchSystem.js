@@ -4002,6 +4002,8 @@ async function sendJkopayPaymentPrompt(channel, userId, amount, payment, label) 
   return message;
 }
 async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
+  const autoIssueMethod = ["ATM", "CVS", "BARCODE"].includes(payment.preferredMethod)
+    ? payment.preferredMethod : null;
   const methodDescription = payment.onlyMethod === "CARD"
     ? "請按下方按鈕，在官網站內輸入卡號；綠界確認刷卡成功後會自動核帳。"
     : payment.onlyMethod === "ATM"
@@ -4009,6 +4011,11 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
       : ["CVS", "BARCODE"].includes(payment.onlyMethod)
         ? "系統會在本頻道顯示超商繳費資訊；實際繳費完成後才會自動核帳。"
         : `刷卡會在官網站內直接輸入卡號；${isEcpayAtmAvailable() ? "匯款虛擬帳號與" : "虛擬 ATM 於 9 月 28 日開放，"}超商繳費資訊會直接顯示在本頻道。實際付款成功後才會自動核帳。`;
+  const paymentRows = buildEcpayPaymentRows(payment, Number(amount), {
+    topup: label.includes("儲值"),
+    onlyMethod: payment.onlyMethod || null,
+    selfService: label === "自助訂單",
+  });
   const message = await channel.send({
     content: `<@${userId}>`,
     embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle(`💳 ${label}綠界支付`).setDescription(
@@ -4016,16 +4023,12 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
       `綠界訂單編號：${payment.platformOrderId}\n\n` +
       methodDescription,
     ).setTimestamp()],
-    components: buildEcpayPaymentRows(payment, Number(amount), {
-      topup: label.includes("儲值"),
-      onlyMethod: payment.onlyMethod || null,
-      selfService: label === "自助訂單",
-    }),
+    components: autoIssueMethod ? [] : paymentRows,
   });
   await paymentHelpers.attachEcpayPaymentMessage?.(payment.platformOrderId, message.id);
-  if (["ATM", "CVS", "BARCODE"].includes(payment.preferredMethod)) {
-    const issued = await sendPreferredEcpayDirect(channel, userId, payment.platformOrderId, supabase, process.env.ECPAY_PUBLIC_BASE_URL, payment.preferredMethod);
-    if (issued) await message.edit({ components: [] }).catch(() => null);
+  if (autoIssueMethod) {
+    const issued = await sendPreferredEcpayDirect(channel, userId, payment.platformOrderId, supabase, process.env.ECPAY_PUBLIC_BASE_URL, autoIssueMethod);
+    if (!issued) await message.edit({ components: paymentRows }).catch(() => null);
   }
   return message;
 }
