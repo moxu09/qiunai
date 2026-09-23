@@ -63,6 +63,7 @@ let workReportSystem;
 let paidOrderDispatcher;
 let paidOrderDispatchRecoveryTimer = null;
 let paidOrderDispatchRecoveryRunning = false;
+const missingCustomerChannelWarnings = new Set();
 let financialEffectsRecoveryTimer = null;
 let financialEffectsRecoveryRunning = false;
 
@@ -4657,14 +4658,22 @@ async function retryPendingPaidOrderDispatches() {
       }
       if (missingChannel || !customerChannel?.isTextBased?.()) {
         const reason = `customer_channel_deleted: ${order.channel_id || "missing"}; requires manual recovery`;
-        const { error: markError } = await supabase.from("play_orders")
+        const staleClaimBefore = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+        let markQuery = supabase.from("play_orders")
           .update({ dispatch_status: "failed", dispatch_last_error: reason, updated_at: new Date().toISOString() })
           .eq("id", order.id)
           .eq("guild_id", recoveryGuildId)
-          .eq("paid", true)
-          .in("dispatch_status", ["pending", "failed"]);
+          .eq("paid", true);
+        markQuery = order.dispatch_status === "processing"
+          ? markQuery.eq("dispatch_status", "processing").lt("dispatch_claimed_at", staleClaimBefore)
+          : markQuery.in("dispatch_status", ["pending", "failed"]);
+        const { data: marked, error: markError } = await markQuery.select("id").maybeSingle();
         if (markError) console.error(`[派單恢復] ${order.order_no || order.id} 記錄失聯頻道失敗`, markError);
-        else console.warn(`[派單恢復] ${order.order_no || order.id} 客戶頻道已刪除，保留待人工處理`);
+        else if (marked) console.warn(`[派單恢復] ${order.order_no || order.id} 客戶頻道已刪除，保留待人工處理`);
+        else if (!missingCustomerChannelWarnings.has(order.id)) {
+          missingCustomerChannelWarnings.add(order.id);
+          console.warn(`[派單恢復] ${order.order_no || order.id} 客戶頻道已刪除，等待進行中的派單鎖逾時`);
+        }
         continue;
       }
       try {
