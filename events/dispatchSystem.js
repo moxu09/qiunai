@@ -7399,10 +7399,13 @@ async function handleOrderQuotePriceConfirm(interaction) {
   const price = Number(order.original_price || order.price || 0);
   if (price !== Number(quotedPrice) || price <= 0) return interaction.editReply({ content: "❌ 報價已更新，請確認最新報價。" });
   if (order.quote_status === "price_confirmed") return interaction.editReply({ content: "✅ 報價已確認，請使用先前的優惠券選擇訊息。" });
-  if (order.quote_status !== "quoted" || order.paid) return interaction.editReply({ content: "❌ 訂單狀態已變更，請先確認最新訊息。" });
+  if (order.quote_status !== "quoted" || order.status !== "quoted" || order.payment_method !== "未選擇" || order.paid) {
+    return interaction.editReply({ content: "❌ 訂單狀態已變更，請先確認最新訊息。" });
+  }
   const { data: updated, error: updateError } = await supabase.from("play_orders")
     .update({ quote_status: "price_confirmed", updated_at: new Date().toISOString() })
-    .eq("id", order.id).eq("customer_id", interaction.user.id).eq("quote_status", "quoted").eq("paid", false)
+    .eq("id", order.id).eq("customer_id", interaction.user.id).eq("quote_status", "quoted")
+    .eq("status", "quoted").eq("payment_method", "未選擇").eq("paid", false)
     .select("id").maybeSingle();
   if (updateError || !updated) return interaction.editReply({ content: "❌ 報價狀態已變更，請重新整理。" });
   await interaction.channel.send({
