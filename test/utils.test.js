@@ -673,6 +673,11 @@ test("人工下單依遊戲分流，先報價與派單選人後才付款", () =>
   assert.match(source, /確認選擇 PM 陪陪/);
   assert.match(source, /files: \[\{ attachment: SELF_SERVICE_FAILED_IMAGE, name: "dispatch-failed\.png" \}\]/);
   assert.match(source, /getDispatchResultThreadName\(order, succeeded\)/);
+  const confirmation = source.slice(
+    source.indexOf("async function confirmSelfServicePlayers"),
+    source.indexOf("async function paySelfServiceOrderByGateway"),
+  );
+  assert.match(confirmation, /quote_status: "price_confirmed"[\s\S]*?\.eq\("quote_status", "manual_confirming_players"\)/);
 });
 
 test("自助派單兩種接單的類型與備註可保存、讀取並清除", () => {

@@ -67,7 +67,7 @@ const missingCustomerChannelWarnings = new Set();
 let financialEffectsRecoveryTimer = null;
 let financialEffectsRecoveryRunning = false;
 
-const pendingNewOrders = new Map();
+let pendingNewOrders;
 const pendingTopups = new Map();
 const TOPUP_PRESET_AMOUNTS = Object.freeze([100, 250, 500, 1000, 3000, 5000, 10000, 15000]);
 let pendingServiceOrders;
@@ -639,7 +639,7 @@ async function resolveTicketParentId(
 
   return newCategory.id;
 }
-const pendingPanelOrders = new Map();
+let pendingPanelOrders;
 const PANEL_ASSET_DIR = path.join(__dirname, "..", "assets", "panels");
 
 const GAME_ORDER_PANELS = [
@@ -2809,7 +2809,7 @@ async function confirmSelfServicePlayers(interaction) {
       .update({
         preferred_player: selectedIds.join(","),
         status: "quoted",
-        quote_status: "quoted",
+        quote_status: "price_confirmed",
         payment_method: "未選擇",
         updated_at: new Date().toISOString(),
       })
@@ -3232,15 +3232,11 @@ async function handleGameOrderSelect(interaction) {
   if (gameKey === "lol") {
     const flowId = createFlowId(interaction.user.id);
 
-    pendingPanelOrders.set(flowId, {
+    await pendingPanelOrders.set(flowId, {
       userId: interaction.user.id,
       gameKey,
       lolMode: value,
     });
-
-    setTimeout(() => {
-      pendingPanelOrders.delete(flowId);
-    }, ORDER_FLOW_TTL_MS);
 
     const modeLabel = findOptionLabel("lol", value);
 
@@ -3279,14 +3275,12 @@ async function handleGameOrderSelect(interaction) {
     const flowId = createFlowId(interaction.user.id);
     const gameLabel = findOptionLabel("other", value);
 
-    pendingPanelOrders.set(flowId, {
+    await pendingPanelOrders.set(flowId, {
       userId: interaction.user.id,
       gameKey,
       otherGame: value,
       gameLabel,
     });
-
-    setTimeout(() => pendingPanelOrders.delete(flowId), ORDER_FLOW_TTL_MS);
 
     const options =
       value === "arena_of_valor"
@@ -3338,7 +3332,7 @@ async function handleOtherGameStyleSelect(interaction) {
   }
 
   const flowId = interaction.customId.replace("other_game_style_select_", "");
-  const pending = pendingPanelOrders.get(flowId);
+  const pending = await pendingPanelOrders.get(flowId);
   await resetSelectMenuMessage(interaction);
 
   if (!pending || pending.userId !== interaction.user.id) {
@@ -3359,7 +3353,7 @@ async function handleOtherGameStyleSelect(interaction) {
     rank_7: "七階",
   };
   const itemLabel = labels[value] || value;
-  pendingPanelOrders.delete(flowId);
+  await pendingPanelOrders.delete(flowId);
 
   return createServiceTicket(interaction, "other", {
     category: "other",
@@ -3386,7 +3380,7 @@ async function handleLolStyleSelect(interaction) {
 
   await resetSelectMenuMessage(interaction);
 
-  const pending = pendingPanelOrders.get(flowId);
+  const pending = await pendingPanelOrders.get(flowId);
 
   if (!pending) {
     return await interaction.editReply({
@@ -3412,7 +3406,7 @@ async function handleLolStyleSelect(interaction) {
 
   const styleLabel = styleMap[interaction.values[0]] || interaction.values[0];
 
-  pendingPanelOrders.delete(flowId);
+  await pendingPanelOrders.delete(flowId);
 
   return await createServiceTicket(interaction, "lol", {
     category: "lol",
@@ -3627,6 +3621,8 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
 function setup(supabaseInstance, clientInstance, helpers = {}) {
   supabase = supabaseInstance;
   pendingServiceOrders = createServiceFlowStore(supabase);
+  pendingNewOrders = createServiceFlowStore(supabase, { organization: "qiunai_general_orders" });
+  pendingPanelOrders = createServiceFlowStore(supabase, { organization: "qiunai_order_panels" });
   client = clientInstance;
   paymentHelpers = helpers;
   workReportSystem = createWorkReportSystem({
@@ -6187,7 +6183,7 @@ function buildNewOrderItemMenu(flowId, game) {
 async function openPlayOrderModal(interaction) {
   const flowId = `${interaction.user.id}_${Date.now()}`;
 
-  pendingNewOrders.set(flowId, {
+  await pendingNewOrders.set(flowId, {
     userId: interaction.user.id,
     guildId:
       interaction.guildId || interaction.guild?.id || process.env.GUILD_ID,
@@ -6205,10 +6201,6 @@ async function openPlayOrderModal(interaction) {
     reservedTime: "",
     note: "無",
   });
-
-  setTimeout(() => {
-    pendingNewOrders.delete(flowId);
-  }, ORDER_FLOW_TTL_MS);
 
   const menu = buildNewOrderGameMenu(flowId);
 
@@ -6404,7 +6396,7 @@ function getOrderItemOptions(game) {
 async function handleNewOrderGameSelect(interaction) {
   const flowId = interaction.customId.replace("new_order_game_", "");
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.update({
@@ -6423,9 +6415,9 @@ async function handleNewOrderGameSelect(interaction) {
   const game = interaction.values[0];
 
   pending.game = game;
-  pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
   if (game === "打賞禮物") {
-    pendingNewOrders.delete(flowId);
+    await pendingNewOrders.delete(flowId);
     if (!paymentHelpers.startTipFlowInChannel) {
       return interaction.update({
         content:
@@ -6504,7 +6496,7 @@ function isValorantRankGameBased(rank) {
 async function handleNewOrderItemSelect(interaction) {
   const flowId = interaction.customId.replace("new_order_item_", "");
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.update({
@@ -6521,7 +6513,7 @@ async function handleNewOrderItemSelect(interaction) {
   }
 
   pending.item = interaction.values[0];
-  pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
   if (pending.game === "特戰英豪") {
     const menu = new StringSelectMenuBuilder()
       .setCustomId(`new_order_rank_${flowId}`)
@@ -6575,7 +6567,7 @@ async function handleNewOrderItemSelect(interaction) {
 async function handleNewOrderRankSelect(interaction) {
   const flowId = interaction.customId.replace("new_order_rank_", "");
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.update({
@@ -6592,7 +6584,7 @@ async function handleNewOrderRankSelect(interaction) {
   }
 
   pending.rank = interaction.values[0];
-  pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`new_order_count_${flowId}`)
@@ -6634,7 +6626,7 @@ async function handleNewOrderRankSelect(interaction) {
 async function handleNewOrderCountSelect(interaction) {
   const flowId = interaction.customId.replace("new_order_count_", "");
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.update({
@@ -6653,7 +6645,7 @@ async function handleNewOrderCountSelect(interaction) {
   pending.playerCount =
     interaction.values[0] === "custom" ? 0 : Number(interaction.values[0]);
 
-  pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`new_order_gender_${flowId}`)
@@ -6698,7 +6690,7 @@ async function handleNewOrderCountSelect(interaction) {
 async function handleNewOrderGenderSelect(interaction) {
   const flowId = interaction.customId.replace("new_order_gender_", "");
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.update({
@@ -6718,13 +6710,13 @@ async function handleNewOrderGenderSelect(interaction) {
   pending.selectedPlayerType = "none";
   pending.selectedPlayerId = null;
   pending.selectedPlayerIds = [];
-  pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
   return showDurationSelect(interaction, flowId, pending);
 }
 async function handleNewOrderPlayerSelect(interaction) {
   const flowId = interaction.customId.replace("new_order_player_", "");
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.update({
@@ -6745,7 +6737,7 @@ async function handleNewOrderPlayerSelect(interaction) {
     pending.selectedPlayerType = "none";
     pending.selectedPlayerId = null;
     pending.selectedPlayerIds = [];
-    pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
     return await showDurationSelect(interaction, flowId, pending);
   }
   const onlineIds = selectedValues
@@ -6761,14 +6753,14 @@ async function handleNewOrderPlayerSelect(interaction) {
     pending.selectedPlayerType = "none";
     pending.selectedPlayerId = null;
     pending.selectedPlayerIds = [];
-    pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
     return await showDurationSelect(interaction, flowId, pending);
   }
   pending.selectedPlayerIds = selectedIds;
   pending.selectedPlayerId = selectedIds[0];
   if (reserveIds.length > 0) {
     pending.selectedPlayerType = "reserve";
-    pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
     let reserveQuery = supabase
       .from("qiunai_staff")
       .select("*")
@@ -6795,7 +6787,7 @@ async function handleNewOrderPlayerSelect(interaction) {
     return await interaction.showModal(modal);
   }
   pending.selectedPlayerType = "online";
-  pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
   return await showDurationSelect(interaction, flowId, pending);
 }
 async function showDurationSelect(interaction, flowId, pending) {
@@ -6881,7 +6873,7 @@ async function showDurationSelect(interaction, flowId, pending) {
 async function handleNewOrderDurationSelect(interaction) {
   const flowId = interaction.customId.replace("new_order_duration_", "");
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.update({
@@ -6927,7 +6919,7 @@ async function handleNewOrderDurationSelect(interaction) {
     }
     pending.gameCount = 0;
   }
-  pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
   return await askNewOrderNoteChoice(interaction, flowId, pending);
 }
 async function submitNewOrderReserveTime(interaction) {
@@ -6936,7 +6928,7 @@ async function submitNewOrderReserveTime(interaction) {
     ""
   );
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.reply({
@@ -6957,7 +6949,7 @@ async function submitNewOrderReserveTime(interaction) {
   pending.reservedTime = reserveTime;
   pending.duration = "預約";
   pending.durationMinutes = 0;
-  pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
   return await askNewOrderNoteChoice(interaction, flowId, pending);
 }
@@ -7012,7 +7004,7 @@ async function handleNewOrderBack(interaction) {
 
   const flowId = raw.slice(firstUnderscore + 1);
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.update({
@@ -7040,7 +7032,7 @@ async function handleNewOrderBack(interaction) {
     pending.durationMinutes = 0;
     pending.reservedTime = "";
     pending.note = "無";
-    pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
     const menu = buildNewOrderGameMenu(flowId);
 
@@ -7063,7 +7055,7 @@ async function handleNewOrderBack(interaction) {
     pending.durationMinutes = 0;
     pending.reservedTime = "";
     pending.note = "無";
-    pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
     const options = getOrderItemOptions(pending.game)
       .slice(0, 25)
@@ -7096,7 +7088,7 @@ async function handleNewOrderBack(interaction) {
     pending.durationMinutes = 0;
     pending.reservedTime = "";
     pending.note = "無";
-    pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
     const menu = new StringSelectMenuBuilder()
       .setCustomId(`new_order_rank_${flowId}`)
       .setPlaceholder("請選擇要打的段位")
@@ -7120,7 +7112,7 @@ async function handleNewOrderBack(interaction) {
     pending.durationMinutes = 0;
     pending.reservedTime = "";
     pending.note = "無";
-    pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
     const menu = new StringSelectMenuBuilder()
       .setCustomId(`new_order_count_${flowId}`)
@@ -7177,7 +7169,7 @@ async function handleNewOrderBack(interaction) {
     pending.durationMinutes = 0;
     pending.reservedTime = "";
     pending.note = "無";
-    pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
     const menu = new StringSelectMenuBuilder()
       .setCustomId(`new_order_gender_${flowId}`)
@@ -7225,7 +7217,7 @@ async function handleNewOrderBack(interaction) {
     pending.durationMinutes = 0;
     pending.reservedTime = "";
     pending.note = "無";
-    pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
     const playerOptions = await getQualifiedPlayerOptions(pending);
 
@@ -7264,7 +7256,7 @@ async function handleNewOrderBack(interaction) {
     pending.durationMinutes = 0;
     pending.reservedTime = "";
     pending.note = "無";
-    pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
     return await showDurationSelect(interaction, flowId, pending);
   }
@@ -7277,7 +7269,7 @@ async function handleNewOrderBack(interaction) {
 async function openNewOrderNoteModal(interaction) {
   const flowId = interaction.customId.replace("new_order_note_yes_", "");
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.reply({
@@ -7311,7 +7303,7 @@ async function openNewOrderNoteModal(interaction) {
 async function handleNewOrderNoNote(interaction) {
   const flowId = interaction.customId.replace("new_order_note_no_", "");
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.editReply({
@@ -7328,14 +7320,14 @@ async function handleNewOrderNoNote(interaction) {
   }
 
   pending.note = "無";
-  pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
   return await createWaitingQuoteOrder(interaction, flowId, pending);
 }
 async function submitNewOrderNote(interaction) {
   const flowId = interaction.customId.replace("submit_new_order_note_", "");
 
-  const pending = pendingNewOrders.get(flowId);
+  const pending = await pendingNewOrders.get(flowId);
 
   if (!pending) {
     return interaction.reply({
@@ -7354,7 +7346,7 @@ async function submitNewOrderNote(interaction) {
   const note = interaction.fields.getTextInputValue("note") || "無";
 
   pending.note = note;
-  pendingNewOrders.set(flowId, pending);
+  await pendingNewOrders.set(flowId, pending);
 
   return await createWaitingQuoteOrder(interaction, flowId, pending);
 }
@@ -7477,6 +7469,8 @@ async function cancelManualQuotedOrder(interaction) {
 
 async function createWaitingQuoteOrder(interaction, flowId, pending) {
   const orderNo = await getNextPlayOrderNumber();
+  const guildId = pending.guildId || interaction.guildId || interaction.guild?.id || process.env.GUILD_ID;
+  const serviceFlowKey = `general_quote:${flowId}`;
 
   const service = `${pending.game}｜${pending.item}`;
 
@@ -7484,14 +7478,11 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
   const autoQuote = getGeneralOrderAutoQuote(pending);
   const autoPrice = autoQuote.ok ? Number(autoQuote.quote.total) : 0;
 
-  const { data: order, error } = await supabase
+  let { data: order, error } = await supabase
     .from("play_orders")
     .insert({
-      guild_id:
-        pending.guildId ||
-        interaction.guildId ||
-        interaction.guild?.id ||
-        process.env.GUILD_ID,
+      guild_id: guildId,
+      service_flow_key: serviceFlowKey,
       order_no: orderNo,
       customer_id: pending.userId,
       customer_username: pending.username || interaction.user.username,
@@ -7528,6 +7519,19 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
     .select()
     .single();
 
+  if (error?.code === "23505") {
+    const existing = await supabase.from("play_orders").select("*")
+      .eq("guild_id", guildId)
+      .eq("service_flow_key", serviceFlowKey)
+      .maybeSingle();
+    if (!existing.error && existing.data?.customer_id === pending.userId &&
+        existing.data?.channel_id === (pending.channelId || interaction.channel.id) &&
+        !existing.data?.paid && ["quoted", "waiting_quote"].includes(existing.data?.status)) {
+      order = existing.data;
+      error = null;
+    }
+  }
+
   if (error || !order) {
     console.error("[新下單] 建立待報價訂單失敗", error);
     const payload = {
@@ -7563,7 +7567,9 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
       })
       .catch(() => {});
   }
-  pendingNewOrders.delete(flowId);
+  await pendingNewOrders.delete(flowId).catch((closeError) =>
+    console.error("[新下單] 訂單已建立，但關閉草稿失敗", closeError),
+  );
 
   const embed = new EmbedBuilder()
     .setColor(QIUNAI_WATER_BLUE)
@@ -10302,7 +10308,7 @@ async function startNewOrderFlow(channel, user, initialGame = "") {
     ? initialGame
     : "";
 
-  pendingNewOrders.set(flowId, {
+  await pendingNewOrders.set(flowId, {
     userId: user.id,
     username: user.username,
     guildId: channel.guildId || channel.guild?.id || process.env.GUILD_ID,
@@ -10325,10 +10331,6 @@ async function startNewOrderFlow(channel, user, initialGame = "") {
     reservedTime: "",
     note: "無",
   });
-
-  setTimeout(() => {
-    pendingNewOrders.delete(flowId);
-  }, ORDER_FLOW_TTL_MS);
 
   const menu = allowedGame
     ? buildNewOrderItemMenu(flowId, allowedGame)

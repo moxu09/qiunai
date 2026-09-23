@@ -56,6 +56,23 @@ test("流程保存後換新 store 仍可讀取，資料按店隔離", async () =
   assert.equal(await createServiceFlowStore(db,{organization:"deepnight"}).get("flow"),undefined);
 });
 
+test("一般下單與遊戲選單的草稿跨重啟保留，彼此不串單", async () => {
+  const db = database();
+  const general = createServiceFlowStore(db, { organization: "qiunai_general_orders" });
+  const panel = createServiceFlowStore(db, { organization: "qiunai_order_panels" });
+  await general.set("player_1", { userId: "player", game: "特戰英豪" });
+  await panel.set("player_1", { userId: "player", gameKey: "lol" });
+  assert.equal((await createServiceFlowStore(db, { organization: "qiunai_general_orders" }).get("player_1")).game, "特戰英豪");
+  assert.equal((await createServiceFlowStore(db, { organization: "qiunai_order_panels" }).get("player_1")).gameKey, "lol");
+  await general.delete("player_1");
+  assert.equal(await general.get("player_1"), undefined);
+  assert.equal((await panel.get("player_1")).gameKey, "lol");
+  const source = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+  assert.match(source, /pendingNewOrders = createServiceFlowStore\(supabase, \{ organization: "qiunai_general_orders" \}\)/);
+  assert.match(source, /pendingPanelOrders = createServiceFlowStore\(supabase, \{ organization: "qiunai_order_panels" \}\)/);
+  assert.doesNotMatch(source, /(?<!await )pending(?:NewOrders|PanelOrders)\.(?:get|set|delete)\(/);
+});
+
 test("同時更改流程只能一份成功，結束流程不可被舊按鈕復活", async () => {
   const db=database(), a=createServiceFlowStore(db);
   await a.set("flow",{quotedPrice:500});
