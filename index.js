@@ -6546,7 +6546,7 @@ async function sendTopupPanel(client) {
         `街口支付會同時提供串接付款按鈕與該筆交易 QR Code，完成後自動核帳。`,
     )
     .setFooter({
-      text: "秋奈電競｜自助購買星雨幣",
+      text: "深夜不關燈｜We Are Still Here",
     })
     .setTimestamp();
 

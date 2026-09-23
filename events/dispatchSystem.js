@@ -10865,17 +10865,11 @@ function buildTopupPaymentMethodRows(topupId, amount, selfService = false) {
   const options = getGeneralOrderPaymentOptions({
     ecpayAvailable: paymentHelpers.ecpayAvailable,
     amount,
-  }).filter((option) => (selfService
-    ? ["街口支付", "線上刷卡", "匯款", "超商條碼", "超商代碼"]
-    : ["街口支付", "線上刷卡", "匯款", "無卡", "美金轉帳", "加密貨幣"]
-  ).includes(option.value))
-    .map((option) => {
-      if (option.value === "匯款") return selfService
-        ? { ...option, label: "匯款帳號", disabled: !paymentHelpers.ecpayAvailable || !isGeneralEcpayAmountAllowed("ATM", amount) }
-        : { ...option, label: "匯款轉帳" };
-      if (option.value === "無卡") return { ...option, label: "無卡存款" };
-      return option;
-    });
+  }).filter((option) => !["儲值卡", "員工扣薪"].includes(option.value) &&
+    (!selfService || ["街口支付", "線上刷卡", "匯款", "超商條碼", "超商代碼"].includes(option.value)))
+    .map((option) => selfService && option.value === "匯款"
+      ? { ...option, label: "匯款帳號", disabled: !paymentHelpers.ecpayAvailable || !isGeneralEcpayAmountAllowed("ATM", amount) }
+      : option);
   return buildPaymentMethodButtonRows(
     `topup_payment_method_${topupId}`,
     options,
