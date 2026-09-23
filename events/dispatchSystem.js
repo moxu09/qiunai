@@ -1405,6 +1405,7 @@ async function failSelfServiceDispatch(orderId, messageId = null) {
     .filter(Boolean);
   const wasWaitingForCustomer =
     candidateIds.length >= Number(order.player_count || 1);
+  const keepManualTicket = isManualDispatchOrder(order) && wasWaitingForCustomer;
   const failureReason = wasWaitingForCustomer
     ? "選人期限內客人未完成陪陪選擇，已自動棄單。"
     : "派單期限內未湊足陪陪，已判定失敗。";
@@ -1535,11 +1536,13 @@ async function failSelfServiceDispatch(orderId, messageId = null) {
   pendingSelfServiceOrders.delete(promptKey);
   pendingSelfServiceOrders.delete(`selection:${order.id}`);
   await orderChannel?.send({
-    content: wasWaitingForCustomer
+    content: keepManualTicket
+      ? `<@${order.customer_id}> 這筆人工派單在期限內未完成選人，已停止本次派單；工單頻道會保留，請在這裡聯繫客服確認是否重新派單。尚未進入付款流程，不會扣款。`
+      : wasWaitingForCustomer
       ? `<@${order.customer_id}> 這筆訂單在選人期限內未選擇陪陪，已自動${refundAmount > 0 ? `退款 ${refundAmount.toLocaleString("zh-TW")} ASD 並` : ""}棄單。頻道將於 10 秒後關閉。`
       : `<@${order.customer_id}> 很抱歉，這筆訂單在派單期限內未湊足陪陪，已派單失敗且不會扣款。頻道將於 10 秒後關閉。`,
   }).catch(() => null);
-  if (orderChannel) {
+  if (orderChannel && !keepManualTicket) {
     setTimeout(() => orderChannel.delete().catch(() => null), 10_000).unref?.();
   }
   const resultThread = await finishClaimThread(order, {
