@@ -53,6 +53,7 @@ const {
   fetchAllChannelMessages,
 } = require("./utils/orderArchive");
 const { canOperateTipFlow } = require("./utils/tipFlowAccess");
+const { matchesTipPaymentNote } = require("./utils/tipPaymentIdempotency");
 const {
   getStaffSearchLabel,
   resolveStaffSearchInput,
@@ -2840,13 +2841,17 @@ async function saveTipToPlayOrders({
 }) {
   const note = idempotencyKey ? `打賞｜${idempotencyKey}` : "打賞";
   if (idempotencyKey) {
-    const { data: existing, error: existingError } = await supabase
+    // 冠名提醒會把 note 改成 JSON，原備註留在 originalNote；重送金流
+    // callback 時仍須找到同一筆打賞，避免再次寫入訂單與薪資。
+    const { data: candidates, error: existingError } = await supabase
       .from("play_orders")
       .select("*")
-      .eq("note", note)
+      .like("note", `%${idempotencyKey}%`)
       .eq("assigned_player", staffId)
-      .maybeSingle();
+      .limit(50);
     if (existingError) throw existingError;
+    const existing = (candidates || []).find((order) =>
+      matchesTipPaymentNote(order.note, note));
     if (existing) return existing;
   }
   const { data, error } = await supabase
