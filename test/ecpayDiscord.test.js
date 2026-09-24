@@ -48,8 +48,7 @@ test("虛擬 ATM 開放日前，按鈕隱藏且匯款仍走原帳號", () => {
   try {
     const buttons = buildEcpayPaymentRows(payment, 100)[0].components.map(button => button.toJSON());
     assert.equal(buttons.some(button => button.custom_id?.includes("_ATM_")), false);
-    const selfService = buildEcpayPaymentRows(payment, 100, { onlyMethod: "ATM", selfService: true })[0].components.map(button => button.toJSON());
-    assert.deepEqual(selfService.map(button => button.custom_id), [`ecpay_direct_ATM_${order}`]);
+    assert.throws(() => buildEcpayPaymentRows(payment, 100, { onlyMethod: "ATM", selfService: true }), /不適用/);
     const selected = getPaymentMethodSelection({ customId: "quote_payment_method_123", values: ["匯款"] }, "quote_payment_method_");
     assert.equal(selected.paymentMethod, "匯款");
     assert.equal(selected.requestedMethod, undefined);
@@ -61,6 +60,26 @@ test("虛擬 ATM 開放日前，按鈕隱藏且匯款仍走原帳號", () => {
     if (originalFlag === undefined) delete process.env.ECPAY_ACCEPT_PAYMENTS;
     else process.env.ECPAY_ACCEPT_PAYMENTS = originalFlag;
   }
+});
+
+test("自助單舊 ATM 按鈕在切換前不得直接取號", async () => {
+  const originalNow = Date.now;
+  Date.now = () => ECPAY_ATM_START - 1;
+  let fetched = false;
+  const originalFetch = global.fetch;
+  global.fetch = async () => { fetched = true; throw new Error("不應向綠界取號"); };
+  const replies = [];
+  const interaction = { customId: `ecpay_direct_ATM_${order}`, user: { id: "123" }, channelId: "456", deferred: true,
+    editReply: async payload => { replies.push(payload); }, channel: { async send() { throw new Error("不應發送 ATM 資訊"); } } };
+  const supabase = { from() { return { select() { return this; }, eq() { return this; }, async maybeSingle() {
+    return { data: { user_id: "123", channel_id: "456", status: "pending", amount: 100,
+      organization_code: "qiunai", metadata: { flow: "self_service" } }, error: null };
+  } }; } };
+  try {
+    assert.equal(await handleEcpayDirect(interaction, supabase, "https://pay.example"), true);
+    assert.match(replies.at(-1).content, /9 月 28 日/);
+    assert.equal(fetched, false);
+  } finally { Date.now = originalNow; global.fetch = originalFetch; }
 });
 
 test("選擇匯款時改走綠界虛擬 ATM，不再提供固定帳號", () => {
@@ -183,6 +202,8 @@ test("超商條碼在 Discord 產生單張白底 PNG；已 defer 的互動不重
 });
 
 test("已取超商條碼的付款編號，不可誤回覆 ATM 資訊已送出", async () => {
+  const originalNow = Date.now;
+  Date.now = () => ECPAY_ATM_START;
   const replies = [];
   const interaction = { customId: `ecpay_direct_ATM_${order}`, user: { id: "123" }, channelId: "456", deferred: true,
     async editReply(payload) { replies.push(payload); },
@@ -191,7 +212,9 @@ test("已取超商條碼的付款編號，不可誤回覆 ATM 資訊已送出", 
     async maybeSingle() { return { data: { user_id: "123", channel_id: "456", status: "pending", amount: 280,
       payment_kind: "order", organization_code: "qiunai", raw_result: { PaymentType: "BARCODE" },
       metadata: { flow: "self_service", ecpay_direct_method: "BARCODE", ecpay_direct_message_id: "old-message" } }, error: null }; } }; } };
-  await handleEcpayDirect(interaction, supabase, "https://pay.example");
-  assert.match(replies.at(-1).content, /無法改成ATM/);
-  assert.doesNotMatch(replies.at(-1).content, /已發送過/);
+  try {
+    await handleEcpayDirect(interaction, supabase, "https://pay.example");
+    assert.match(replies.at(-1).content, /無法改成ATM/);
+    assert.doesNotMatch(replies.at(-1).content, /已發送過/);
+  } finally { Date.now = originalNow; }
 });

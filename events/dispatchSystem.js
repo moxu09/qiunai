@@ -3122,7 +3122,7 @@ async function sendSelfServicePaymentSelection(channel, order) {
     if (method === "jkopay") return Boolean(paymentHelpers.jkopayAvailable);
     if (method === "wallet") return true;
     if (!paymentHelpers.ecpayAvailable) return false;
-    if (method === "atm") return amount >= 16 && amount <= 49_999;
+    if (method === "atm") return !isEcpayAtmAvailable() || (amount >= 16 && amount <= 49_999);
     if (method === "cvs") return amount >= 34 && amount <= 20_000;
     if (method === "barcode") return amount >= 18 && amount <= 20_000;
     return amount >= 6 && amount <= 199_999;
@@ -3144,7 +3144,7 @@ async function sendSelfServicePaymentSelection(channel, order) {
   return channel.send({
     content: `<@${order.customer_id}> 請選擇付款方式：`,
     embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle("💳 付款與自動核帳")
-      .setDescription(`應付：NT$${amount.toLocaleString("zh-TW")}\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n線上付款完成後自動核帳；ATM 與超商取號不等於付款，實際繳費後才會自動核帳。`)],
+      .setDescription(`應付：NT$${amount.toLocaleString("zh-TW")}\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}\n\n${isEcpayAtmAvailable() ? "線上付款完成後自動核帳；ATM 與超商取號不等於付款，實際繳費後才會自動核帳。" : "匯款帳號目前為 824 連線銀行，請上傳匯款證明由客服核款；其他線上付款成功後自動核帳。"}`)],
     components: rows,
   });
 }
@@ -3159,7 +3159,7 @@ async function prepareSelfServicePayment(interaction) {
     return interaction.editReply({ content: "❌ 找不到你的自助訂單。" });
   if (order.paid || order.quote_status !== "waiting_payment")
     return interaction.editReply({ content: "⚠️ 此訂單已進入付款流程或已付款，請使用原付款訊息。" });
-  const gatewayMethod = method === "jkopay" ? "jkopay" : method === "wallet" ? "wallet" : `ecpay_${method}`;
+  const gatewayMethod = method === "jkopay" ? "jkopay" : method === "wallet" ? "wallet" : method === "atm" && !isEcpayAtmAvailable() ? "bank" : `ecpay_${method}`;
   return interaction.editReply({
     content: `請確認使用「${SELF_SERVICE_PAYMENT_CHOICES[method]}」付款；選錯可按「返回付款方式」，不會扣款或建立付款單。`,
     components: [new ActionRowBuilder().addComponents(
@@ -3225,7 +3225,11 @@ async function cancelSelfServiceBeforePayment(interaction) {
 
 async function paySelfServiceOrderByGateway(interaction) {
   await deferReplyOnce(interaction);
-  const ecpayMatch = /^self_service_pay_ecpay_(card|atm|barcode|cvs)_(.+)$/.exec(interaction.customId);
+  const bankMatch = /^self_service_pay_bank_(.+)$/.exec(interaction.customId);
+  const ecpayMatch = /^self_service_pay_ecpay_(card|atm|barcode|cvs)_(.+)$/.exec(interaction.customId)
+    || (bankMatch && isEcpayAtmAvailable() ? [interaction.customId, "atm", bankMatch[1]] : null);
+  if (!isEcpayAtmAvailable() && (bankMatch || ecpayMatch?.[1] === "atm"))
+    return paySelfServiceOrderByBank(interaction, bankMatch?.[1] || ecpayMatch[2]);
   const ecpay = Boolean(ecpayMatch) || interaction.customId.startsWith("self_service_pay_ecpay_");
   const selectedMethod = ecpayMatch?.[1] || "card";
   const paymentMethod = ecpay ? "綠界支付" : "街口支付";
@@ -3319,6 +3323,104 @@ async function paySelfServiceOrderByGateway(interaction) {
     return interaction.editReply({ content: `❌ 建立${paymentMethod}付款失敗：${error.message || error}` });
   } finally {
     processingSelfServicePayments.delete(order.id);
+  }
+}
+
+async function paySelfServiceOrderByBank(interaction, orderId) {
+  if (isEcpayAtmAvailable())
+    return interaction.editReply({ content: "⚠️ 匯款已切換為綠界虛擬 ATM，請重新選擇付款方式。" });
+  const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+  if (error || !order || !isSelfServiceOrder(order) || order.customer_id !== interaction.user.id)
+    return interaction.editReply({ content: "❌ 找不到你的自助訂單。" });
+  if (order.paid || order.quote_status !== "waiting_payment")
+    return interaction.editReply({ content: "⚠️ 這張訂單已進入付款流程，請使用原本的付款訊息。" });
+  if (processingSelfServicePayments.has(order.id))
+    return interaction.editReply({ content: "⚠️ 系統正在建立付款資料，請勿重複點擊。" });
+  processingSelfServicePayments.add(order.id);
+  try {
+    const { data: locked, error: lockError } = await supabase.from("play_orders")
+      .update({ payment_method: "匯款", status: "waiting_payment", quote_status: "waiting_bank", updated_at: new Date().toISOString() })
+      .eq("id", order.id).eq("paid", false).eq("quote_status", "waiting_payment")
+      .select("id").maybeSingle();
+    if (lockError || !locked) throw new Error(lockError?.message || "付款狀態已變更");
+    await sendBankTransferInfo(interaction.channel);
+    await interaction.channel.send({
+      content: `<@${order.customer_id}> 匯款後請上傳明細，由客服核對實際入帳；尚未核款前不會標記已付款。`,
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`self_service_bank_confirm_${order.id}`)
+          .setLabel("客服確認匯款入帳").setStyle(ButtonStyle.Success),
+      )],
+    });
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    return interaction.editReply({ content: "✅ 已顯示原本的 824 連線銀行帳號；請匯款後上傳明細，等待客服確認。", components: [] });
+  } catch (cause) {
+    console.error("[自助匯款] 顯示付款資訊失敗", cause);
+    return interaction.editReply({ content: "❌ 暫時無法顯示匯款資訊，請聯繫客服核對訂單，勿重複付款。" });
+  } finally {
+    processingSelfServicePayments.delete(order.id);
+  }
+}
+
+async function confirmSelfServiceBankPayment(interaction) {
+  await deferReplyOnce(interaction);
+  if (!memberHasRole(interaction.member, process.env.STAFF_ROLE) &&
+      !interactionHasPermission(interaction, PermissionFlagsBits.Administrator))
+    return interaction.editReply({ content: "❌ 只有客服或管理員可以確認匯款入帳。" });
+  const orderId = interaction.customId.replace("self_service_bank_confirm_", "");
+  const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+  if (error || !order || !isSelfServiceOrder(order) || order.payment_method !== "匯款")
+    return interaction.editReply({ content: "❌ 找不到這張自助匯款訂單。" });
+  if (order.paid && order.status === "accepted")
+    return interaction.editReply({ content: "✅ 這筆匯款已確認並完成派單，不會重複核帳。" });
+  if (!order.paid && (order.status !== "waiting_payment" || order.quote_status !== "waiting_bank"))
+    return interaction.editReply({ content: "⚠️ 訂單狀態已變更，不能核帳。" });
+  const selectedIds = String(order.preferred_player || "").split(",").filter(Boolean);
+  if (!selectedIds.length) return interaction.editReply({ content: "❌ 訂單缺少已選陪陪，不能核帳。" });
+  try {
+    if (!order.paid) {
+      const paid = await transitionUnpaidOrders(supabase, {
+        orderId: order.id, guildId: interaction.guildId || process.env.GUILD_ID, action: "confirm_waiting",
+      });
+      if (!paid.length) return interaction.editReply({ content: "⚠️ 這筆訂單已由其他客服處理，請重新整理。" });
+    }
+    const { data: accepted, error: updateError } = await supabase.from("play_orders")
+      .update({ assigned_player: selectedIds.join(","), preferred_player: selectedIds.join(","),
+        status: "accepted", quote_status: "dispatched", accepted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("id", order.id).eq("paid", true).eq("status", "waiting_confirm").eq("quote_status", "waiting_bank")
+      .select("*").maybeSingle();
+    if (updateError || !accepted) throw new Error(updateError?.message || "匯款已核帳但派單狀態尚未更新");
+    await paymentHelpers.countOrderVipSpentOnce?.(accepted, "客服確認自助匯款完成");
+    await paymentHelpers.recordAccountingLedger?.({
+      entry_type: "customer_order_bank", entry_label: "客人消費",
+      amount: Number(accepted.final_price ?? accepted.price ?? 0),
+      revenue_amount: Number(accepted.final_price ?? accepted.price ?? 0),
+      cash_amount: Number(accepted.final_price ?? accepted.price ?? 0),
+      payment_method: "匯款", customer_id: accepted.customer_id,
+      order_id: accepted.id, order_no: accepted.order_no || null,
+      source_table: "play_orders", source_id: String(accepted.id),
+      dedupe_key: `self-service-bank:${accepted.id}`,
+      note: `由 ${interaction.user.id} 人工確認原銀行匯款`,
+    });
+    for (const playerId of selectedIds) {
+      await interaction.channel.permissionOverwrites.edit(playerId, {
+        ViewChannel: true, SendMessages: true, ReadMessageHistory: true,
+      });
+    }
+    await workReportSystem.sendForAcceptedOrder(accepted, selectedIds);
+    await sendStaffOrderControlPanel(interaction.channel, accepted);
+    await interaction.message.edit({ components: [] }).catch(() => null);
+    await interaction.channel.send({
+      content: `<@${accepted.customer_id}> ${selectedIds.map((id) => `<@${id}>`).join(" ")}`,
+      embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle("✅ 匯款已由客服核對，報單已發送")
+        .setDescription(`訂單：${accepted.order_no || accepted.id}\n陪陪：${selectedIds.map((id) => `<@${id}>`).join("、")}`)],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`self_service_extend_${accepted.id}`).setLabel("我要加時").setStyle(ButtonStyle.Primary),
+      )],
+    });
+    return interaction.editReply({ content: "✅ 已核對匯款入帳並派單。" });
+  } catch (cause) {
+    console.error("[自助匯款核帳] 後續處理失敗", cause);
+    return interaction.editReply({ content: "⚠️ 匯款核帳或派單未全部完成，請勿再次收款，聯繫管理員查核訂單狀態。" });
   }
 }
 
@@ -4047,7 +4149,6 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
   const paymentRows = buildEcpayPaymentRows(payment, Number(amount), {
     topup: label === "購買ASD",
     onlyMethod: payment.onlyMethod || null,
-    selfService: label === "自助訂單" || payment.selfService === true,
   });
   const message = await channel.send({
     content: `<@${userId}>`,
@@ -4070,6 +4171,7 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
 }
 
 async function sendBankTransferInfo(channel) {
+  if (isEcpayAtmAvailable()) throw new Error("原銀行匯款已停用，請改用綠界虛擬 ATM");
   const embed = new EmbedBuilder()
     .setColor(QIUNAI_WATER_BLUE)
     .setTitle("🏦 匯款資訊")
@@ -10914,7 +11016,7 @@ function buildTopupPaymentMethodRows(topupId, amount, selfService = false) {
     const option = byValue.get(value);
     if (selfService && value === "匯款") return {
       ...option, label: "轉帳匯款", style: ButtonStyle.Primary,
-      disabled: !paymentHelpers.ecpayAvailable || !isGeneralEcpayAmountAllowed("ATM", amount),
+      disabled: isEcpayAtmAvailable() && (!paymentHelpers.ecpayAvailable || !isGeneralEcpayAmountAllowed("ATM", amount)),
     };
     if (selfService && ["超商代碼", "超商條碼"].includes(value))
       return { ...option, style: ButtonStyle.Success };
@@ -11040,14 +11142,14 @@ async function handleTopupPaymentMethodSelect(interaction) {
   }
 
   const method = pending.selfService && selection?.paymentMethod === "匯款" &&
-    paymentHelpers.ecpayAvailable ? "綠界支付" : selection?.paymentMethod;
+    paymentHelpers.ecpayAvailable && isEcpayAtmAvailable() ? "綠界支付" : selection?.paymentMethod;
   const requestedMethod = pending.selfService && selection?.paymentMethod === "匯款" &&
-    paymentHelpers.ecpayAvailable ? "ATM" : selection?.requestedMethod;
+    paymentHelpers.ecpayAvailable && isEcpayAtmAvailable() ? "ATM" : selection?.requestedMethod;
 
   const { amount, note, topupNo } = pending;
 
   if (!method || ["儲值卡", "員工扣薪", "月結"].includes(method) ||
-      (pending.selfService && !["街口支付", "綠界支付"].includes(method))) {
+      (pending.selfService && !["街口支付", "綠界支付", "匯款"].includes(method))) {
     return interaction.editReply({ content: "❌ 此購幣訂單不支援這種付款方式，請重新選擇。", components: [] });
   }
   if (requestedMethod && !isGeneralEcpayAmountAllowed(requestedMethod, amount)) {
@@ -15098,7 +15200,11 @@ async function handleDispatchInteractionInner(interaction) {
       await cancelSelfServiceBeforePayment(interaction);
       return true;
     }
-    if (interaction.customId.startsWith("self_service_pay_jkopay_") || interaction.customId.startsWith("self_service_pay_ecpay_")) {
+    if (interaction.customId.startsWith("self_service_bank_confirm_")) {
+      await confirmSelfServiceBankPayment(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith("self_service_pay_jkopay_") || interaction.customId.startsWith("self_service_pay_ecpay_") || interaction.customId.startsWith("self_service_pay_bank_")) {
       await paySelfServiceOrderByGateway(interaction);
       return true;
     }

@@ -38,6 +38,7 @@ const {
 const { createAllianceMembership } = require("./utils/allianceMembership");
 const { createJkopayService } = require("./utils/jkopay");
 const { createEcpayService } = require("./utils/ecpay");
+const { isEcpayAtmAvailable } = require("./utils/ecpayAtmSchedule");
 const {
   createDeviceAuditReviewerSync,
 } = require("./utils/deviceAuditReviewers");
@@ -8395,6 +8396,7 @@ function isBankTransfer(text = "") {
 }
 
 async function sendBankTransferInfo(channel) {
+  if (isEcpayAtmAvailable()) throw new Error("原銀行匯款已停用，請改用綠界虛擬 ATM");
   const embed = new EmbedBuilder()
     .setColor("#ffd166")
     .setTitle("🏦 匯款資訊")
