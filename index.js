@@ -14,6 +14,9 @@ const {
   sendQiunaiDailySalaryReports,
 } = require("./events/qiunaiSalaryReport");
 const {
+  startQiunaiActivityNotificationScheduler,
+} = require("./events/qiunaiActivityNotifications");
+const {
   createHealthServer,
   createHealthState,
   createNonOverlappingTask,
@@ -8052,6 +8055,10 @@ client.once(Events.ClientReady, async () => {
       {
         name: "秋奈薪資每日報告排程",
         run: () => startQiunaiSalaryReportCron(client, supabase),
+      },
+      {
+        name: "秋奈活動公告與陪陪私訊排程",
+        run: () => startQiunaiActivityNotificationScheduler(supabase, client, createNonOverlappingTask),
       },
       {
         name: "每日自動偵錯排程",
