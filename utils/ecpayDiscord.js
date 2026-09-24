@@ -14,7 +14,7 @@ const METHODS = Object.freeze({
   BARCODE: { label: "超商條碼", min: 18, max: 20_000 },
 });
 
-function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = null } = {}) {
+function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = null, selfService = false } = {}) {
   const order = String(payment.platformOrderId || "");
   const base = String(payment.paymentUrl || "").split("/payments/ecpay/service/checkout")[0];
   if (!/^[A-Za-z0-9]{1,20}$/.test(order) || !/^https:\/\//.test(base))
@@ -26,7 +26,7 @@ function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = nu
   }
   for (const [method, limit] of Object.entries(METHODS)) {
     if (onlyMethod && onlyMethod !== method) continue;
-    if (method === "ATM" && !isEcpayAtmAvailable()) continue;
+    if (method === "ATM" && !selfService && !isEcpayAtmAvailable()) continue;
     if (amount < limit.min || amount > limit.max) continue;
     buttons.push(new ButtonBuilder().setCustomId(`ecpay_direct_${method}_${order}`)
       .setLabel(limit.label).setStyle(ButtonStyle.Primary));
@@ -76,7 +76,8 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
     if (error || !payment || payment.status !== "pending" ||
         payment.user_id !== interaction.user.id || String(payment.channel_id) !== String(interaction.channelId))
       throw new Error("這筆付款不屬於你，或已完成付款");
-    if (method === "ATM" && !isEcpayAtmAvailable())
+    if (method === "ATM" && !isEcpayAtmAvailable() &&
+        !(payment.organization_code === "qiunai" && payment.metadata?.flow === "self_service"))
       throw new Error("綠界虛擬 ATM 將於 9 月 28 日開放");
     const limit = METHODS[method];
     if (payment.amount < limit.min || payment.amount > limit.max)

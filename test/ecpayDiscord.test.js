@@ -48,7 +48,8 @@ test("虛擬 ATM 開放日前，按鈕隱藏且匯款仍走原帳號", () => {
   try {
     const buttons = buildEcpayPaymentRows(payment, 100)[0].components.map(button => button.toJSON());
     assert.equal(buttons.some(button => button.custom_id?.includes("_ATM_")), false);
-    assert.throws(() => buildEcpayPaymentRows(payment, 100, { onlyMethod: "ATM", selfService: true }), /不適用/);
+    const selfService = buildEcpayPaymentRows(payment, 100, { onlyMethod: "ATM", selfService: true })[0].components.map(button => button.toJSON());
+    assert.deepEqual(selfService.map(button => button.custom_id), [`ecpay_direct_ATM_${order}`]);
     const selected = getPaymentMethodSelection({ customId: "quote_payment_method_123", values: ["匯款"] }, "quote_payment_method_");
     assert.equal(selected.paymentMethod, "匯款");
     assert.equal(selected.requestedMethod, undefined);
@@ -62,12 +63,14 @@ test("虛擬 ATM 開放日前，按鈕隱藏且匯款仍走原帳號", () => {
   }
 });
 
-test("自助單舊 ATM 按鈕在切換前不得直接取號", async () => {
+test("自助單 ATM 在切換前可直接取號，但不會直接核帳", async () => {
   const originalNow = Date.now;
   Date.now = () => ECPAY_ATM_START - 1;
   let fetched = false;
   const originalFetch = global.fetch;
-  global.fetch = async () => { fetched = true; throw new Error("不應向綠界取號"); };
+  const originalKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-only-key";
+  global.fetch = async () => { fetched = true; throw new Error("測試中止取號"); };
   const replies = [];
   const interaction = { customId: `ecpay_direct_ATM_${order}`, user: { id: "123" }, channelId: "456", deferred: true,
     editReply: async payload => { replies.push(payload); }, channel: { async send() { throw new Error("不應發送 ATM 資訊"); } } };
@@ -77,9 +80,14 @@ test("自助單舊 ATM 按鈕在切換前不得直接取號", async () => {
   } }; } };
   try {
     assert.equal(await handleEcpayDirect(interaction, supabase, "https://pay.example"), true);
-    assert.match(replies.at(-1).content, /9 月 28 日/);
-    assert.equal(fetched, false);
-  } finally { Date.now = originalNow; global.fetch = originalFetch; }
+    assert.doesNotMatch(replies.at(-1).content, /9 月 28 日/);
+    assert.equal(fetched, true);
+  } finally {
+    Date.now = originalNow;
+    global.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = originalKey;
+  }
 });
 
 test("選擇匯款時改走綠界虛擬 ATM，不再提供固定帳號", () => {

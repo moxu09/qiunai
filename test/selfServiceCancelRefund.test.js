@@ -99,12 +99,12 @@ test("自助付款六種選項與一般訂單選項分流，先確認才建立�
   assert.match(source, /if \(isManualDispatchOrder\(order\)\) \{/);
 });
 
-test("9/28 前自助匯款保留原銀行並由客服確認，舊 ATM 按鈕不能提前取號", () => {
+test("秋奈自助匯款在 9/28 前使用綠界 ATM，舊 bank 按鈕也導向 ATM", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
   const gateway = source.split("async function paySelfServiceOrderByGateway(interaction) {")[1]
     .split("async function paySelfServiceOrderByBank(")[0];
-  assert.match(gateway, /!isEcpayAtmAvailable\(\) && \(bankMatch \|\| ecpayMatch\?\.\[1\] === "atm"\)/);
-  assert.match(gateway, /paySelfServiceOrderByBank\(interaction/);
+  assert.match(gateway, /bankMatch \? \[interaction\.customId, "atm", bankMatch\[1\]\]/);
+  assert.doesNotMatch(gateway, /paySelfServiceOrderByBank\(interaction/);
   const bank = source.split("async function paySelfServiceOrderByBank(interaction, orderId) {")[1]
     .split("async function confirmSelfServiceBankPayment(")[0];
   assert.match(bank, /quote_status: "waiting_bank"/);
