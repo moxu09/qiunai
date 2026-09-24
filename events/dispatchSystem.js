@@ -117,6 +117,14 @@ const SELF_SERVICE_SELECTION_EXTENSION_MS = 5 * 60 * 1000;
 const QIUNAI_WATER_BLUE = "#7CC7FF";
 const QIUNAI_FEMALE_PLAYER_ROLE_ID = "1206158440280621056";
 const QIUNAI_MALE_PLAYER_ROLE_ID = "1210852757972459540";
+function isQiunaiCompanionInteraction(interaction) {
+  const companionRoleIds = new Set([
+    QIUNAI_FEMALE_PLAYER_ROLE_ID,
+    QIUNAI_MALE_PLAYER_ROLE_ID,
+    ...parseRoleIds(process.env.PLAYER_ROLE_ID, process.env.PLAYER_ROLE_IDS),
+  ]);
+  return [...companionRoleIds].some((roleId) => memberHasRole(interaction?.member, roleId));
+}
 const SELF_SERVICE_SUCCESS_IMAGE = path.join(
   __dirname,
   "..",
@@ -2642,6 +2650,9 @@ async function findSelfServiceClaimMessage(orderId, knownOrder = null) {
 }
 
 async function openSelfServiceClaimModal(interaction) {
+  if (!isQiunaiCompanionInteraction(interaction)) {
+    return interaction.reply({ content: "❌ 只有秋奈陪陪可以跳單。", flags: 64 });
+  }
   const action = parseSelfServiceClaimAction(interaction.customId);
   if (!action) return interaction.reply({ content: "❌ 無法辨識接單方式。", flags: 64 });
   const { orderId, claimType } = action;
@@ -2665,6 +2676,9 @@ async function openSelfServiceClaimModal(interaction) {
 
 async function claimSelfServiceOrder(interaction) {
   await deferReplyOnce(interaction);
+  if (!isQiunaiCompanionInteraction(interaction)) {
+    return interaction.editReply({ content: "❌ 只有秋奈陪陪可以跳單。" });
+  }
   const action = parseSelfServiceClaimAction(interaction.customId, { submit: true });
   if (!action) return interaction.editReply({ content: "❌ 無法辨識接單方式。" });
   const { orderId, claimType } = action;
@@ -15990,6 +16004,7 @@ module.exports = {
   getSelfServiceClaimTypes,
   getSelfServiceClaimTypeLabel,
   parseSelfServiceClaimAction,
+  isQiunaiCompanionInteraction,
   stripSelfServiceClaimNotes,
   TOPUP_PRESET_AMOUNTS,
   buildTopupPaymentMethodRows,
