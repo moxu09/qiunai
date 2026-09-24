@@ -41,6 +41,7 @@ const {
 const { createAllianceMembership } = require("./utils/allianceMembership");
 const { createJkopayService } = require("./utils/jkopay");
 const { createEcpayService } = require("./utils/ecpay");
+const { createIchiban } = require("./utils/ichiban");
 const { isEcpayAtmAvailable } = require("./utils/ecpayAtmSchedule");
 const {
   createDeviceAuditReviewerSync,
@@ -219,6 +220,13 @@ const client = new Client({
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
   ],
+});
+const ichiban = createIchiban({
+  supabase,
+  client,
+  getPanelMessage: (...args) => getPanelMessage(...args),
+  savePanelMessage: (...args) => savePanelMessage(...args),
+  enabled: process.env.QIUNAI_ICHIBAN_BOT_ENABLED === "true",
 });
 const deviceAuditReviewerSync = createDeviceAuditReviewerSync({
   client,
@@ -8002,6 +8010,7 @@ client.once(Events.ClientReady, async () => {
       { name: "報單面板", run: () => dispatchSystem.sendWorkReportPanel() },
       { name: "商店面板", run: () => refreshShop(client) },
       { name: "儲值面板", run: () => sendTopupPanel(client) },
+      { name: "一番賞面板", run: () => ichiban.publishPanel() },
       { name: "街口退款面板", run: sendJkopayRefundPanel },
       { name: "ATM 面板", run: () => sendAtmPanel(client) },
       { name: "簽到面板", run: () => sendCheckinPanel(client) },
@@ -8851,6 +8860,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // ===== 一般 Button =====
     if (interaction.isButton()) {
+      if (interaction.customId.startsWith("qiunai_ichiban_")) {
+        await ichiban.handle(interaction);
+        return;
+      }
       if (
         interaction.customId.startsWith("open_manual_work_report") ||
         interaction.customId.startsWith("manual_work_confirm_") ||
