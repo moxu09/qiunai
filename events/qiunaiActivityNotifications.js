@@ -35,6 +35,10 @@ function buildActivityAnnouncement(activity, options = []) {
   return lines.filter(Boolean).join("\n").slice(0, 1950);
 }
 
+function buildActivityChannelAnnouncement(activity, options = []) {
+  return `@everyone\n${buildActivityAnnouncement(activity, options)}`;
+}
+
 function buildActivityDm(activity, options = []) {
   return [
     "小奈通知你：秋奈有新活動囉！",
@@ -76,7 +80,7 @@ async function sendAnnouncement(supabase, client, notification, activity, option
   if (!channel?.isTextBased?.() || !channel.send) {
     throw new Error(`找不到秋奈員工群公告頻道 ${ANNOUNCEMENT_CHANNEL_ID}`);
   }
-  const content = buildActivityAnnouncement(activity, options);
+  const content = buildActivityChannelAnnouncement(activity, options);
   if (notification.announcement_status === "pending" && notification.announcement_attempted_at) {
     const existing = await findSentMessage(channel, client, content);
     if (existing) {
@@ -115,7 +119,7 @@ async function sendAnnouncement(supabase, client, notification, activity, option
       content,
       nonce: notificationNonce(activity.id),
       enforceNonce: true,
-      allowedMentions: { parse: [] },
+      allowedMentions: { parse: ["everyone"] },
     });
     await updateNotification(supabase, activity.id, {
       announcement_status: "sent", announcement_message_id: message.id,
@@ -319,6 +323,7 @@ function startQiunaiActivityNotificationScheduler(supabase, client, createNonOve
 
 module.exports = {
   buildActivityAnnouncement,
+  buildActivityChannelAnnouncement,
   buildActivityDm,
   listCurrentCompanionIds,
   notificationNonce,

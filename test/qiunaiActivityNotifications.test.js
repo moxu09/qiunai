@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   buildActivityAnnouncement,
+  buildActivityChannelAnnouncement,
   buildActivityDm,
   listCurrentCompanionIds,
   notificationNonce,
@@ -28,6 +29,8 @@ test("活動公告列出時間、回覆期限、分類及 EIP 入口", () => {
 
 test("私訊說明由小奈通知，且各對象採不同的固定 nonce", () => {
   assert.match(buildActivityDm(activity), /小奈通知你/);
+  assert.doesNotMatch(buildActivityDm(activity), /@everyone/);
+  assert.match(buildActivityChannelAnnouncement(activity), /^@everyone\n/);
   assert.equal(notificationNonce(activity.id, "123"), notificationNonce(activity.id, "123"));
   assert.notEqual(notificationNonce(activity.id, "123"), notificationNonce(activity.id, "456"));
   assert.ok(notificationNonce(activity.id, "123").length <= 25);
