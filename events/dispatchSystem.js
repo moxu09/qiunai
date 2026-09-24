@@ -9083,6 +9083,9 @@ async function handleSalaryQuoteTransfer(interaction) {
   if (!canApproveSalaryDeduction(interaction)) {
     return interaction.editReply({ content: "❌ 只有客服或管理員可以選擇差額轉帳。" });
   }
+  if (isEcpayAtmAvailable()) {
+    return interaction.editReply({ content: "⚠️ 原銀行匯款已停用；差額虛擬 ATM 尚未完成核帳串接，請先改選其他付款方式，勿使用舊帳號。" });
+  }
 
   const orderId = interaction.customId.replace("salary_quote_transfer_", "");
   const { data: order, error } = await supabase
@@ -14627,6 +14630,9 @@ async function handleSalaryServiceTransfer(interaction) {
   await deferReplyOnce(interaction);
   if (!canApproveSalaryDeduction(interaction)) {
     return interaction.editReply({ content: "❌ 只有客服或管理員可以選擇差額轉帳。" });
+  }
+  if (isEcpayAtmAvailable()) {
+    return interaction.editReply({ content: "⚠️ 原銀行匯款已停用；差額虛擬 ATM 尚未完成核帳串接，請先改選其他付款方式，勿使用舊帳號。" });
   }
   const flowId = interaction.customId.replace("salary_service_transfer_", "");
   const pending = await pendingServiceOrders.get(flowId);

@@ -116,3 +116,13 @@ test("9/28 前自助匯款保留原銀行並由客服確認，舊 ATM 按鈕不�
   assert.match(confirm, /action: "confirm_waiting"/);
   assert.match(confirm, /sendForAcceptedOrder\(accepted, selectedIds\)/);
 });
+
+test("扣薪差額未完成虛擬 ATM 核帳前，不可在切換日後先改訂單狀態再顯示舊銀行", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+  for (const name of ["handleSalaryQuoteTransfer", "handleSalaryServiceTransfer"]) {
+    const body = source.split(`async function ${name}(interaction) {`)[1].split("async function ")[0];
+    const guard = body.indexOf("if (isEcpayAtmAvailable()) {");
+    const bank = body.indexOf("sendBankTransferInfo(interaction.channel)");
+    assert.ok(guard >= 0 && bank > guard, `${name} 必須先判斷切換時間`);
+  }
+});
