@@ -4157,11 +4157,14 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
       ? "系統會在本頻道顯示綠界虛擬 ATM 帳號；實際轉帳完成後才會自動核帳。"
       : ["CVS", "BARCODE"].includes(payment.onlyMethod)
         ? "系統會在本頻道顯示超商繳費資訊；實際繳費完成後才會自動核帳。"
-        : `刷卡會在官網站內直接輸入卡號；${isEcpayAtmAvailable() ? "匯款虛擬帳號與" : "虛擬 ATM 於 9 月 28 日開放，"}超商繳費資訊會直接顯示在本頻道。實際付款成功後才會自動核帳。`;
+        : label === "訂單" && payment.selfService !== true
+          ? "刷卡會在官網站內直接輸入卡號；超商繳費資訊會顯示在本頻道。匯款請選擇原銀行匯款，並由客服確認入帳。"
+          : `刷卡會在官網站內直接輸入卡號；${isEcpayAtmAvailable() ? "匯款虛擬帳號與" : "虛擬 ATM 於 9 月 28 日開放，"}超商繳費資訊會直接顯示在本頻道。實際付款成功後才會自動核帳。`;
   const paymentRows = buildEcpayPaymentRows(payment, Number(amount), {
     topup: label === "購買ASD",
     onlyMethod: payment.onlyMethod || null,
     selfService: label === "自助訂單" || payment.selfService === true,
+    allowAtm: label !== "訂單" || payment.selfService === true,
   });
   const message = await channel.send({
     content: `<@${userId}>`,
@@ -4184,7 +4187,6 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
 }
 
 async function sendBankTransferInfo(channel) {
-  if (isEcpayAtmAvailable()) throw new Error("原銀行匯款已停用，請改用綠界虛擬 ATM");
   const embed = new EmbedBuilder()
     .setColor(QIUNAI_WATER_BLUE)
     .setTitle("🏦 匯款資訊")
@@ -9081,9 +9083,6 @@ async function handleSalaryQuoteTransfer(interaction) {
   await deferReplyOnce(interaction);
   if (!canApproveSalaryDeduction(interaction)) {
     return interaction.editReply({ content: "❌ 只有客服或管理員可以選擇差額轉帳。" });
-  }
-  if (isEcpayAtmAvailable()) {
-    return interaction.editReply({ content: "⚠️ 原銀行匯款已停用；差額虛擬 ATM 尚未完成核帳串接，請先改選其他付款方式，勿使用舊帳號。" });
   }
 
   const orderId = interaction.customId.replace("salary_quote_transfer_", "");
@@ -14629,9 +14628,6 @@ async function handleSalaryServiceTransfer(interaction) {
   await deferReplyOnce(interaction);
   if (!canApproveSalaryDeduction(interaction)) {
     return interaction.editReply({ content: "❌ 只有客服或管理員可以選擇差額轉帳。" });
-  }
-  if (isEcpayAtmAvailable()) {
-    return interaction.editReply({ content: "⚠️ 原銀行匯款已停用；差額虛擬 ATM 尚未完成核帳串接，請先改選其他付款方式，勿使用舊帳號。" });
   }
   const flowId = interaction.customId.replace("salary_service_transfer_", "");
   const pending = await pendingServiceOrders.get(flowId);

@@ -90,18 +90,28 @@ test("自助單 ATM 在切換前可直接取號，但不會直接核帳", async 
   }
 });
 
-test("選擇匯款時改走綠界虛擬 ATM，不再提供固定帳號", () => {
+test("人工訂單與舊按鈕匯款回到連線銀行，自助購幣仍走綠界 ATM", () => {
   const original = process.env.ECPAY_ACCEPT_PAYMENTS;
   const originalNow = Date.now;
   Date.now = () => ECPAY_ATM_START;
   process.env.ECPAY_ACCEPT_PAYMENTS = "true";
   try {
     const selected = getPaymentMethodSelection({ customId: "quote_payment_method_123", values: ["匯款"] }, "quote_payment_method_");
-    assert.equal(selected.paymentMethod, "綠界支付");
-    assert.equal(selected.requestedMethod, "ATM");
+    assert.equal(selected.paymentMethod, "匯款");
+    assert.equal(selected.requestedMethod, undefined);
     const oldButton = getPaymentMethodSelection({ customId: "quote_payment_method_123__pm_bank_account" }, "quote_payment_method_");
-    assert.equal(oldButton.paymentMethod, "綠界支付");
-    assert.equal(oldButton.requestedMethod, "ATM");
+    assert.equal(oldButton.paymentMethod, "匯款");
+    assert.equal(oldButton.requestedMethod, undefined);
+    const service = getPaymentMethodSelection({ customId: "service_payment_method_123__pm_bank" }, "service_payment_method_");
+    assert.equal(service.paymentMethod, "匯款");
+    const selfTopup = getPaymentMethodSelection({ customId: "topup_payment_method_123__pm_bank" }, "topup_payment_method_");
+    assert.equal(selfTopup.paymentMethod, "綠界支付");
+    assert.equal(selfTopup.requestedMethod, "ATM");
+    const manualButtons = buildEcpayPaymentRows(payment, 100, { allowAtm: false })[0].components.map(button => button.toJSON());
+    assert.equal(manualButtons.some(button => button.custom_id?.includes("_ATM_")), false);
+    const dispatch = readFileSync(join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+    assert.match(dispatch, /allowAtm: label !== "訂單" \|\| payment\.selfService === true/);
+    assert.match(dispatch, /async function sendBankTransferInfo\(channel\) \{[\s\S]*?銀行：824連線銀行/);
   } finally {
     Date.now = originalNow;
     if (original === undefined) delete process.env.ECPAY_ACCEPT_PAYMENTS;

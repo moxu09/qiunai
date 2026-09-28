@@ -14,7 +14,7 @@ const METHODS = Object.freeze({
   BARCODE: { label: "超商條碼", min: 18, max: 20_000 },
 });
 
-function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = null, selfService = false } = {}) {
+function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = null, selfService = false, allowAtm = true } = {}) {
   const order = String(payment.platformOrderId || "");
   const base = String(payment.paymentUrl || "").split("/payments/ecpay/service/checkout")[0];
   if (!/^[A-Za-z0-9]{1,20}$/.test(order) || !/^https:\/\//.test(base))
@@ -26,6 +26,7 @@ function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = nu
   }
   for (const [method, limit] of Object.entries(METHODS)) {
     if (onlyMethod && onlyMethod !== method) continue;
+    if (method === "ATM" && !allowAtm) continue;
     if (method === "ATM" && !selfService && !isEcpayAtmAvailable()) continue;
     if (amount < limit.min || amount > limit.max) continue;
     buttons.push(new ButtonBuilder().setCustomId(`ecpay_direct_${method}_${order}`)

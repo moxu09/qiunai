@@ -244,12 +244,15 @@ function getPaymentMethodSelection(interaction, prefix) {
   const customId = String(interaction?.customId || "");
   if (!customId.startsWith(prefix)) return null;
   const remainder = customId.slice(prefix.length);
-  // 舊訊息仍可能使用「匯款帳號」按鈕或選單；同樣依台灣時間切換。
+  // 人工報價與人工開單（包含舊訊息）維持銀行匯款；自助購幣另外由流程明確導向綠界。
   const resolveBankMethod = (method) => {
     const ecpayMethods = { 線上刷卡: "CARD", 超商代碼: "CVS", 超商條碼: "BARCODE" };
     if (ecpayMethods[method]) return { paymentMethod: "綠界支付", requestedMethod: ecpayMethods[method] };
     const bank = ["匯款", "匯款帳號", "匯款轉帳", "匯款 / 轉帳"].includes(method);
     if (!bank) return { paymentMethod: method };
+    if (prefix === "quote_payment_method_" || prefix === "service_payment_method_") {
+      return { paymentMethod: "匯款" };
+    }
     if (process.env.ECPAY_ACCEPT_PAYMENTS === "true" && isEcpayAtmAvailable()) {
       return { paymentMethod: "綠界支付", requestedMethod: "ATM" };
     }

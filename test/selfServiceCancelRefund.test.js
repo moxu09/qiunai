@@ -117,12 +117,12 @@ test("秋奈自助匯款在 9/28 前使用綠界 ATM，舊 bank 按鈕也導向 
   assert.match(confirm, /sendForAcceptedOrder\(accepted, selectedIds\)/);
 });
 
-test("扣薪差額未完成虛擬 ATM 核帳前，不可在切換日後先改訂單狀態再顯示舊銀行", () => {
+test("人工訂單扣薪差額仍顯示原銀行並等待客服確認", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
   for (const name of ["handleSalaryQuoteTransfer", "handleSalaryServiceTransfer"]) {
     const body = source.split(`async function ${name}(interaction) {`)[1].split("async function ")[0];
-    const guard = body.indexOf("if (isEcpayAtmAvailable()) {");
     const bank = body.indexOf("sendBankTransferInfo(interaction.channel)");
-    assert.ok(guard >= 0 && bank > guard, `${name} 必須先判斷切換時間`);
+    assert.ok(bank >= 0, `${name} 必須顯示原銀行資訊`);
+    assert.doesNotMatch(body, /原銀行匯款已停用/);
   }
 });
