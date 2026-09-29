@@ -2086,6 +2086,7 @@ test("employment applications block only customers with paid orders in the same 
       return {
         select() { return this; },
         eq(column, value) { filters.push([column, value]); return this; },
+        in(column, values) { filters.push([column, values]); return this; },
         async limit() { return { data: [{ id: "paid-order" }], error: null }; },
       };
     },
@@ -2100,7 +2101,42 @@ test("employment applications block only customers with paid orders in the same 
     ["guild_id", "qiunai-guild"],
     ["customer_id", "123456789012345678"],
     ["paid", true],
+    ["order_type", ["訂單", "自助訂單", "訂單追加"]],
   ]);
+});
+
+test("tip-only customers are not blocked from employment applications", async () => {
+  const replies = [];
+  const supabase = {
+    from(table) {
+      const rows = table === "play_orders"
+        ? [{ id: "tip", order_type: "打賞" }]
+        : [];
+      let filtered = rows;
+      return {
+        select() { return this; },
+        eq() { return this; },
+        in(column, values) {
+          filtered = filtered.filter((row) => values.includes(row[column]));
+          return this;
+        },
+        async limit() { return { data: filtered, error: null }; },
+      };
+    },
+  };
+  const system = createEmploymentSystem(
+    {},
+    { brandName: "秋奈電競", organization: "qiunai" },
+    supabase,
+  );
+  await system.handleInteraction({
+    customId: "employment_start",
+    guildId: "qiunai-guild",
+    user: { id: "123456789012345678" },
+    async deferReply(payload) { replies.push(["defer", payload]); },
+    async editReply(payload) { replies.push(["edit", payload]); },
+  });
+  assert.match(replies[1][1].content, /是否同意陪玩共同守則/);
 });
 
 test("paid customers receive the owner restriction when starting an application", async () => {
@@ -2110,6 +2146,7 @@ test("paid customers receive the owner restriction when starting an application"
       return {
         select() { return this; },
         eq() { return this; },
+        in() { return this; },
         async limit() {
           return {
             data: table === "play_orders" ? [{ id: "paid-order" }] : [],
@@ -2147,6 +2184,7 @@ test("paid active companions can still start an employment assessment", async ()
       return {
         select() { return this; },
         eq() { return this; },
+        in() { return this; },
         async limit() {
           return {
             data:
