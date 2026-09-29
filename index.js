@@ -17,6 +17,9 @@ const {
   startQiunaiActivityNotificationScheduler,
 } = require("./events/qiunaiActivityNotifications");
 const {
+  startQiunaiEipMessageNotificationScheduler,
+} = require("./events/qiunaiEipMessageNotifications");
+const {
   createHealthServer,
   createHealthState,
   createNonOverlappingTask,
@@ -8068,6 +8071,10 @@ client.once(Events.ClientReady, async () => {
       {
         name: "秋奈活動公告與陪陪私訊排程",
         run: () => startQiunaiActivityNotificationScheduler(supabase, client, createNonOverlappingTask),
+      },
+      {
+        name: "秋奈 EIP 員工訊息提醒排程",
+        run: () => startQiunaiEipMessageNotificationScheduler(supabase, client, createNonOverlappingTask),
       },
       {
         name: "每日自動偵錯排程",
