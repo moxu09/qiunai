@@ -1049,9 +1049,9 @@ function startPricingPanelScheduler() {
   const untilMidnight = Date.parse("2026-09-30T16:00:00.000Z") - Date.now();
   if (untilMidnight > 0) {
     const midnightTimer = setTimeout(async () => {
+      activePricingPanelVersion = "2026-10-01";
       try {
         await sendGameOrderPanels();
-        activePricingPanelVersion = "2026-10-01";
         console.log("[價目表排程] 2026/10/01 台灣時間 00:00 已切換秋奈價目表");
       } catch (error) {
         activePricingPanelVersion = null;
