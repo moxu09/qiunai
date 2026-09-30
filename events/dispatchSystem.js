@@ -3401,6 +3401,7 @@ async function confirmSelfServiceBankPayment(interaction) {
       .eq("id", order.id).eq("paid", true).eq("status", "waiting_confirm").eq("quote_status", "waiting_bank")
       .select("*").maybeSingle();
     if (updateError || !accepted) throw new Error(updateError?.message || "匯款已核帳但派單狀態尚未更新");
+    await paymentHelpers.sendOrderReceiptSafely?.(accepted);
     await paymentHelpers.countOrderVipSpentOnce?.(accepted, "客服確認自助匯款完成");
     await paymentHelpers.recordAccountingLedger?.({
       entry_type: "customer_order_bank", entry_label: "客人消費",
@@ -3457,6 +3458,7 @@ async function paySelfServiceOrder(interaction) {
       .select()
       .single();
     if (error || !paidOrder) throw new Error(error?.message || "付款成功但更新派單狀態失敗");
+    await paymentHelpers.sendOrderReceiptSafely?.(paidOrder);
     for (const playerId of selectedIds) {
       await interaction.channel.permissionOverwrites.edit(playerId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
     }
@@ -5050,6 +5052,7 @@ async function markPaidOrderDispatchPending(orderId) {
 }
 
 async function deliverPaidOrder(order, customerChannel) {
+  await paymentHelpers.sendOrderReceiptSafely?.(order);
   if (!paidOrderDispatcher) throw new Error("派單恢復服務尚未初始化");
   const result = await paidOrderDispatcher(order, customerChannel);
   if (result.inProgress) {
@@ -9176,6 +9179,7 @@ async function handleSalaryQuoteSplitConfirm(interaction) {
   return interaction.editReply({ content: "✅ 已確認差額入帳並完成付款。" });
 }
 async function sendCustomerFinalConfirm(channel, order) {
+  if (order.paid) await paymentHelpers.sendOrderReceiptSafely?.(order);
   if (order.paid && order.quote_status === "price_confirmed") {
     try {
       const { error: statusError } = await supabase.from("play_orders")
@@ -9329,6 +9333,7 @@ async function transitionServicePayment(interaction, prefix, group, action) {
     return interaction.editReply({ content: "✅ 已取消未付款訂單。" });
   }
   if (action === "confirm_waiting") {
+    for (const order of orders) await paymentHelpers.sendOrderReceiptSafely?.(order);
     await interaction.message?.edit({ components: [] }).catch(() => null);
     if (orders[0].quote_status === "price_confirmed") {
       await sendCustomerFinalConfirm(interaction.channel, orders[0]);
@@ -15803,6 +15808,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
     }
     if (!paidOrders.length) throw new Error(`${paymentLabel}付款成功，但找不到可恢復的已付款訂單`);
     for (const order of paidOrders) {
+      await paymentHelpers.sendOrderReceiptSafely?.(order);
       await paymentHelpers.countOrderVipSpentOnce?.(order, `${paymentMethod}付款完成`);
       if (selfServiceFlow) {
         const selectedIds = selfServicePlayerIds.length

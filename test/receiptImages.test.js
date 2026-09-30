@@ -64,7 +64,8 @@ test("訂單與打賞都產生可辨識的 PNG，且 ASD 不標成新台幣", ()
       time: "2026-09-30T04:00:00.000Z",
     });
     assert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
-    assert.equal(png.readUInt32BE(16), 1000);
+    assert.equal(png.readUInt32BE(16), 720);
+    assert.ok(png.readUInt32BE(20) > png.readUInt32BE(16));
     assert.ok(png.length > 15_000);
   }
   assert.match(receiptSvg({

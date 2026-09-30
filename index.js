@@ -50,6 +50,7 @@ const {
   buildOrderReceiptData,
   renderReceiptPng,
 } = require("./utils/receiptImages");
+const { createReceiptDelivery } = require("./utils/receiptDelivery");
 const { isEcpayAtmAvailable } = require("./utils/ecpayAtmSchedule");
 const {
   createDeviceAuditReviewerSync,
@@ -432,6 +433,7 @@ async function listStaffByService(serviceKey) {
 const dispatchSystem = require("./events/dispatchSystem");
 
 dispatchSystem.setup(supabase, client, {
+  sendOrderReceiptSafely,
   payOrderByWallet,
   payOrderByMonthly,
   payExtensionByMonthly,
@@ -814,11 +816,61 @@ async function getReceiptDisplayName(userId, guild) {
   return user?.globalName || user?.username || id;
 }
 
-async function sendTipBroadcastSafely(tipData) {
-  if (!tipData?.broadcastEnabled || tipData.crownOrder) return;
+const sendReceipt = createReceiptDelivery({ client, render: renderReceiptPng });
 
+async function sendOrderReceiptSafely(order) {
+  if (!order?.paid || !order.channel_id || !order.id || order.order_type === "打賞") return false;
+  try {
+    const channel = await client.channels.fetch(String(order.channel_id)).catch(() => null);
+    const playerIds = String(order.assigned_player || order.preferred_player || "")
+      .split(",").map((id) => id.trim()).filter(Boolean);
+    const [payer, ...players] = await Promise.all([
+      getReceiptDisplayName(order.customer_id, channel?.guild),
+      ...playerIds.map((id) => getReceiptDisplayName(id, channel?.guild)),
+    ]);
+    return sendReceipt({
+      channelId: order.channel_id,
+      key: order.order_no || order.id,
+      label: "訂單付款收據",
+      data: buildOrderReceiptData({
+        order, payerName: payer, playerNames: players,
+        amount: Number(order.final_price ?? order.price ?? 0),
+      }),
+    });
+  } catch (error) {
+    console.error(`[訂單收據處理失敗] ${order.id}`, error);
+    return false;
+  }
+}
+
+async function sendTipReceiptSafely(tipData, allocations) {
+  if (!tipData?.channelId || !allocations.length) return false;
+  try {
+    const channel = await client.channels.fetch(String(tipData.channelId)).catch(() => null);
+    const staffNames = await Promise.all(allocations.map(({ staffId }) =>
+      getReceiptDisplayName(staffId, channel?.guild),
+    ));
+    const payer = tipData.broadcastAnonymous
+      ? "匿名闆闆"
+      : await getReceiptDisplayName(tipData.tipperId, channel?.guild);
+    return sendReceipt({
+      channelId: tipData.channelId,
+      key: tipData.flowId || tipData.tipId || tipData.createdAt,
+      label: "打賞收據",
+      data: buildTipReceiptData({ tipData, allocations, staffNames, payerName: payer }),
+    });
+  } catch (error) {
+    console.error("[打賞收據處理失敗]", error);
+    return false;
+  }
+}
+
+async function sendTipBroadcastSafely(tipData) {
+  if (!tipData) return;
   const allocations = buildTipAllocations(tipData);
   if (!allocations.length) return;
+  await sendTipReceiptSafely(tipData, allocations);
+  if (!tipData?.broadcastEnabled || tipData.crownOrder) return;
 
   try {
     const channel = await client.channels
@@ -886,28 +938,9 @@ async function sendTipBroadcastSafely(tipData) {
         allowedMentions: { parse: [] },
       };
       try {
-        const staffNames = await Promise.all(allocations.map(({ staffId }) =>
-          getReceiptDisplayName(staffId, channel.guild),
-        ));
-        const payer = tipData.broadcastAnonymous
-          ? "匿名闆闆"
-          : await getReceiptDisplayName(tipData.tipperId, channel.guild);
-        thanksPayload.files = [{
-          attachment: renderReceiptPng(buildTipReceiptData({
-            tipData, allocations, staffNames, payerName: payer,
-          })),
-          name: "qiunai-tip-receipt.png",
-        }];
-      } catch (error) {
-        console.error("[打賞收據出圖失敗] 已保留原文字播報", error);
-      }
-      try {
         await sendTipBroadcastMessage(channel, thanksPayload, tipData, "thanks");
       } catch (error) {
-        if (!thanksPayload.files) throw error;
-        console.error("[打賞收據傳送失敗] 改送原文字播報", error);
-        delete thanksPayload.files;
-        await sendTipBroadcastMessage(channel, thanksPayload, tipData, "thanks");
+        throw error;
       }
     }
     if (failures.length) {
@@ -1388,6 +1421,7 @@ async function startTipFlowInChannel(channel, user) {
   const tipId = `${user.id}_${Date.now()}`;
 
   setPendingTip(tipId, {
+    flowId: tipId,
     createdBy: user.id,
     tipperId: user.id,
     channelId: channel.id,
@@ -1410,6 +1444,7 @@ async function startTipFlowInChannel(channel, user) {
 async function startCrownFlowInChannel(channel, user) {
   const tipId = `${user.id}_${Date.now()}`;
   setPendingTip(tipId, {
+    flowId: tipId,
     createdBy: user.id,
     tipperId: user.id,
     channelId: channel.id,
@@ -4394,6 +4429,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
 
   const tipData = {
     flowId: metadata.tipId || payment.entity_key,
+    channelId: payment.channel_id,
     tipperId,
     selectedStaffIds: allocations.map((item) => item.staffId),
     allocations,
@@ -8757,28 +8793,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .setTimestamp(),
           ],
         };
-        try {
-          const [payer, ...players] = await Promise.all([
-            getReceiptDisplayName(order.customer_id, interaction.guild),
-            ...assignedPlayers.map((id) => getReceiptDisplayName(id, interaction.guild)),
-          ]);
-          completionPayload.files = [{
-            attachment: renderReceiptPng(buildOrderReceiptData({
-              order, payerName: payer, playerNames: players, amount: paidTotal,
-            })),
-            name: "qiunai-order-receipt.png",
-          }];
-        } catch (error) {
-          console.error("[訂單收據出圖失敗] 已保留原訂單完成訊息", error);
-        }
-        try {
-          await interaction.channel.send(completionPayload);
-        } catch (error) {
-          if (!completionPayload.files) throw error;
-          console.error("[訂單收據傳送失敗] 改送原訂單完成訊息", error);
-          delete completionPayload.files;
-          await interaction.channel.send(completionPayload);
-        }
+        await interaction.channel.send(completionPayload);
         await publishPositiveReview({
           rating,
           customerId,

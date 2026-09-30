@@ -2,7 +2,7 @@ const path = require("node:path");
 const { Resvg } = require("@resvg/resvg-js");
 
 const FONT_FILE = path.join(__dirname, "..", "assets", "fonts", "NotoSansCJKtc-Regular.otf");
-const WIDTH = 1000;
+const WIDTH = 720;
 
 function escapeXml(value) {
   return String(value ?? "")
@@ -73,15 +73,17 @@ function buildTipReceiptData({ tipData, allocations, staffNames, payerName }) {
 }
 
 function buildOrderReceiptData({ order, payerName, playerNames, amount }) {
+  const payment = String(order.payment_method || "已確認付款");
   return {
     kind: "order",
     reference: order.order_no || order.id,
     payer: payerName,
-    recipient: playerNames.join("、"),
+    recipient: playerNames.join("、") || "待選陪陪",
     details: order.service || order.order_item || "陪玩訂單",
     amount,
-    payment: order.payment_method,
-    time: order.completed_at || new Date(),
+    currency: /錢包|儲值|ASD|餘額/u.test(payment) ? "ASD" : "TWD",
+    payment,
+    time: order.paid_at || new Date(),
   };
 }
 
@@ -94,41 +96,43 @@ function receiptSvg({ kind, reference, payer, recipient, details, amount, curren
     { label: isTip ? "打賞內容" : "服務內容", value: details },
     { label: "付款方式", value: payment || "已確認付款" },
   ];
-  let y = 270;
+  let y = 300;
   const body = rows.map(({ label, value }) => {
-    const lines = wrapText(value, 34, label === "打賞內容" || label === "服務內容" ? 3 : 2);
-    const height = Math.max(80, lines.length * 35 + 34);
+    const lines = wrapText(value, 29, label === "打賞內容" || label === "服務內容" ? 3 : 2);
+    const height = Math.max(125, lines.length * 36 + 70);
     const currentY = y;
     y += height;
     return `
-      <text x="88" y="${currentY}" class="label">${escapeXml(label)}</text>
-      ${lines.map((line, index) => `<text x="310" y="${currentY + index * 35}" class="value">${escapeXml(line)}</text>`).join("")}
-      <path d="M88 ${currentY + height - 20} H912" stroke="#dcecf6" stroke-width="2"/>`;
+      <text x="60" y="${currentY}" class="label">${escapeXml(label)}</text>
+      ${lines.map((line, index) => `<text x="60" y="${currentY + 45 + index * 36}" class="value">${escapeXml(line)}</text>`).join("")}
+      <path d="M60 ${currentY + height - 20} H660" stroke="#dcecf6" stroke-width="2"/>`;
   }).join("");
-  const height = Math.max(715, y + 214);
+  const height = Math.max(1080, y + 305);
   const sum = money(amount, currency);
-  const referenceLines = wrapText(reference || "—", 34, 1);
+  const referenceLines = wrapText(reference || "—", 30, 1);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${height}" viewBox="0 0 ${WIDTH} ${height}">
     <style>
       text { font-family: 'Noto Sans CJK TC', sans-serif; }
-      .label { fill:#647b90; font-size:25px; }
+      .label { fill:#647b90; font-size:23px; }
       .value { fill:#142a43; font-size:28px; }
     </style>
-    <rect width="1000" height="${height}" rx="34" fill="#eaf6ff"/>
-    <rect x="28" y="28" width="944" height="${height - 56}" rx="27" fill="#ffffff"/>
-    <path d="M28 181 V55 Q28 28 55 28 H945 Q972 28 972 55 V181 Z" fill="#10385a"/>
-    <path d="M57 181 H943" stroke="#78d1f6" stroke-width="3" stroke-dasharray="9 7"/>
-    <circle cx="79" cy="92" r="14" fill="#72d1f2"/>
-    <text x="108" y="102" fill="#ffffff" font-size="34">秋奈電競陪玩</text>
-    <text x="83" y="158" fill="#b9e9fb" font-size="22">AKINA  ·  ${isTip ? "TIP RECEIPT" : "ORDER RECEIPT"}</text>
-    <rect x="737" y="70" width="166" height="63" rx="30" fill="#78d1f6"/>
-    <text x="820" y="111" text-anchor="middle" fill="#10385a" font-size="25">${isTip ? "感謝打賞" : "訂單完成"}</text>
-    <text x="88" y="226" fill="#6a8397" font-size="22">編號  ${escapeXml(referenceLines[0])}</text>
+    <rect width="720" height="${height}" rx="32" fill="#eaf6ff"/>
+    <rect x="20" y="20" width="680" height="${height - 40}" rx="27" fill="#ffffff"/>
+    <path d="M20 188 V47 Q20 20 47 20 H673 Q700 20 700 47 V188 Z" fill="#10385a"/>
+    <path d="M43 188 H677" stroke="#78d1f6" stroke-width="3" stroke-dasharray="9 7"/>
+    <circle cx="62" cy="75" r="12" fill="#72d1f2"/>
+    <text x="88" y="86" fill="#ffffff" font-size="31">秋奈電競陪玩</text>
+    <text x="60" y="155" fill="#b9e9fb" font-size="20">AKINA  ·  ${isTip ? "TIP RECEIPT" : "ORDER RECEIPT"}</text>
+    <rect x="492" y="55" width="160" height="60" rx="29" fill="#78d1f6"/>
+    <text x="572" y="94" text-anchor="middle" fill="#10385a" font-size="23">${isTip ? "感謝打賞" : "付款完成"}</text>
+    <text x="60" y="248" fill="#6a8397" font-size="21">編號  ${escapeXml(referenceLines[0])}</text>
     ${body}
-    <rect x="65" y="${y + 9}" width="870" height="111" rx="18" fill="#e5f7ff"/>
-    <text x="92" y="${y + 72}" fill="#315875" font-size="28">${isTip ? "打賞總額" : "實收金額"}</text>
-    <text x="901" y="${y + 79}" text-anchor="end" fill="#0b749d" font-size="45">${escapeXml(sum)}</text>
-    <text x="88" y="${height - 63}" fill="#7993a7" font-size="22">${escapeXml(taipeiTime(time))}  ·  付款與入帳請以系統紀錄為準</text>
+    <rect x="42" y="${y + 25}" width="636" height="132" rx="19" fill="#e5f7ff"/>
+    <text x="64" y="${y + 80}" fill="#315875" font-size="25">${isTip ? "打賞總額" : "實收金額"}</text>
+    <text x="650" y="${y + 118}" text-anchor="end" fill="#0b749d" font-size="44">${escapeXml(sum)}</text>
+    <path d="M60 ${height - 133} H660" stroke="#b1dce9" stroke-width="2" stroke-dasharray="9 7"/>
+    <text x="60" y="${height - 91}" fill="#7993a7" font-size="20">${escapeXml(taipeiTime(time))}</text>
+    <text x="60" y="${height - 57}" fill="#7993a7" font-size="18">付款與入帳請以系統紀錄為準</text>
   </svg>`;
 }
 
