@@ -25,6 +25,10 @@ test("匿名打賞收據不包含打賞人名稱，錢包與街口金額單位�
     order: { id: "O-1", service: "特戰英豪", payment_method: "街口支付" },
     payerName: "闆闆", playerNames: ["小奈"], amount: 250,
   }).amount, 250);
+  assert.match(receiptSvg(buildOrderReceiptData({
+    order: { id: "O-2", service: "特戰英豪" },
+    payerName: "闆闆", playerNames: ["小奈"], amount: 0,
+  })), /NT\$0/);
 });
 
 test("收據會跳脫使用者文字並限制長欄位，不把輸入當成 SVG 執行", () => {

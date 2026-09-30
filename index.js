@@ -13884,7 +13884,7 @@ async function handleButtonInteraction(interaction) {
         );
         // ===== 多位陪陪薪資平分 =====
         const playerCount = assignedPlayers.length || 1;
-        const paidTotal = Number(order.final_price || order.price || 0);
+        const paidTotal = Number(order.final_price ?? order.price ?? 0);
         const salaryBaseTotal = getOrderCommissionBase(order);
         const splitAmount = Math.floor(salaryBaseTotal / playerCount);
         // ===== 寫入薪資紀錄：多位陪陪平分 =====
