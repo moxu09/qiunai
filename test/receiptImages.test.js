@@ -74,3 +74,20 @@ test("訂單與打賞都產生可辨識的 PNG，且 ASD 不標成新台幣", ()
   }), /ASD 300/);
   assert.throws(() => renderReceiptPng({ kind: "order", amount: -1 }), /金額無效/);
 });
+
+test("熱感紙收據有鋸齒紙邊、已付款章與逐項打賞金額", () => {
+  const data = buildTipReceiptData({
+    tipData: { flowId: "TIP-2", paymentMethod: "街口支付" },
+    allocations: [{ staffId: "1", amount: 440, lines: [
+      { name: "客製打賞", quantity: 2, subtotal: 440 },
+    ] }],
+    staffNames: ["小奈"],
+    payerName: "闆闆",
+  });
+  assert.equal(data.items[0].amount, 440);
+  const svg = receiptSvg(data);
+  assert.match(svg, /已付款/);
+  assert.match(svg, /polygon points=/);
+  assert.match(svg, /NT\$440/);
+  assert.match(svg, /客製打賞/);
+});
