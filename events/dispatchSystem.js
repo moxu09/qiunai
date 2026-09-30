@@ -29,6 +29,8 @@ const {
 const {
   DEFAULT_SALARY_ADVANCE_LIMIT,
   calculateSalaryDeductionState,
+  isSalaryDeductionPaymentMethod,
+  normalizeSalaryDeductionPaymentMethod,
 } = require("../utils/salaryDeduction");
 const {
   DELTA_SERVICE_OPTIONS,
@@ -9296,6 +9298,18 @@ async function transitionServicePayment(interaction, prefix, group, action) {
     return interaction.editReply({ content: "❌ 只有客服可以操作訂單付款或取消。" });
   }
   const target = interaction.customId.replace(prefix, "");
+  if (action !== "cancel") {
+    let paymentQuery = supabase.from("play_orders")
+      .select("payment_method")
+      .eq("guild_id", interaction.guildId || interaction.guild?.id || process.env.GUILD_ID)
+      .eq("paid", false);
+    paymentQuery = group ? paymentQuery.eq("order_group_id", target) : paymentQuery.eq("id", target);
+    const { data: paymentOrders, error: paymentError } = await paymentQuery;
+    if (paymentError) throw paymentError;
+    if ((paymentOrders || []).some((order) => isSalaryDeductionPaymentMethod(order.payment_method))) {
+      return interaction.editReply({ content: "❌ 員工扣薪必須使用專屬扣薪確認按鈕，不能用一般付款按鈕核帳。" });
+    }
+  }
   let orders = await transitionUnpaidOrders(supabase, {
     orderId: group ? null : target, groupId: group ? target : null,
     guildId: interaction.guildId || interaction.guild?.id || process.env.GUILD_ID, action,
@@ -9997,7 +10011,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
 
   const selection = getPaymentMethodSelection(interaction, "extension_payment_method_");
   const extensionId = selection?.entityId;
-  const paymentMethod = selection?.paymentMethod;
+  const paymentMethod = normalizeSalaryDeductionPaymentMethod(selection?.paymentMethod);
 
   const { data: extension, error } = await supabase
     .from("order_extensions")
@@ -10679,6 +10693,12 @@ async function handleStaffConfirmExtensionPaid(interaction) {
   if (extension.paid) {
     return interaction.editReply({
       content: "⚠️ 這筆加時已經確認付款過了",
+    });
+  }
+
+  if (isSalaryDeductionPaymentMethod(extension.payment_method)) {
+    return interaction.editReply({
+      content: "❌ 員工扣薪必須使用專屬扣薪確認按鈕，不能用一般付款按鈕核帳。",
     });
   }
 
@@ -14298,9 +14318,9 @@ async function handleServicePaymentMethodSelect(interaction) {
     return interaction.editReply({ content: "❌ 請先確認最新報價金額。" });
   }
 
-  const paymentMethod = selection?.paymentMethod;
+  const paymentMethod = normalizeSalaryDeductionPaymentMethod(selection?.paymentMethod);
 
-  if (pending.checkoutStarted && pending.paymentMethod !== paymentMethod) {
+  if (pending.checkoutStarted && normalizeSalaryDeductionPaymentMethod(pending.paymentMethod) !== paymentMethod) {
     return interaction.editReply({ content: "這筆需求已建立付款確認，請使用原付款訊息；如需更改付款方式，請聯繫客服。" });
   }
 
@@ -14494,7 +14514,7 @@ async function handleSalaryServiceConfirm(interaction) {
 
   const flowId = interaction.customId.replace("salary_service_confirm_", "");
   const pending = await pendingServiceOrders.get(flowId);
-  if (!pending || pending.paymentMethod !== "扣薪") {
+  if (!pending || !isSalaryDeductionPaymentMethod(pending.paymentMethod)) {
     return interaction.editReply({
       content: "❌ 這筆扣薪付款已過期或已處理，請重新下單。",
     });
@@ -14636,7 +14656,7 @@ async function handleSalaryServiceTransfer(interaction) {
   }
   const flowId = interaction.customId.replace("salary_service_transfer_", "");
   const pending = await pendingServiceOrders.get(flowId);
-  if (!pending || pending.paymentMethod !== "扣薪") {
+  if (!pending || !isSalaryDeductionPaymentMethod(pending.paymentMethod)) {
     return interaction.editReply({ content: "❌ 這筆扣薪付款已過期或已處理。" });
   }
   const amount = getServiceFinalPrice(pending);

@@ -1316,6 +1316,8 @@ const {
 const { formatComplaintSender } = require("../events/complaintSystem");
 const {
   calculateSalaryDeductionState,
+  isSalaryDeductionPaymentMethod,
+  normalizeSalaryDeductionPaymentMethod,
 } = require("../utils/salaryDeduction");
 const {
   getNewOrderGameOptions,
@@ -1359,6 +1361,27 @@ test("salary deduction uses net commissioned salary and caps advances at 1000", 
   });
   assert.equal(overLimit.projectedAdvance, 1100);
   assert.equal(overLimit.canUse, false);
+});
+
+test("員工扣薪選單值與舊扣薪值共用同一付款流程", () => {
+  assert.equal(isSalaryDeductionPaymentMethod("員工扣薪"), true);
+  assert.equal(isSalaryDeductionPaymentMethod("扣薪"), true);
+  assert.equal(isSalaryDeductionPaymentMethod("匯款"), false);
+  assert.equal(normalizeSalaryDeductionPaymentMethod("員工扣薪"), "扣薪");
+  assert.equal(normalizeSalaryDeductionPaymentMethod("扣薪"), "扣薪");
+  assert.equal(normalizeSalaryDeductionPaymentMethod("匯款"), "匯款");
+
+  const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+  const extensionSelect = source.split("async function handleExtensionPaymentMethodSelect(")[1]
+    .split("async function handleSalaryExtensionConfirm(")[0];
+  const serviceSelect = source.split("async function handleServicePaymentMethodSelect(")[1]
+    .split("async function handleSalaryServiceConfirm(")[0];
+  assert.match(extensionSelect, /normalizeSalaryDeductionPaymentMethod\(selection\?\.paymentMethod\)/);
+  assert.match(extensionSelect, /if \(paymentMethod === "扣薪"\)/);
+  assert.match(serviceSelect, /normalizeSalaryDeductionPaymentMethod\(selection\?\.paymentMethod\)/);
+  assert.match(source, /if \(!pending \|\| !isSalaryDeductionPaymentMethod\(pending\.paymentMethod\)\)/);
+  assert.match(source, /paymentOrders \|\| \[\]\)\.some\(\(order\) => isSalaryDeductionPaymentMethod\(order\.payment_method\)\)/);
+  assert.match(source, /if \(isSalaryDeductionPaymentMethod\(extension\.payment_method\)\)/);
 });
 
 test("秋奈員工扣薪只對在職員工顯示且後端仍驗證身分", () => {

@@ -1,5 +1,13 @@
 const DEFAULT_SALARY_ADVANCE_LIMIT = 1000;
 
+function isSalaryDeductionPaymentMethod(method) {
+  return method === "扣薪" || method === "員工扣薪";
+}
+
+function normalizeSalaryDeductionPaymentMethod(method) {
+  return isSalaryDeductionPaymentMethod(method) ? "扣薪" : method;
+}
+
 function numberValue(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) ? number : 0;
@@ -59,4 +67,6 @@ function calculateSalaryDeductionState({
 module.exports = {
   DEFAULT_SALARY_ADVANCE_LIMIT,
   calculateSalaryDeductionState,
+  isSalaryDeductionPaymentMethod,
+  normalizeSalaryDeductionPaymentMethod,
 };
