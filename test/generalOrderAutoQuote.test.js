@@ -1,29 +1,31 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { getGeneralOrderAutoQuote, normalizeDeltaService, getValorantMappedCompanionRank } = require("../utils/generalOrderAutoQuote");
+const before = "2026-09-30T15:59:59.999Z";
+const effective = "2026-09-30T16:00:00.000Z";
 
 test("一般 Apex 訂單可依價目表自動報價", () => {
-  const result = getGeneralOrderAutoQuote({ category: "apex", itemLabel: "技術陪玩", rank: "白金", playerCount: 2, duration: 1.5 });
+  const result = getGeneralOrderAutoQuote({ category: "apex", itemLabel: "技術陪玩", rank: "白金", playerCount: 2, duration: 1.5 }, before);
   assert.equal(result.ok, true);
   assert.equal(result.quote.total, 930);
   assert.equal(result.quote.unit, "小時");
 });
 
 test("一般英雄聯盟峽谷訂單使用局數自動報價", () => {
-  const result = getGeneralOrderAutoQuote({ category: "lol", itemLabel: "英雄聯盟", playMode: "大神陪玩", rank: "鑽石", playerCount: 1, rounds: 3 });
+  const result = getGeneralOrderAutoQuote({ category: "lol", itemLabel: "英雄聯盟", playMode: "大神陪玩", rank: "鑽石", playerCount: 1, rounds: 3 }, before);
   assert.equal(result.ok, true);
   assert.equal(result.quote.total, 1110);
   assert.equal(result.quote.unit, "局");
 });
 
 test("一般特戰娛樂訂單可自動報價", () => {
-  const result = getGeneralOrderAutoQuote({ category: "valorant", serviceTypes: ["娛樂"], rank: "白金", playerCount: 1, duration: 2 });
+  const result = getGeneralOrderAutoQuote({ category: "valorant", serviceTypes: ["娛樂"], rank: "白金", playerCount: 1, duration: 2 }, before);
   assert.equal(result.ok, true);
   assert.equal(result.quote.total, 520);
 });
 
 test("一般特戰直接依需求的陪陪段位自動報價", () => {
-  const result = getGeneralOrderAutoQuote({ category: "valorant", serviceTypes: ["頂輻"], valorantCompanionRank: "頂輻", rank: "銀牌", playerCount: 1, duration: 1 });
+  const result = getGeneralOrderAutoQuote({ category: "valorant", serviceTypes: ["頂輻"], valorantCompanionRank: "頂輻", rank: "銀牌", playerCount: 1, duration: 1 }, before);
   assert.equal(result.ok, true);
   assert.equal(result.quote.total, 330);
   assert.equal(result.quote.unit, "小時");
@@ -42,7 +44,7 @@ test("特戰陪陪段位沿用價目表選項並兼容舊服務類型", () => {
 });
 
 test("舊版一般 STEAM 訂單也可自動報價", () => {
-  const result = getGeneralOrderAutoQuote({ game: "STEAM", item: "一般遊戲陪玩", playerCount: 2, durationMinutes: 90 });
+  const result = getGeneralOrderAutoQuote({ game: "STEAM", item: "一般遊戲陪玩", playerCount: 2, durationMinutes: 90 }, before);
   assert.equal(result.ok, true);
   assert.equal(result.quote.total, 780);
 });
@@ -54,11 +56,24 @@ test("資料不足或沒有價目表時轉客服", () => {
 });
 
 test("計價單位不符時不自動報價", () => {
-  const result = getGeneralOrderAutoQuote({ category: "lol", itemLabel: "英雄聯盟", playMode: "技術陪玩", rank: "白金", playerCount: 1, duration: 1 });
+  const result = getGeneralOrderAutoQuote({ category: "lol", itemLabel: "英雄聯盟", playMode: "技術陪玩", rank: "白金", playerCount: 1, duration: 1 }, before);
   assert.equal(result.ok, false);
   assert.match(result.reason, /應使用局計價/);
 });
 
 test("三角洲保底名稱可轉為價目表完整名稱", () => {
   assert.equal(normalizeDeltaService("機密雙護（有保底）"), "機密雙護保底");
+});
+
+test("10/01 起一般單自動報價與六張新價目同步", () => {
+  const apex = getGeneralOrderAutoQuote({ category: "apex", itemLabel: "技術陪玩", rank: "白金", playerCount: 2, duration: 1.5 }, effective);
+  assert.equal(apex.quote.total, 990);
+  const lol = getGeneralOrderAutoQuote({ category: "lol", itemLabel: "英雄聯盟", playMode: "娛樂", rank: "娛樂", playerCount: 1, duration: 1.5 }, effective);
+  assert.equal(lol.quote.total, 390);
+  assert.equal(lol.quote.unit, "小時");
+  const delta = getGeneralOrderAutoQuote({ category: "delta", deltaPlatform: "電腦版", deltaMode: "保底單 800w｜雙護", rank: "航天基地", playerCount: 2, rounds: 2 }, effective);
+  assert.equal(delta.quote.total, 1400);
+  assert.equal(delta.quote.unit, "單");
+  const voice = getGeneralOrderAutoQuote({ category: "voice_chat", playMode: "日常聊天", playerCount: 1, duration: 0.5 }, effective);
+  assert.equal(voice.quote.total, 175);
 });

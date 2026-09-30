@@ -36,7 +36,10 @@ function getValorantMappedCompanionRank(serviceType, targetRank) {
 
 function getQuantity(pending) {
   const rounds = Number(pending.rounds || pending.gameCount || 0);
-  if (rounds > 0) return { quantity: rounds, inputUnit: "局" };
+  if (rounds > 0) {
+    const deltaService = String(pending.deltaMode || pending.serviceType || "");
+    return { quantity: rounds, inputUnit: pending.category === "delta" && deltaService.includes("保底單") ? "單" : "局" };
+  }
   const duration = Number(pending.duration || 0);
   if (duration > 0) return { quantity: duration, inputUnit: "小時" };
   const durationMinutes = Number(pending.durationMinutes || 0);
@@ -49,6 +52,7 @@ function getModernInput(pending, quantity) {
   const playerCount = pending.playerCount;
   if (category === "apex") return { game: "apex", serviceType: pending.itemLabel || pending.playMode || pending.serviceType, rankOrMap: pending.rank, playerCount, quantity };
   if (category === "steam") return { game: "steam", platformOrMode: pending.steamCategory || pending.itemLabel, serviceType: "娛樂", rankOrMap: "一般", playerCount, quantity };
+  if (category === "voice_chat") return { game: "voice_chat", serviceType: pending.playMode || pending.serviceType, playerCount, quantity };
   if (category === "lol") return { game: "lol", platformOrMode: pending.itemLabel === "英雄聯盟" ? "召喚峽谷" : pending.itemLabel, serviceType: pending.playMode || pending.serviceType, rankOrMap: pending.rank, playerCount, quantity };
   if (category === "delta") return { game: "delta", platformOrMode: pending.deltaPlatform || pending.itemLabel, serviceType: normalizeDeltaService(pending.deltaMode || pending.serviceType), rankOrMap: pending.rank, playerCount, quantity };
   if (category === "valorant") {
@@ -75,10 +79,11 @@ function getLegacyInput(pending, quantity) {
   throw new Error("目前表單資料不足以套用自動價目表");
 }
 
-function getGeneralOrderAutoQuote(pending = {}) {
+function getGeneralOrderAutoQuote(pending = {}, pricingDate = new Date()) {
   try {
     const { quantity, inputUnit } = getQuantity(pending);
     const input = pending.category ? getModernInput(pending, quantity) : getLegacyInput(pending, quantity);
+    input.pricingDate = pricingDate;
     const quote = calculateSelfServicePrice(input);
     if (quote.unit !== inputUnit) throw new Error(`此組合應使用${quote.unit}計價，但訂單填寫的是${inputUnit}`);
     return { ok: true, input, quote };

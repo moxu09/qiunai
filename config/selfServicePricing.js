@@ -122,6 +122,34 @@ const PRICES = {
 };
 
 const VALORANT_PRICING_2026_10_EFFECTIVE_AT = Date.parse("2026-09-30T16:00:00.000Z");
+const OCTOBER_PRICING_EFFECTIVE_AT = VALORANT_PRICING_2026_10_EFFECTIVE_AT;
+const PRICES_2026_10 = {
+  apex: {
+    general: { entertain: 280, skill: 300, god: 340 },
+    gold: { entertain: 280, skill: 310, god: 350 },
+    platinum: { entertain: 300, skill: 330, god: 370 },
+    diamond: { skill: 350, god: 390 },
+    master: { god: 410 },
+    predator: { god: 450 },
+  },
+  lol: {
+    general: { entertain: 260, skill: 270, god: 290 },
+    platinum: { entertain: 270, skill: 290, god: 320 },
+    emerald: { skill: 320, god: 340 },
+    diamond: { skill: 340, god: 380 },
+    master: { skill: 360, god: 420 },
+    grandmaster: { skill: 390, god: 470 },
+    challenger: { god: 520 },
+  },
+  tft: {
+    general: { entertain: 270, skill: 290 },
+    platinum: { entertain: 290, skill: 320 },
+    emerald: { skill: 340 },
+    diamond: { skill: 360 },
+    master: { skill: 370 },
+    grandmaster: { skill: 380 },
+  },
+};
 const VALORANT_PRICES_2026_10 = {
   gold: { entertain: [280, "小時"], ascendant: [300, "小時"], immortal: [320, "小時"], radiant: [340, "小時"], topRadiant: [360, "小時"] },
   platinum: { entertain: [300, "小時"], ascendant: [240, "局"], immortal: [250, "局"], radiant: [260, "局"], topRadiant: [280, "局"] },
@@ -138,7 +166,13 @@ function getPricingTimestamp(value = new Date()) {
 }
 
 function isOctoberValorantPricingActive(value = new Date()) {
-  return getPricingTimestamp(value) >= VALORANT_PRICING_2026_10_EFFECTIVE_AT;
+  return getPricingTimestamp(value) >= OCTOBER_PRICING_EFFECTIVE_AT;
+}
+
+function getActivePrices(game, value = new Date()) {
+  return isOctoberValorantPricingActive(value)
+    ? PRICES_2026_10[game] || PRICES[game]
+    : PRICES[game];
 }
 
 function getActiveValorantPrices(value = new Date()) {
@@ -155,13 +189,50 @@ const DELTA_SERVICE_OPTIONS = [
   { label: "猛攻護航保底", value: "猛攻護航保底", key: "assault_guaranteed", price: 1100 },
 ];
 
-function getDeltaServiceOption(value) {
-  const target = String(value || "").trim();
-  return DELTA_SERVICE_OPTIONS.find((option) => option.value === target) || null;
+const DELTA_SERVICE_OPTIONS_2026_10 = [
+  ...[
+    ["普通", [300, 350, 380, 400]],
+    ["機密", [320, 380, 410, 450]],
+    ["絕密", [350, 450, 500, 550]],
+  ].flatMap(([mode, prices]) =>
+    ["娛樂", "新人", "資深", "核心"].map((level, index) => ({
+      label: `${mode}｜${level}`,
+      value: `${mode}｜${level}`,
+      key: `${mode}_${level}`,
+      price: prices[index],
+      unit: "小時",
+    })),
+  ),
+  ...[
+    ["800w", 700],
+    ["1200w", 1000],
+    ["1688w", 1400],
+    ["2500w", 2000],
+  ].map(([target, price]) => ({
+    label: `保底單 ${target}｜雙護`,
+    value: `保底單 ${target}｜雙護`,
+    key: `guaranteed_${target}`,
+    price,
+    unit: "單",
+    fixedPlayerCount: 2,
+    pricePerOrder: true,
+  })),
+];
+
+function getActiveDeltaServiceOptions(value = new Date()) {
+  return isOctoberValorantPricingActive(value)
+    ? DELTA_SERVICE_OPTIONS_2026_10
+    : DELTA_SERVICE_OPTIONS;
 }
 
-function getDeltaFixedPlayerCount(value) {
-  return getDeltaServiceOption(value)?.value.includes("雙護") ? 2 : null;
+function getDeltaServiceOption(value, pricingDate) {
+  const target = String(value || "").trim();
+  return getActiveDeltaServiceOptions(pricingDate).find((option) => option.value === target) || null;
+}
+
+function getDeltaFixedPlayerCount(value, pricingDate) {
+  const option = getDeltaServiceOption(value, pricingDate);
+  return option?.fixedPlayerCount || (option?.value.includes("雙護") ? 2 : null);
 }
 
 function positiveNumber(value, label) {
@@ -172,12 +243,12 @@ function positiveNumber(value, label) {
   return number;
 }
 
-function calculateTablePrice(game, rankText, typeText, quantity, playerCount) {
+function calculateTablePrice(game, rankText, typeText, quantity, playerCount, pricingDate) {
   const rank = match(rankText, RANK_ALIASES[game]);
   const type = match(typeText, TYPE_ALIASES);
   if (!rank) throw new Error("段位不在目前自動報價範圍內");
   if (!type) throw new Error("類型請填娛樂、技術或大神");
-  const unitPrice = PRICES[game]?.[rank]?.[type];
+  const unitPrice = getActivePrices(game, pricingDate)?.[rank]?.[type];
   if (!unitPrice) throw new Error("目前價目表沒有這個段位與類型的組合");
   return { unitPrice, total: unitPrice * quantity * playerCount, unit: "小時" };
 }
@@ -219,15 +290,19 @@ function calculateSelfServicePrice(input) {
     if (!Number.isInteger(quantity * 2)) {
       throw new Error("語音聊天時數請以 0.5 小時為單位");
     }
-    throw new Error("語音聊天尚缺自動報價，已轉客服正式報價");
+    if (!isOctoberValorantPricingActive(input.pricingDate)) {
+      throw new Error("語音聊天尚缺自動報價，已轉客服正式報價");
+    }
+    return { unitPrice: 350, total: 350 * quantity * count, unit: "小時", quantity, playerCount: count };
   }
 
   if (game === "apex") {
-    return { ...calculateTablePrice("apex", input.rankOrMap, input.serviceType, quantity, count), quantity, playerCount: count };
+    return { ...calculateTablePrice("apex", input.rankOrMap, input.serviceType, quantity, count, input.pricingDate), quantity, playerCount: count };
   }
 
   if (game === "steam") {
-    return { unitPrice: 260, total: 260 * quantity * count, unit: "小時", quantity, playerCount: count };
+    const unitPrice = isOctoberValorantPricingActive(input.pricingDate) ? 280 : 260;
+    return { unitPrice, total: unitPrice * quantity * count, unit: "小時", quantity, playerCount: count };
   }
 
   if (game === "delta") {
@@ -236,14 +311,27 @@ function calculateSelfServicePrice(input) {
       ["mobile", ["手機", "手機版", "mobile"]],
     ]);
     if (!platform) throw new Error("三角洲平台請填電腦或手機");
-    const serviceOption = getDeltaServiceOption(input.serviceType);
+    const serviceOption = getDeltaServiceOption(input.serviceType, input.pricingDate);
     if (!serviceOption) {
       throw new Error(
-        `三角洲項目請輸入完整名稱：${DELTA_SERVICE_OPTIONS.map(({ value }) => value).join("、")}`,
+        `三角洲項目請輸入完整名稱：${getActiveDeltaServiceOptions(input.pricingDate).map(({ value }) => value).join("、")}`,
       );
     }
     if (!String(input.rankOrMap || "").trim()) throw new Error("三角洲必須填寫地圖");
-    return { unitPrice: serviceOption.price, total: serviceOption.price * quantity * count, unit: "小時", quantity, playerCount: count, platform };
+    if (serviceOption.fixedPlayerCount && count !== serviceOption.fixedPlayerCount) {
+      throw new Error(`此三角洲項目固定需要 ${serviceOption.fixedPlayerCount} 位陪陪`);
+    }
+    if (serviceOption.unit === "單" && !Number.isInteger(quantity)) {
+      throw new Error("三角洲保底單數必須是整數");
+    }
+    return {
+      unitPrice: serviceOption.price,
+      total: serviceOption.price * quantity * (serviceOption.pricePerOrder ? 1 : count),
+      unit: serviceOption.unit || "小時",
+      quantity,
+      playerCount: count,
+      platform,
+    };
   }
 
   if (game === "lol") {
@@ -254,18 +342,23 @@ function calculateSelfServicePrice(input) {
     ]);
     if (mode === "aram") {
       const type = match(input.serviceType, TYPE_ALIASES);
-      const unitPrice = { entertain: 260, skill: 340, god: 400 }[type];
+      const unitPrice = (isOctoberValorantPricingActive(input.pricingDate)
+        ? { entertain: 300, skill: 350, god: 400 }
+        : { entertain: 260, skill: 340, god: 400 })[type];
       if (!unitPrice) throw new Error("ARAM 類型請填娛樂、技術或大神");
       return { unitPrice, total: unitPrice * quantity * count, unit: "小時", quantity, playerCount: count, mode };
     }
     if (mode === "tft") {
       if (!Number.isInteger(quantity)) throw new Error("聯盟戰棋局數必須是整數");
-      return { ...calculateTablePrice("tft", input.rankOrMap, input.serviceType, quantity, count), unit: "局", quantity, playerCount: count, mode };
+      return { ...calculateTablePrice("tft", input.rankOrMap, input.serviceType, quantity, count, input.pricingDate), unit: "局", quantity, playerCount: count, mode };
     }
     if (mode === "lol") {
-      if (!Number.isInteger(quantity)) throw new Error("召喚峽谷局數必須是整數");
-      const result = calculateTablePrice("lol", input.rankOrMap, input.serviceType, quantity, count);
-      return { ...result, unit: "局", quantity, playerCount: count, mode };
+      const isHourlyGeneralEntertain = isOctoberValorantPricingActive(input.pricingDate)
+        && match(input.rankOrMap, RANK_ALIASES.lol) === "general"
+        && match(input.serviceType, TYPE_ALIASES) === "entertain";
+      if (!isHourlyGeneralEntertain && !Number.isInteger(quantity)) throw new Error("召喚峽谷局數必須是整數");
+      const result = calculateTablePrice("lol", input.rankOrMap, input.serviceType, quantity, count, input.pricingDate);
+      return { ...result, unit: isHourlyGeneralEntertain ? "小時" : "局", quantity, playerCount: count, mode };
     }
     throw new Error("英雄聯盟模式請填召喚峽谷、ARAM 或聯盟戰棋");
   }
@@ -336,43 +429,47 @@ function getCompanyAiPricingCatalog() {
     apex: {
       unit: "小時",
       typeKeys: { entertain: "娛樂", skill: "技術", god: "大神" },
-      prices: PRICES.apex,
+      prices: getActivePrices("apex"),
     },
     lol: {
       summonRift: {
         unit: "局",
         typeKeys: { entertain: "娛樂", skill: "技術", god: "大神" },
-        prices: PRICES.lol,
+        prices: getActivePrices("lol"),
       },
       aram: {
         unit: "小時",
-        prices: { entertain: 260, skill: 340, god: 400 },
+        prices: isOctoberValorantPricingActive()
+          ? { entertain: 300, skill: 350, god: 400 }
+          : { entertain: 260, skill: 340, god: 400 },
       },
       tft: {
         unit: "局",
         typeKeys: { entertain: "娛樂", skill: "技術" },
-        prices: PRICES.tft,
+        prices: getActivePrices("tft"),
       },
     },
     delta: {
       unit: "小時",
-      services: DELTA_SERVICE_OPTIONS.map(({ value, price }) => ({
+      services: getActiveDeltaServiceOptions().map(({ value, price, unit, fixedPlayerCount }) => ({
         name: value,
         price,
-        fixedPlayerCount: value.includes("雙護") ? 2 : null,
+        unit: unit || "小時",
+        fixedPlayerCount: fixedPlayerCount || (value.includes("雙護") ? 2 : null),
       })),
     },
-    steam: { unit: "小時", price: 260 },
+    steam: { unit: "小時", price: isOctoberValorantPricingActive() ? 280 : 260 },
     voiceChat: {
       unit: "小時",
       minimumBillingUnit: 0.5,
-      pricing: "由客服依聊天需求正式報價",
+      pricing: isOctoberValorantPricingActive() ? 350 : "由客服依聊天需求正式報價",
     },
   };
 }
 
 module.exports = {
   DELTA_SERVICE_OPTIONS,
+  getActiveDeltaServiceOptions,
   GAME_OPTIONS,
   calculateSelfServicePrice,
   getDeltaFixedPlayerCount,
@@ -382,4 +479,6 @@ module.exports = {
   getActiveValorantPrices,
   isOctoberValorantPricingActive,
   VALORANT_PRICING_2026_10_EFFECTIVE_AT,
+  OCTOBER_PRICING_EFFECTIVE_AT,
+  getActivePrices,
 };

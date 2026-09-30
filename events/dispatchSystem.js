@@ -33,7 +33,7 @@ const {
   normalizeSalaryDeductionPaymentMethod,
 } = require("../utils/salaryDeduction");
 const {
-  DELTA_SERVICE_OPTIONS,
+  getActiveDeltaServiceOptions,
   GAME_OPTIONS: SELF_SERVICE_GAME_OPTIONS,
   calculateSelfServicePrice,
   getDeltaFixedPlayerCount,
@@ -951,15 +951,16 @@ async function upsertGameOrderPanel(panel) {
       text: "深夜不關燈｜We Are Still Here",
     })
     .setTimestamp();
-  const scheduledImageFile =
-    panel.panelName === "valorant" && isOctoberValorantPricingActive()
-      ? "valorant-pricing-2026-10.jpg"
-      : panel.imageFile;
-  const imageFiles = Array.isArray(panel.imageFiles)
-    ? panel.imageFiles
-    : scheduledImageFile
-      ? [scheduledImageFile]
-      : [];
+  const octoberImages = {
+    valorant: ["valorant-pricing-2026-10.jpg"],
+    delta: ["delta-pricing-2026-10.png"],
+    apex: ["apex-pricing-2026-10.png"],
+    lol: ["lol-pricing-2026-10.png", "aram-pricing-2026-10.png", "tft-pricing-2026-10.png"],
+    steam: ["steam-pricing-2026-10.png"],
+  };
+  const imageFiles = isOctoberValorantPricingActive() && octoberImages[panel.panelName]
+    ? octoberImages[panel.panelName]
+    : Array.isArray(panel.imageFiles) ? panel.imageFiles : panel.imageFile ? [panel.imageFile] : [];
   const files = imageFiles.map((imageFile) => ({
     attachment: path.join(PANEL_ASSET_DIR, imageFile),
     name: imageFile,
@@ -1039,12 +1040,26 @@ function startPricingPanelScheduler() {
     activePricingPanelVersion = version;
     try {
       await sendGameOrderPanels();
-      console.log(`[價目表排程] 已切換特戰價目表：${version}`);
+      console.log(`[價目表排程] 已切換秋奈價目表：${version}`);
     } catch (error) {
       activePricingPanelVersion = null;
       console.error("[價目表排程] 更新面板失敗", error);
     }
   }, 60 * 1000);
+  const untilMidnight = Date.parse("2026-09-30T16:00:00.000Z") - Date.now();
+  if (untilMidnight > 0) {
+    const midnightTimer = setTimeout(async () => {
+      try {
+        await sendGameOrderPanels();
+        activePricingPanelVersion = "2026-10-01";
+        console.log("[價目表排程] 2026/10/01 台灣時間 00:00 已切換秋奈價目表");
+      } catch (error) {
+        activePricingPanelVersion = null;
+        console.error("[價目表排程] 午夜切換失敗，稍後重試", error);
+      }
+    }, untilMidnight);
+    midnightTimer.unref?.();
+  }
   timer.unref?.();
   return timer;
 }
@@ -1934,10 +1949,10 @@ async function openSelfServiceRequirementModal(interaction) {
         [
           "service_type",
           "項目（請輸入完整名稱）",
-          DELTA_SERVICE_OPTIONS.map(({ value }) => value).join("、"),
+          getActiveDeltaServiceOptions().map(({ value }) => value).join("、"),
         ],
         ["rank_map", "地圖（僅三角洲必填）", "請輸入地圖"],
-        ["quantity", "需求時數", "例如：1、1.5、2"],
+        ["quantity", "需求時數／保底單數", "例如：1、1.5、2；保底單填整數"],
       ]
     : game === "lol"
       ? [
@@ -1945,7 +1960,7 @@ async function openSelfServiceRequirementModal(interaction) {
           ["service_type", "類型", "娛樂、技術或大神"],
           ["rank_map", "目前段位", "例如：白金、鑽石；ARAM 可填一般"],
           ["player_count", "需求陪陪人數", "1～8"],
-          ["quantity", "時數 / 局數", "ARAM 按小時；峽谷、戰棋按局"],
+          ["quantity", "時數 / 局數", "依價目表：一般娛樂按小時，其餘峽谷及戰棋按局"],
         ]
       : game === "steam"
         ? [
@@ -2113,14 +2128,14 @@ async function submitSelfServiceRequirement(interaction) {
     });
   }
   if (pending.game === "delta") {
-    const deltaService = DELTA_SERVICE_OPTIONS.find(
+    const deltaService = getActiveDeltaServiceOptions().find(
       ({ value }) => value === String(input.serviceType || "").trim(),
     );
     if (!deltaService) {
       return interaction.editReply({
         content:
           "❌ 三角洲項目必須輸入完整字符，請重新開始並輸入以下其中一項：\n" +
-          DELTA_SERVICE_OPTIONS.map(({ value }) => `・${value}`).join("\n"),
+          getActiveDeltaServiceOptions().map(({ value }) => `・${value}`).join("\n"),
       });
     }
     const fixedPlayerCount = getDeltaFixedPlayerCount(input.serviceType);
@@ -3934,7 +3949,9 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
   const deltaModeMenu = new StringSelectMenuBuilder()
     .setCustomId(`delta_mode_${flowId}`)
     .setPlaceholder("請選擇三角洲服務內容")
-    .addOptions([
+    .addOptions(isOctoberValorantPricingActive() ? getActiveDeltaServiceOptions().map(({ label, value, price, unit }) => ({
+      label, value, description: `NT$${price}／${unit}`,
+    })) : [
       {
         label: "娛樂陪玩",
         value: "娛樂陪玩",
@@ -3970,6 +3987,8 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
   const isDeltaOrder = initial.category === "delta";
   const isLolRoundOrder =
     initial.category === "lol" && initial.itemLabel !== "ARAM";
+  const hasMixedQuantityUnits = isOctoberValorantPricingActive() &&
+    (isLolRoundOrder || isDeltaOrder);
   const isApexOrder = initial.category === "apex";
   const isLolOrder = initial.category === "lol";
   const buttonRow = new ActionRowBuilder().addComponents(
@@ -4013,9 +4032,11 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
     new ActionRowBuilder().addComponents(genderMenu),
     ...(initial.category === "valorant"
       ? []
+      : hasMixedQuantityUnits
+      ? [new ActionRowBuilder().addComponents(roundsMenu), new ActionRowBuilder().addComponents(durationMenu)]
       : isLolRoundOrder
-      ? [new ActionRowBuilder().addComponents(roundsMenu)]
-      : [new ActionRowBuilder().addComponents(durationMenu)]),
+        ? [new ActionRowBuilder().addComponents(roundsMenu)]
+        : [new ActionRowBuilder().addComponents(durationMenu)]),
   ];
 
   await channel.send({
@@ -4030,7 +4051,7 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
             `請依序選擇${isDeltaOrder ? "服務內容、" : ""}${
               isApexOrder ? "段位、" : ""
             }${isLolOrder ? "段位 / 娛樂、" : ""}人數、性別偏好與${
-              isLolRoundOrder ? "局數" : "時間"
+              hasMixedQuantityUnits ? "價目表對應的時數／局數／保底單數" : isLolRoundOrder ? "局數" : "時間"
             }。\n` +
             `有特殊需求可以按「填寫備註 / 自訂需求」。\n\n` +
             `填寫完成後請按「送出訂單」，系統會先依現行價目表自動報價；無法計算時才會轉交客服。`
@@ -6319,7 +6340,9 @@ async function showDeltaStart(channel, flowId) {
   const modeMenu = new StringSelectMenuBuilder()
     .setCustomId(`delta_mode_${flowId}`)
     .setPlaceholder("請選擇三角洲玩法")
-    .addOptions([
+    .addOptions(isOctoberValorantPricingActive() ? getActiveDeltaServiceOptions().map(({ label, value, price, unit }) => ({
+      label, value, description: `NT$${price}／${unit}`,
+    })) : [
       { label: "基礎陪護", value: "基礎陪護" },
       { label: "機密雙護", value: "機密雙護" },
       { label: "機密雙護（保底）", value: "機密雙護（保底）" },
@@ -6680,6 +6703,11 @@ function getOrderItemOptions(game) {
   }
 
   if (game === "三角洲行動") {
+    if (isOctoberValorantPricingActive()) {
+      return getActiveDeltaServiceOptions().map(({ label, value, price, unit }) => ({
+        label, value, description: `NT$${price}／${unit}`,
+      }));
+    }
     return [
       {
         label: "機密雙護",
@@ -12535,6 +12563,10 @@ async function handleLolRankSelect(interaction) {
   }
 
   pending.rank = interaction.values[0];
+  if (isOctoberValorantPricingActive()) {
+    pending.rounds = null;
+    pending.duration = null;
+  }
 
   await pendingServiceOrders.set(flowId, pending);
 
@@ -12559,6 +12591,11 @@ async function handleServicePlayerCountSelect(interaction) {
   }
 
   const selectedCount = Number(interaction.values[0]);
+
+  if (isOctoberValorantPricingActive() && pending.category === "delta" &&
+      String(pending.deltaMode || "").includes("保底單") && selectedCount !== 2) {
+    return interaction.editReply({ content: "❌ 這個雙護保底項目固定兩位陪陪，請選 2 位。" });
+  }
 
   if (isValorantEntertainmentSkillOrder(pending) && selectedCount < 2) {
     return interaction.editReply({
@@ -12939,7 +12976,18 @@ async function handleServiceDurationSelect(interaction) {
     });
   }
 
+  if (isOctoberValorantPricingActive()) {
+    if (pending.category === "delta" && String(pending.deltaMode || "").includes("保底單")) {
+      return interaction.editReply({ content: "❌ 這個三角洲保底項目以單數計價，請選擇保底單數。" });
+    }
+    if (pending.category === "lol" && pending.itemLabel !== "ARAM" &&
+        !(pending.rank === "娛樂" && pending.playMode === "娛樂")) {
+      return interaction.editReply({ content: "❌ 此英雄聯盟組合以局數計價；只有一般娛樂 260 元是每小時。" });
+    }
+  }
+
   pending.duration = interaction.values[0];
+  pending.rounds = null;
 
   await pendingServiceOrders.set(flowId, pending);
 
@@ -12969,7 +13017,18 @@ async function handleServiceRoundsSelect(interaction) {
     });
   }
 
+  if (isOctoberValorantPricingActive()) {
+    if (pending.category === "delta" && !String(pending.deltaMode || "").includes("保底單")) {
+      return interaction.editReply({ content: "❌ 此三角洲項目以小時計價，請選擇時間。" });
+    }
+    if (pending.category === "lol" && pending.itemLabel !== "ARAM" &&
+        pending.rank === "娛樂" && pending.playMode === "娛樂") {
+      return interaction.editReply({ content: "❌ 一般娛樂每小時 NT$260，請選擇時間。" });
+    }
+  }
+
   pending.rounds = interaction.values[0];
+  pending.duration = null;
 
   await pendingServiceOrders.set(flowId, pending);
 
@@ -12978,8 +13037,8 @@ async function handleServiceRoundsSelect(interaction) {
   return interaction.editReply({
     content:
       pending.rounds === "custom"
-        ? "✅ 已選擇自訂局數，請在頻道內告訴客服想要的局數。"
-        : `✅ 已選擇局數：${pending.rounds} 局`,
+        ? `✅ 已選擇自訂${pending.category === "delta" ? "保底單數" : "局數"}，請在頻道內告訴客服數量。`
+        : `✅ 已選擇${pending.category === "delta" ? "保底單數" : "局數"}：${pending.rounds} ${pending.category === "delta" ? "單" : "局"}`,
   });
 }
 
@@ -13027,6 +13086,21 @@ async function handleDeltaModeSelect(interaction) {
   }
 
   pending.deltaMode = interaction.values[0];
+  if (isOctoberValorantPricingActive()) {
+    pending.duration = null;
+    pending.rounds = null;
+    if (pending.deltaMode.includes("保底單")) {
+      pending.playerCount = 2;
+      const countMenu = new StringSelectMenuBuilder()
+        .setCustomId(`service_rounds_${flowId}`)
+        .setPlaceholder("請選擇保底單數")
+        .addOptions([1, 2, 3, 4].map((count) => ({ label: `${count} 單`, value: String(count) })));
+      await interaction.channel.send({
+        content: "這個雙護保底項目依單數計價，固定兩位陪陪；請選擇保底單數。",
+        components: [new ActionRowBuilder().addComponents(countMenu)],
+      });
+    }
+  }
 
   pending.serviceType = `三角洲行動｜${
     pending.deltaPlatform || pending.itemLabel || "未選平台"
