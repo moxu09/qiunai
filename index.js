@@ -45,6 +45,11 @@ const { createAllianceMembership } = require("./utils/allianceMembership");
 const { createJkopayService } = require("./utils/jkopay");
 const { createEcpayService } = require("./utils/ecpay");
 const { createIchiban } = require("./utils/ichiban");
+const {
+  buildTipReceiptData,
+  buildOrderReceiptData,
+  renderReceiptPng,
+} = require("./utils/receiptImages");
 const { isEcpayAtmAvailable } = require("./utils/ecpayAtmSchedule");
 const {
   createDeviceAuditReviewerSync,
@@ -800,6 +805,15 @@ async function sendTipBroadcastMessage(channel, payload, tipData, suffix) {
   return null;
 }
 
+async function getReceiptDisplayName(userId, guild) {
+  const id = String(userId || "").trim();
+  if (!id) return "未提供";
+  const member = await guild?.members?.fetch(id).catch(() => null);
+  if (member?.displayName) return member.displayName;
+  const user = await client.users.fetch(id).catch(() => null);
+  return user?.globalName || user?.username || id;
+}
+
 async function sendTipBroadcastSafely(tipData) {
   if (!tipData?.broadcastEnabled || tipData.crownOrder) return;
 
@@ -867,16 +881,34 @@ async function sendTipBroadcastSafely(tipData) {
       }
     }
     if (sentCount) {
-      await sendTipBroadcastMessage(
-        channel,
-        {
-          content:
-            "**感謝老闆對秋奈陪玩及陪陪的喜愛 <:I_cn_b02:1221687963621265451>**",
-          allowedMentions: { parse: [] },
-        },
-        tipData,
-        "thanks",
-      );
+      const thanksPayload = {
+        content: "**感謝老闆對秋奈陪玩及陪陪的喜愛 <:I_cn_b02:1221687963621265451>**",
+        allowedMentions: { parse: [] },
+      };
+      try {
+        const staffNames = await Promise.all(allocations.map(({ staffId }) =>
+          getReceiptDisplayName(staffId, channel.guild),
+        ));
+        const payer = tipData.broadcastAnonymous
+          ? "匿名闆闆"
+          : await getReceiptDisplayName(tipData.tipperId, channel.guild);
+        thanksPayload.files = [{
+          attachment: renderReceiptPng(buildTipReceiptData({
+            tipData, allocations, staffNames, payerName: payer,
+          })),
+          name: "qiunai-tip-receipt.png",
+        }];
+      } catch (error) {
+        console.error("[打賞收據出圖失敗] 已保留原文字播報", error);
+      }
+      try {
+        await sendTipBroadcastMessage(channel, thanksPayload, tipData, "thanks");
+      } catch (error) {
+        if (!thanksPayload.files) throw error;
+        console.error("[打賞收據傳送失敗] 改送原文字播報", error);
+        delete thanksPayload.files;
+        await sendTipBroadcastMessage(channel, thanksPayload, tipData, "thanks");
+      }
     }
     if (failures.length) {
       console.error(
@@ -4367,6 +4399,8 @@ async function handleJkopayServicePaid({ payment, transaction }) {
     allocations,
     item: allocations.map((item) => item.item).join("、"),
     amount: allocations[0]?.amount || 0,
+    paymentMethod: `${paymentLabel}支付`,
+    createdAt: payment.paid_at || new Date().toISOString(),
     broadcastEnabled: Boolean(metadata.broadcastEnabled),
     broadcastAnonymous: Boolean(metadata.broadcastAnonymous),
     crownOrder: metadata.crownOrder || null,
@@ -8709,7 +8743,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           flags: 64,
         });
         await finalizeReviewPrompt(interaction, customerId, anonymous);
-        await interaction.channel.send({
+        const completionPayload = {
           embeds: [
             new EmbedBuilder()
               .setColor(QIUNAI_WATER_BLUE)
@@ -8722,7 +8756,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
               )
               .setTimestamp(),
           ],
-        });
+        };
+        try {
+          const [payer, ...players] = await Promise.all([
+            getReceiptDisplayName(order.customer_id, interaction.guild),
+            ...assignedPlayers.map((id) => getReceiptDisplayName(id, interaction.guild)),
+          ]);
+          completionPayload.files = [{
+            attachment: renderReceiptPng(buildOrderReceiptData({
+              order, payerName: payer, playerNames: players, amount: paidTotal,
+            })),
+            name: "qiunai-order-receipt.png",
+          }];
+        } catch (error) {
+          console.error("[訂單收據出圖失敗] 已保留原訂單完成訊息", error);
+        }
+        try {
+          await interaction.channel.send(completionPayload);
+        } catch (error) {
+          if (!completionPayload.files) throw error;
+          console.error("[訂單收據傳送失敗] 改送原訂單完成訊息", error);
+          delete completionPayload.files;
+          await interaction.channel.send(completionPayload);
+        }
         await publishPositiveReview({
           rating,
           customerId,
