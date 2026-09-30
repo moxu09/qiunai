@@ -71,9 +71,11 @@ test("10/01 起一般單自動報價與六張新價目同步", () => {
   const lol = getGeneralOrderAutoQuote({ category: "lol", itemLabel: "英雄聯盟", playMode: "娛樂", rank: "娛樂", playerCount: 1, duration: 1.5 }, effective);
   assert.equal(lol.quote.total, 390);
   assert.equal(lol.quote.unit, "小時");
-  const delta = getGeneralOrderAutoQuote({ category: "delta", deltaPlatform: "電腦版", deltaMode: "保底單 800w｜雙護", rank: "航天基地", playerCount: 2, rounds: 2 }, effective);
+  const delta = getGeneralOrderAutoQuote({ category: "delta", deltaPlatform: "電腦版", deltaMode: "保底單 800w｜雙護", playerCount: 2, rounds: 2 }, effective);
   assert.equal(delta.quote.total, 1400);
   assert.equal(delta.quote.unit, "單");
+  const deltaHourly = getGeneralOrderAutoQuote({ category: "delta", deltaPlatform: "手機版", deltaMode: "機密｜資深", playerCount: 1, duration: 2 }, effective);
+  assert.equal(deltaHourly.quote.total, 820);
   const voice = getGeneralOrderAutoQuote({ category: "voice_chat", playMode: "日常聊天", playerCount: 1, duration: 0.5 }, effective);
   assert.equal(voice.quote.total, 175);
 });

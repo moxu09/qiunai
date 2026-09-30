@@ -317,7 +317,6 @@ function calculateSelfServicePrice(input) {
         `三角洲項目請輸入完整名稱：${getActiveDeltaServiceOptions(input.pricingDate).map(({ value }) => value).join("、")}`,
       );
     }
-    if (!String(input.rankOrMap || "").trim()) throw new Error("三角洲必須填寫地圖");
     if (serviceOption.fixedPlayerCount && count !== serviceOption.fixedPlayerCount) {
       throw new Error(`此三角洲項目固定需要 ${serviceOption.fixedPlayerCount} 位陪陪`);
     }

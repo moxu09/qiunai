@@ -1951,7 +1951,7 @@ async function openSelfServiceRequirementModal(interaction) {
           "項目（請輸入完整名稱）",
           getActiveDeltaServiceOptions().map(({ value }) => value).join("、"),
         ],
-        ["rank_map", "地圖（僅三角洲必填）", "請輸入地圖"],
+        ["rank_map", "地圖／其他需求", "沒有指定地圖可填無"],
         ["quantity", "需求時數／保底單數", "例如：1、1.5、2；保底單填整數"],
       ]
     : game === "lol"
