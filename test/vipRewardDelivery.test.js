@@ -23,6 +23,14 @@ function createRewardDb() {
   return {
     state,
     operation,
+    from(table) {
+      assert.equal(table,'bot_vip_reward_operations');
+      let update;
+      const q={update(value){update=value;return q;},eq(){return q;},is(){return q;},select(){return q;},
+        single:async()=>({data:{notification_channel_id:operation.notification_channel_id},error:null}),
+        then(ok,no){if(update&&!operation.notification_channel_id)Object.assign(operation,update);return Promise.resolve({error:null}).then(ok,no);}};
+      return q;
+    },
     async rpc(name, args) {
       if (name === "qiunai_apply_vip_level_reward") {
         state.applyCalls += 1;
@@ -79,6 +87,18 @@ const rewardParams = {
   p_trigger_amount: 1000,
   p_reward_coupons: [{ name: "九折券", count: 1 }],
 };
+
+test('升級來源頻道持久化，重啟後無呼叫參數也回原臨時頻道且獎勵僅發一次',async()=>{
+ const db=createRewardDb();let calls=0;
+ const first=createVipRewardCoordinator({supabase:db,notificationChannelId:'original-ticket',deliver:async reward=>{
+  assert.equal(reward.notification_channel_id,'original-ticket');calls++;throw Error('Discord offline');
+ }});
+ await assert.rejects(first.applyAndDeliver(rewardParams),/Discord offline/);
+ assert.equal(db.operation.notification_channel_id,'original-ticket');
+ const retry=createVipRewardCoordinator({supabase:db,deliver:async reward=>{assert.equal(reward.notification_channel_id,'original-ticket');calls++;}});
+ await retry.deliverPersisted(db.operation);
+ assert.equal(calls,2);assert.equal(db.state.rewardAsdApplications,1);assert.equal(db.state.couponApplications,1);
+});
 
 test("VIP reward 在 DB 完成後程序中斷，重試不再增加 ASD 或優惠券", async () => {
   const db = createRewardDb();

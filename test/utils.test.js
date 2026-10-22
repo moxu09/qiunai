@@ -53,6 +53,8 @@ const {
   getValorantCompanionOptions,
   getValorantExpectedUnit,
   getActiveValorantPrices,
+  getActivePrices,
+  getActiveDeltaServiceOptions,
   isOctoberValorantPricingActive,
 } = require("../config/selfServicePricing");
 const {
@@ -188,6 +190,7 @@ test("歷史互動錯誤的防護仍保留", () => {
 });
 
 test("自助下單依現行價目表計算多人與時數", () => {
+  const legacyPricingDate = "2026-09-30T15:59:59.999Z";
   assert.equal(
     GAME_OPTIONS.some(({ value, label }) => value === "voice_chat" && label === "語音聊天"),
     true,
@@ -196,9 +199,9 @@ test("自助下單依現行價目表計算多人與時數", () => {
     DELTA_SERVICE_OPTIONS.map(({ value }) => value),
     ["娛樂陪玩", "機密雙護", "機密雙護保底", "猛攻護航", "猛攻護航保底"],
   );
-  assert.equal(getDeltaFixedPlayerCount("機密雙護"), 2);
-  assert.equal(getDeltaFixedPlayerCount("機密雙護保底"), 2);
-  assert.equal(getDeltaFixedPlayerCount("猛攻護航"), null);
+  assert.equal(getDeltaFixedPlayerCount("機密雙護", legacyPricingDate), 2);
+  assert.equal(getDeltaFixedPlayerCount("機密雙護保底", legacyPricingDate), 2);
+  assert.equal(getDeltaFixedPlayerCount("猛攻護航", legacyPricingDate), null);
   assert.throws(
     () => calculateSelfServicePrice({
       game: "delta",
@@ -207,31 +210,32 @@ test("自助下單依現行價目表計算多人與時數", () => {
       rankOrMap: "航天基地",
       playerCount: "2",
       quantity: "1",
+      pricingDate: legacyPricingDate,
     }),
     /請輸入完整名稱/,
   );
   assert.deepEqual(
-    getValorantCompanionOptions("黃金以下").map(({ value }) => value),
+    getValorantCompanionOptions("黃金以下", legacyPricingDate).map(({ value }) => value),
     ["娛樂", "黃金含以下", "白金", "鑽石", "超凡", "神話", "輻能", "頂輻"],
   );
   assert.deepEqual(
-    getValorantCompanionOptions("N/A").map(({ value }) => value),
+    getValorantCompanionOptions("N/A", legacyPricingDate).map(({ value }) => value),
     ["娛樂", "黃金含以下", "白金", "鑽石", "超凡", "神話", "輻能", "頂輻"],
   );
   assert.deepEqual(
-    getValorantCompanionOptions("白金").map(({ value }) => value),
+    getValorantCompanionOptions("白金", legacyPricingDate).map(({ value }) => value),
     ["娛樂", "白金", "鑽石", "超凡", "神話", "輻能", "頂輻"],
   );
   assert.deepEqual(
-    getValorantCompanionOptions("鑽石").map(({ value }) => value),
+    getValorantCompanionOptions("鑽石", legacyPricingDate).map(({ value }) => value),
     ["娛樂", "鑽石", "超凡", "神話", "輻能", "頂輻"],
   );
   assert.deepEqual(
-    getValorantCompanionOptions("超凡").map(({ value }) => value),
+    getValorantCompanionOptions("超凡", legacyPricingDate).map(({ value }) => value),
     ["娛樂", "超凡", "神話", "輻能", "頂輻"],
   );
   assert.deepEqual(
-    getValorantCompanionOptions("神話1至2").map(({ value }) => value),
+    getValorantCompanionOptions("神話1至2", legacyPricingDate).map(({ value }) => value),
     ["神話", "輻能", "頂輻"],
   );
   assert.throws(
@@ -243,6 +247,7 @@ test("自助下單依現行價目表計算多人與時數", () => {
         rankOrMap: "白金",
         playerCount: "1",
         quantity: "1",
+        pricingDate: legacyPricingDate,
       }),
     /不可低於要打的段位/,
   );
@@ -255,6 +260,7 @@ test("自助下單依現行價目表計算多人與時數", () => {
         rankOrMap: "鑽石",
         playerCount: "1",
         quantity: "1",
+        pricingDate: legacyPricingDate,
       }),
     /沒有這個特戰段位/,
   );
@@ -282,6 +288,7 @@ test("自助下單依現行價目表計算多人與時數", () => {
       rankOrMap: "娛樂",
       playerCount: "1",
       quantity: "1",
+      pricingDate: legacyPricingDate,
     }),
     { unitPrice: 250, total: 250, unit: "小時", quantity: 1, playerCount: 1 },
   );
@@ -293,6 +300,7 @@ test("自助下單依現行價目表計算多人與時數", () => {
       rankOrMap: "頂輻",
       playerCount: "2",
       quantity: "3",
+      pricingDate: legacyPricingDate,
     }),
     { unitPrice: 295, total: 1770, unit: "局", quantity: 3, playerCount: 2 },
   );
@@ -304,6 +312,7 @@ test("自助下單依現行價目表計算多人與時數", () => {
       rankOrMap: "白金",
       playerCount: "2",
       quantity: "1.5",
+      pricingDate: legacyPricingDate,
     }),
     { unitPrice: 310, total: 930, unit: "小時", quantity: 1.5, playerCount: 2 },
   );
@@ -315,6 +324,7 @@ test("自助下單依現行價目表計算多人與時數", () => {
       rankOrMap: "航天基地",
       playerCount: "1",
       quantity: "2",
+      pricingDate: legacyPricingDate,
     }).total,
     2200,
   );
@@ -340,6 +350,7 @@ test("語音聊天可從自助下單填寫，並依半小時單位轉客服正�
       rankOrMap: "無",
       playerCount: "1",
       quantity: "1.5",
+      pricingDate: "2026-09-30T15:59:59.999Z",
     }),
     /尚缺自動報價/,
   );
@@ -378,6 +389,64 @@ test("特戰新價目表於 2026/10/1 台灣時間自動生效", () => {
   const dispatchSource = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
   assert.match(dispatchSource, /startPricingPanelScheduler/);
   assert.match(dispatchSource, /valorant-pricing-2026-10\.jpg/);
+});
+
+test("六張新價目表與自動報價在台灣時間 10/01 00:00 同步切換", () => {
+  const before = "2026-09-30T15:59:59.999Z";
+  const effective = "2026-09-30T16:00:00.000Z";
+  assert.equal(getActivePrices("apex", before).general.entertain, 260);
+  assert.deepEqual(getActivePrices("apex", effective), {
+    general: { entertain: 280, skill: 300, god: 340 },
+    gold: { entertain: 280, skill: 310, god: 350 },
+    platinum: { entertain: 300, skill: 330, god: 370 },
+    diamond: { skill: 350, god: 390 },
+    master: { god: 410 }, predator: { god: 450 },
+  });
+  assert.deepEqual(getActivePrices("lol", effective), {
+    general: { entertain: 260, skill: 270, god: 290 },
+    platinum: { entertain: 270, skill: 290, god: 320 },
+    emerald: { skill: 320, god: 340 }, diamond: { skill: 340, god: 380 },
+    master: { skill: 360, god: 420 }, grandmaster: { skill: 390, god: 470 },
+    challenger: { god: 520 },
+  });
+  assert.deepEqual(getActivePrices("tft", effective), {
+    general: { entertain: 270, skill: 290 },
+    platinum: { entertain: 290, skill: 320 },
+    emerald: { skill: 340 }, diamond: { skill: 360 },
+    master: { skill: 370 }, grandmaster: { skill: 380 },
+  });
+  const delta = getActiveDeltaServiceOptions(effective);
+  assert.equal(delta.length, 16);
+  assert.deepEqual(delta.slice(0, 4).map(({ price }) => price), [300, 350, 380, 400]);
+  assert.deepEqual(delta.slice(4, 8).map(({ price }) => price), [320, 380, 410, 450]);
+  assert.deepEqual(delta.slice(8, 12).map(({ price }) => price), [350, 450, 500, 550]);
+  assert.deepEqual(delta.slice(12).map(({ price }) => price), [700, 1000, 1400, 2000]);
+  assert.equal(getActiveDeltaServiceOptions(before)[0].price, 280);
+  const base = { playerCount: "1", quantity: "1", pricingDate: effective };
+  assert.equal(calculateSelfServicePrice({ ...base, game: "apex", rankOrMap: "頂獵", serviceType: "大神" }).unitPrice, 450);
+  assert.deepEqual(
+    calculateSelfServicePrice({ ...base, game: "lol", platformOrMode: "峽谷", rankOrMap: "一般", serviceType: "娛樂", quantity: "1.5" }),
+    { unitPrice: 260, total: 390, unit: "小時", quantity: 1.5, playerCount: 1, mode: "lol" },
+  );
+  assert.equal(calculateSelfServicePrice({ ...base, game: "lol", platformOrMode: "ARAM", serviceType: "技術" }).unitPrice, 350);
+  assert.throws(
+    () => calculateSelfServicePrice({ ...base, game: "lol", platformOrMode: "TFT", rankOrMap: "菁英", serviceType: "大神" }),
+    /目前價目表沒有這個段位與類型的組合/,
+  );
+  assert.equal(calculateSelfServicePrice({ ...base, game: "lol", platformOrMode: "TFT", rankOrMap: "宗師", serviceType: "技術" }).unitPrice, 380);
+  assert.equal(calculateSelfServicePrice({ ...base, game: "steam" }).unitPrice, 280);
+  assert.equal(calculateSelfServicePrice({ ...base, game: "voice_chat", quantity: "0.5" }).total, 175);
+  assert.deepEqual(
+    calculateSelfServicePrice({ ...base, game: "delta", platformOrMode: "電腦", serviceType: "保底單 1200w｜雙護", rankOrMap: "航天基地", playerCount: "2", quantity: "2" }),
+    { unitPrice: 1000, total: 2000, unit: "單", quantity: 2, playerCount: 2, platform: "pc" },
+  );
+  assert.equal(
+    calculateSelfServicePrice({ ...base, game: "delta", platformOrMode: "電腦", serviceType: "絕密｜核心", rankOrMap: "航天基地", playerCount: "2" }).total,
+    1100,
+  );
+  for (const name of ["apex", "lol", "delta", "steam", "aram", "tft"]) {
+    assert.equal(fs.existsSync(path.join(__dirname, "..", "assets", "panels", `${name}-pricing-2026-10.png`)), true);
+  }
 });
 
 test("街口支付依官方規格使用 HMAC-SHA256 簽章", () => {
@@ -516,12 +585,12 @@ test("秋奈街口支付合併串接按鈕與交易 QR Code 並保留可用性�
   assert.match(refundMigration, /JKOPAY_ASD_BALANCE_INSUFFICIENT/);
 });
 
-test("街口支付在各付款選單只出現一次且加時可使用月結付款", () => {
+test("街口支付在各付款選單只出現一次，加時使用指定版面且保留舊月結處理", () => {
   const indexSource = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
   const dispatchSource = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
   const menuSlices = [
     ["async function sendPaymentMethodSelect", "async function handleQuotePaymentMethodSelect", "getGeneralOrderPaymentOptions"],
-    ["async function sendExtensionPaymentMethodSelect", "async function handleExtensionPaymentMethodSelect", "getCanonicalPaymentOptions"],
+    ["async function sendExtensionPaymentMethodSelect", "async function handleExtensionPaymentMethodSelect", "getGeneralOrderPaymentOptions"],
     ["function buildTopupPaymentMethodRows", "function prepareTopupCheckout", "getGeneralOrderPaymentOptions"],
     ["async function sendServicePaymentMethodSelect", "function resetServiceCouponSelection", "getGeneralOrderPaymentOptions"],
   ];
@@ -533,7 +602,7 @@ test("街口支付在各付款選單只出現一次且加時可使用月結付�
     getCanonicalPaymentOptions().filter((option) => option.label === "街口支付").length,
     1,
   );
-  assert.match(dispatchSource, /extension_payment_method_[\s\S]*?getCanonicalPaymentOptions\(\{[\s\S]*?includeMonthly: true/);
+  assert.match(dispatchSource, /extension_payment_method_[\s\S]*?getGeneralOrderPaymentOptions\(\{/);
   assert.match(dispatchSource, /payExtensionByMonthly[\s\S]*?customer_extension_monthly/);
   assert.match(indexSource, /const jkopayPayment = paymentMethod === "街口支付"/);
   assert.doesNotMatch(`${indexSource}\n${dispatchSource}`, /label: "刷卡"|value: "刷卡"|pcpay\.tw/);
@@ -1316,6 +1385,8 @@ const {
 const { formatComplaintSender } = require("../events/complaintSystem");
 const {
   calculateSalaryDeductionState,
+  isSalaryDeductionPaymentMethod,
+  normalizeSalaryDeductionPaymentMethod,
 } = require("../utils/salaryDeduction");
 const {
   getNewOrderGameOptions,
@@ -1361,6 +1432,27 @@ test("salary deduction uses net commissioned salary and caps advances at 1000", 
   assert.equal(overLimit.canUse, false);
 });
 
+test("員工扣薪選單值與舊扣薪值共用同一付款流程", () => {
+  assert.equal(isSalaryDeductionPaymentMethod("員工扣薪"), true);
+  assert.equal(isSalaryDeductionPaymentMethod("扣薪"), true);
+  assert.equal(isSalaryDeductionPaymentMethod("匯款"), false);
+  assert.equal(normalizeSalaryDeductionPaymentMethod("員工扣薪"), "扣薪");
+  assert.equal(normalizeSalaryDeductionPaymentMethod("扣薪"), "扣薪");
+  assert.equal(normalizeSalaryDeductionPaymentMethod("匯款"), "匯款");
+
+  const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
+  const extensionSelect = source.split("async function handleExtensionPaymentMethodSelect(")[1]
+    .split("async function handleSalaryExtensionConfirm(")[0];
+  const serviceSelect = source.split("async function handleServicePaymentMethodSelect(")[1]
+    .split("async function handleSalaryServiceConfirm(")[0];
+  assert.match(extensionSelect, /normalizeSalaryDeductionPaymentMethod\(selection\?\.paymentMethod\)/);
+  assert.match(extensionSelect, /if \(paymentMethod === "扣薪"\)/);
+  assert.match(serviceSelect, /normalizeSalaryDeductionPaymentMethod\(selection\?\.paymentMethod\)/);
+  assert.match(source, /if \(!pending \|\| !isSalaryDeductionPaymentMethod\(pending\.paymentMethod\)\)/);
+  assert.match(source, /paymentOrders \|\| \[\]\)\.some\(\(order\) => isSalaryDeductionPaymentMethod\(order\.payment_method\)\)/);
+  assert.match(source, /if \(isSalaryDeductionPaymentMethod\(extension\.payment_method\)\)/);
+});
+
 test("秋奈員工扣薪只對在職員工顯示且後端仍驗證身分", () => {
   const source = fs.readFileSync(
     path.join(__dirname, "..", "events", "dispatchSystem.js"),
@@ -1379,8 +1471,7 @@ test("秋奈員工扣薪只對在職員工顯示且後端仍驗證身分", () =>
   assert.match(source, /salary_service_split_confirm_/);
   assert.match(source, /async function isActiveSalaryDeductionStaff/);
   assert.match(source, /\.eq\("is_active", true\)/);
-  assert.equal((source.match(/includeSalary: salaryDeductionEnabled/g) || []).length, 1);
-  assert.equal((source.match(/salaryEligible: salaryDeductionEnabled/g) || []).length, 2);
+  assert.equal((source.match(/salaryEligible: salaryDeductionEnabled/g) || []).length, 3);
   assert.match(source, /if \(!staff\) throw new Error\("扣薪付款僅限秋奈在職員工使用"\)/);
   const indexSource = fs.readFileSync(
     path.join(__dirname, "..", "index.js"),
@@ -1391,7 +1482,8 @@ test("秋奈員工扣薪只對在職員工顯示且後端仍驗證身分", () =>
       (option) => option.label === "員工扣薪" && option.value === "員工扣薪",
     ),
   );
-  assert.match(indexSource, /buildTipPaymentMenu\(tipId, staff\?\.is_active === true\)/);
+  assert.match(indexSource, /buildTipPaymentMenu\(tipId, salaryEligible\)/);
+  assert.match(indexSource, /dispatchSystem\.isActivePaymentStaff/);
   assert.match(indexSource, /includeSalary: salaryDeductionEnabled/);
   assert.match(indexSource, /confirm_tip_salary_/);
   assert.match(indexSource, /使用薪水打賞/);

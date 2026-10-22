@@ -252,7 +252,8 @@ test("持久 VIP effect 只讀 DB 最新累積並以原子 RPC 升級，不回�
     "checkAndUpgradeVip",
     "countOrderVipSpentOnce",
   );
-  assert.match(checkSource, /const useAtomicVipTotals = strict && useAbsoluteTotal/);
+  assert.match(checkSource, /let useAtomicVipTotals = strict && useAbsoluteTotal/);
+  assert.match(checkSource, /if \(!useAbsoluteTotal && triggerAmount > 0\)/);
   assert.match(checkSource, /"qiunai_promote_vip_level"/);
   assert.match(checkSource, /if \(useAtomicVipTotals\) return null/);
 
@@ -363,6 +364,10 @@ test("持久 VIP effect 只讀 DB 最新累積並以原子 RPC 升級，不回�
     qualifiesForVipLevel: ({ totalSpent, totalSpendRequired }) =>
       totalSpendRequired > 0 && totalSpent >= totalSpendRequired,
     grantVipLevelReward: async () => {},
+    getActiveVipLevels: (levels) => levels,
+    isVipPointsActive: () => false,
+    usesMembershipPolicy: () => false,
+    shouldIssueMembershipReward: () => false,
   };
   const checkAndUpgradeVip = Function(
     ...Object.keys(dependencies),

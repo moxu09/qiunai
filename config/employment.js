@@ -1,5 +1,6 @@
 module.exports = {
   organization: "qiunai",
+  customerApplicationExceptions: ["404285545024585729"],
   brandName: "秋奈電競",
   signingBaseUrl:
     process.env.EMPLOYMENT_SIGNING_BASE_URL ||

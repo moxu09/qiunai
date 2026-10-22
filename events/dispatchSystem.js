@@ -29,9 +29,11 @@ const {
 const {
   DEFAULT_SALARY_ADVANCE_LIMIT,
   calculateSalaryDeductionState,
+  isSalaryDeductionPaymentMethod,
+  normalizeSalaryDeductionPaymentMethod,
 } = require("../utils/salaryDeduction");
 const {
-  DELTA_SERVICE_OPTIONS,
+  getActiveDeltaServiceOptions,
   GAME_OPTIONS: SELF_SERVICE_GAME_OPTIONS,
   calculateSelfServicePrice,
   getDeltaFixedPlayerCount,
@@ -40,7 +42,8 @@ const {
   isOctoberValorantPricingActive,
 } = require("../config/selfServicePricing");
 const path = require("node:path");
-const { buildEcpayPaymentRows, handleEcpayDirect, sendPreferredEcpayDirect } = require("../utils/ecpayDiscord");
+const { buildEcpayPaymentRows, handleEcpayDirect, sendPreferredEcpayDirect, assertBankTransferCanBeSelected } = require("../utils/ecpayDiscord");
+const { formatWalletPaymentName } = require("../utils/paymentDisplay");
 const { isEcpayAtmAvailable } = require("../utils/ecpayAtmSchedule");
 const { createServiceFlowStore } = require("../utils/serviceFlowStore");
 const {
@@ -59,6 +62,48 @@ const {
 const guardOrderOperation = createOperationGuard();
 
 let supabase;
+const { isVipPointsActive } = require("../config/qiunaiVipPoints");
+const { createVipPointsCheckout } = require("../utils/vipPointsCheckout");
+const vipPoints = () => createVipPointsCheckout(supabase);
+
+async function pointsPromptText(userId) {
+  if (!isVipPointsActive()) return "";
+  const balance = await vipPoints().balance(userId);
+  return `\n點數最高折抵50％金額，目前您有 ${balance.toLocaleString("zh-TW")} 點。\n點數折抵預設開啟；1點＝1元，先套用優惠券，再按折後金額最多折抵50％。`;
+}
+function pointsDisableButton(prefix, id) {
+  return new ButtonBuilder().setCustomId(`${prefix}_disable_points_${id}`).setLabel("關閉點數折抵").setStyle(ButtonStyle.Secondary);
+}
+async function sendOrderPointsCouponPrompt(channel, order) {
+  const pointText = await pointsPromptText(order.customer_id);
+  return channel.send({ content: `<@${order.customer_id}> 請選擇是否使用點數或優惠券。${pointText}${order.vip_points_disabled ? "\n本單已關閉點數折抵。" : ""}`,
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`quote_use_coupon_${order.id}`).setLabel("使用優惠券").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`quote_no_coupon_${order.id}`).setLabel("不使用優惠券").setStyle(ButtonStyle.Secondary),
+      ...(isVipPointsActive() ? [pointsDisableButton("quote", order.id)] : []),
+    )] });
+}
+async function disableCheckoutPoints(interaction) {
+  await deferReplyOnce(interaction);
+  if (!isVipPointsActive()) return interaction.editReply({ content: "點數制度於10/10開始。" });
+  const service = interaction.customId.startsWith("service_disable_points_");
+  const id = interaction.customId.replace(service ? "service_disable_points_" : "quote_disable_points_", "");
+  if (service) {
+    const pending = await pendingServiceOrders.get(id);
+    if (!pending || pending.customerId !== interaction.user.id) return interaction.editReply({ content: "只有下單的闆闆可以修改。" });
+    if (pending.pointsCheckoutKey) return interaction.editReply({ content: "已進入付款流程，不能修改點數；請取消訂單後重新下單。" });
+    pending.pointsEnabled = false;
+    await pendingServiceOrders.set(id, pending);
+    await sendServiceCouponPrompt(interaction.channel, id, pending);
+  } else {
+    const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", id).eq("customer_id", interaction.user.id).maybeSingle();
+    if (error || !order || order.paid || order.vip_point_checkout_key) return interaction.editReply({ content: "訂單已進入付款或不屬於您，不能修改點數。" });
+    const { error: updateError } = await supabase.from("play_orders").update({ vip_points_disabled: true }).eq("id", id).eq("paid", false).is("vip_point_checkout_key", null);
+    if (updateError) throw updateError;
+    await sendOrderPointsCouponPrompt(interaction.channel, { ...order, vip_points_disabled: true });
+  }
+  return interaction.editReply({ content: "✅ 已關閉點數折抵，仍可選擇使用或不使用優惠券。" });
+}
 let client;
 let paymentHelpers = {};
 let workReportSystem;
@@ -242,7 +287,10 @@ async function getSalaryDeductionEligibility(discordId, amount) {
   const walletStartIso = new Date(
     `${process.env.SALARY_WALLET_START_DATE || "2026-07-17"}T00:00:00+08:00`,
   ).toISOString();
-  const [walletEntries, withdrawRequests, pendingOrders, pendingAdjustments] =
+  const taipeiNow = new Date(Date.now() + 8 * 3600000);
+  const monthStart = new Date(Date.UTC(taipeiNow.getUTCFullYear(), taipeiNow.getUTCMonth(), 1) - 8 * 3600000).toISOString();
+  const monthEnd = new Date(Date.UTC(taipeiNow.getUTCFullYear(), taipeiNow.getUTCMonth() + 1, 1) - 8 * 3600000).toISOString();
+  const [walletEntries, withdrawRequests, pendingOrders, pendingAdjustments, monthlyDeductions] =
     await Promise.all([
       loadAllSalaryRows(() =>
         supabase
@@ -277,6 +325,10 @@ async function getSalaryDeductionEligibility(discordId, amount) {
           .gte("created_at", walletStartIso)
           .is("wallet_settled_at", null),
       ),
+      loadAllSalaryRows(() => supabase.from("qiunai_staff_bonus")
+        .select("amount").eq("discord_id", normalizedDiscordId)
+        .lt("amount", 0).like("note", "使用薪水%")
+        .gte("created_at", monthStart).lt("created_at", monthEnd)),
     ]);
 
   return {
@@ -286,6 +338,7 @@ async function getSalaryDeductionEligibility(discordId, amount) {
       withdrawRequests,
       pendingOrders,
       pendingAdjustments,
+      monthlyDeductions,
       amount,
       advanceLimit: DEFAULT_SALARY_ADVANCE_LIMIT,
     }),
@@ -330,6 +383,8 @@ function getSalaryStaffName(staff) {
   );
 }
 
+const { buildSalaryOrderDetails } = require("../utils/salaryOrderDetails");
+
 async function createSalaryDeductionPrompt({
   channel,
   customerId,
@@ -338,6 +393,7 @@ async function createSalaryDeductionPrompt({
   confirmId,
   cancelId,
   transferId = null,
+  orderDetails = {},
   purpose = "點單",
 }) {
   const { state } = eligibility;
@@ -380,12 +436,14 @@ async function createSalaryDeductionPrompt({
         .setColor(state.shortage ? "#f59e0b" : "#57F287")
         .setTitle(state.shortage ? "⚠️ 薪資不足，是否確認預支" : "💼 確認使用扣薪付款")
         .setDescription(
-          `${details}\n\n` +
+          `${details}\n本月扣薪消費：NT$${state.monthlyUsed.toLocaleString("zh-TW")} / NT$${state.monthlyLimit.toLocaleString("zh-TW")}，剩餘額度 NT$${state.monthlyRemaining.toLocaleString("zh-TW")}\n\n` +
+            (!state.monthlyAllowed ? "❌ 本筆超過每月扣薪消費上限，請改用其他付款方式。\n" : "") +
             `只有客服或管理員可以確認；確認後會在 EIP 新增「使用薪水${purpose}」扣項。` +
             (state.shortage && !state.canUse
               ? `\n目前預支額已超過 NT$${state.advanceLimit.toLocaleString("zh-TW")} 上限，請改用轉帳補齊差額。`
               : ""),
         )
+        .addFields(buildSalaryOrderDetails(orderDetails, amount))
         .setTimestamp(),
     ],
     components: [
@@ -396,6 +454,7 @@ async function createSalaryDeductionPrompt({
 
 async function createSalaryDeductionAdjustment(customerId, amount, note) {
   const eligibility = await getSalaryDeductionEligibility(customerId, amount);
+  if (!eligibility.state.monthlyAllowed) throw new Error(`每月員工扣薪消費上限 NT$30,000；本月已使用 NT$${eligibility.state.monthlyUsed.toLocaleString("zh-TW")}，剩餘 NT$${eligibility.state.monthlyRemaining.toLocaleString("zh-TW")}`);
   if (!eligibility.state.canUse) {
     throw new Error(
       `預支上限為 NT$${eligibility.state.advanceLimit.toLocaleString("zh-TW")}，本筆確認後會預支 NT$${eligibility.state.projectedAdvance.toLocaleString("zh-TW")}`,
@@ -469,6 +528,7 @@ async function applySalaryDeductionToOrders({
 
   try {
     const eligibility = await getSalaryDeductionEligibility(customerId, amount);
+    if (!eligibility.state.monthlyAllowed) throw new Error(`每月員工扣薪消費上限 NT$30,000；本月已使用 NT$${eligibility.state.monthlyUsed.toLocaleString("zh-TW")}，剩餘 NT$${eligibility.state.monthlyRemaining.toLocaleString("zh-TW")}`);
     if (!eligibility.state.canUse) {
       throw new Error(
         `預支上限為 NT$${eligibility.state.advanceLimit.toLocaleString("zh-TW")}，本筆確認後會預支 NT$${eligibility.state.projectedAdvance.toLocaleString("zh-TW")}`,
@@ -949,15 +1009,16 @@ async function upsertGameOrderPanel(panel) {
       text: "深夜不關燈｜We Are Still Here",
     })
     .setTimestamp();
-  const scheduledImageFile =
-    panel.panelName === "valorant" && isOctoberValorantPricingActive()
-      ? "valorant-pricing-2026-10.jpg"
-      : panel.imageFile;
-  const imageFiles = Array.isArray(panel.imageFiles)
-    ? panel.imageFiles
-    : scheduledImageFile
-      ? [scheduledImageFile]
-      : [];
+  const octoberImages = {
+    valorant: ["valorant-pricing-2026-10.jpg"],
+    delta: ["delta-pricing-2026-10.png"],
+    apex: ["apex-pricing-2026-10.png"],
+    lol: ["lol-pricing-2026-10.png", "aram-pricing-2026-10-20.png", "tft-pricing-2026-10.png"],
+    steam: ["steam-pricing-2026-10.png"],
+  };
+  const imageFiles = isOctoberValorantPricingActive() && octoberImages[panel.panelName]
+    ? octoberImages[panel.panelName]
+    : Array.isArray(panel.imageFiles) ? panel.imageFiles : panel.imageFile ? [panel.imageFile] : [];
   const files = imageFiles.map((imageFile) => ({
     attachment: path.join(PANEL_ASSET_DIR, imageFile),
     name: imageFile,
@@ -1037,12 +1098,26 @@ function startPricingPanelScheduler() {
     activePricingPanelVersion = version;
     try {
       await sendGameOrderPanels();
-      console.log(`[價目表排程] 已切換特戰價目表：${version}`);
+      console.log(`[價目表排程] 已切換秋奈價目表：${version}`);
     } catch (error) {
       activePricingPanelVersion = null;
       console.error("[價目表排程] 更新面板失敗", error);
     }
   }, 60 * 1000);
+  const untilMidnight = Date.parse("2026-09-30T16:00:00.000Z") - Date.now();
+  if (untilMidnight > 0) {
+    const midnightTimer = setTimeout(async () => {
+      activePricingPanelVersion = "2026-10-01";
+      try {
+        await sendGameOrderPanels();
+        console.log("[價目表排程] 2026/10/01 台灣時間 00:00 已切換秋奈價目表");
+      } catch (error) {
+        activePricingPanelVersion = null;
+        console.error("[價目表排程] 午夜切換失敗，稍後重試", error);
+      }
+    }, untilMidnight);
+    midnightTimer.unref?.();
+  }
   timer.unref?.();
   return timer;
 }
@@ -1438,7 +1513,7 @@ async function failSelfServiceDispatch(orderId, messageId = null) {
     if (reviewError) throw reviewError;
     if (!reviewOrder) return;
     const reviewMessage =
-      `訂單 ${order.order_no || order.id} 派單逾時；此單已使用「${order.payment_method || "非 ASD 方式"}」付款，` +
+      `訂單 ${order.order_no || order.id} 派單逾時；此單已使用「${formatWalletPaymentName(order.payment_method || "非 ASD 方式")}」付款，` +
       "系統尚未退款，請客服核對付款並人工處理退款或續派。訂單頻道會保留。";
     const claimMessage = await findSelfServiceClaimMessage(order.id, order).catch((lookupError) => {
       console.error("[自助派單人工處理] 查詢討論串失敗", lookupError);
@@ -1932,10 +2007,10 @@ async function openSelfServiceRequirementModal(interaction) {
         [
           "service_type",
           "項目（請輸入完整名稱）",
-          DELTA_SERVICE_OPTIONS.map(({ value }) => value).join("、"),
+          getActiveDeltaServiceOptions().map(({ value }) => value).join("、"),
         ],
-        ["rank_map", "地圖（僅三角洲必填）", "請輸入地圖"],
-        ["quantity", "需求時數", "例如：1、1.5、2"],
+        ["rank_map", "地圖／其他需求", "沒有指定地圖可填無"],
+        ["quantity", "需求時數／保底單數", "例如：1、1.5、2；保底單填整數"],
       ]
     : game === "lol"
       ? [
@@ -1943,7 +2018,7 @@ async function openSelfServiceRequirementModal(interaction) {
           ["service_type", "類型", "娛樂、技術或大神"],
           ["rank_map", "目前段位", "例如：白金、鑽石；ARAM 可填一般"],
           ["player_count", "需求陪陪人數", "1～8"],
-          ["quantity", "時數 / 局數", "ARAM 按小時；峽谷、戰棋按局"],
+          ["quantity", "時數 / 局數", "依價目表：一般娛樂按小時，其餘峽谷及戰棋按局"],
         ]
       : game === "steam"
         ? [
@@ -2111,14 +2186,14 @@ async function submitSelfServiceRequirement(interaction) {
     });
   }
   if (pending.game === "delta") {
-    const deltaService = DELTA_SERVICE_OPTIONS.find(
+    const deltaService = getActiveDeltaServiceOptions().find(
       ({ value }) => value === String(input.serviceType || "").trim(),
     );
     if (!deltaService) {
       return interaction.editReply({
         content:
           "❌ 三角洲項目必須輸入完整字符，請重新開始並輸入以下其中一項：\n" +
-          DELTA_SERVICE_OPTIONS.map(({ value }) => `・${value}`).join("\n"),
+          getActiveDeltaServiceOptions().map(({ value }) => `・${value}`).join("\n"),
       });
     }
     const fixedPlayerCount = getDeltaFixedPlayerCount(input.serviceType);
@@ -2772,7 +2847,7 @@ async function selectSelfServicePlayerNumbers(interaction) {
   await deferReplyOnce(interaction);
   const order = await getSelfServiceOrder(interaction, "self_customer_numbers_");
   if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
-  if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以選擇陪陪。" });
+  if (!canCustomerOrStaffSubmit(interaction, order.customer_id)) return interaction.editReply({ content: "❌ 只有下單者、客服或管理員可以選擇陪陪。" });
   if (![getClaimChoosingStatus(order), "choosing_players", "manual_choosing_players"].includes(order.quote_status)) return interaction.editReply({ content: "❌ 這份數字名單已失效，請重新派單。" });
   if (isClaimSelectionExpired(order)) {
     const dispatchMessage = await findSelfServiceClaimMessage(order.id);
@@ -2979,8 +3054,8 @@ async function confirmSelfServicePlayers(interaction) {
   const order = await getSelfServiceOrder(interaction, "self_players_confirm_");
   if (!order) return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
   const selection = pendingSelfServiceOrders.get(`selection:${order.id}`);
-  if (interaction.user.id !== order.customer_id) return interaction.editReply({ content: "❌ 只有下單者可以確認。" });
-  const selectedIds = selection?.customerId === interaction.user.id
+  if (!canCustomerOrStaffSubmit(interaction, order.customer_id)) return interaction.editReply({ content: "❌ 只有下單者、客服或管理員可以確認。" });
+  const selectedIds = selection?.customerId === order.customer_id
     ? selection.selectedIds
     : String(order.preferred_player || "").split(",").filter(Boolean);
   const expectedConfirmStatus = isManualDispatchOrder(order)
@@ -3017,7 +3092,7 @@ async function confirmSelfServicePlayers(interaction) {
     pendingSelfServiceOrders.delete(`selection:${order.id}`);
     pendingSelfServiceOrders.delete(`candidatePrompt:${order.id}`);
     await interaction.channel.send({
-      content: `<@${order.customer_id}> 已確認接單陪陪，現在請選擇是否使用優惠券，接著完成付款。`,
+      content: `<@${order.customer_id}> 已確認接單陪陪，現在請選擇是否使用${isVipPointsActive() ? "點數或" : ""}優惠券，接著完成付款。${await pointsPromptText(order.customer_id)}`,
       embeds: [
         new EmbedBuilder()
           .setColor(QIUNAI_WATER_BLUE)
@@ -3041,6 +3116,7 @@ async function confirmSelfServicePlayers(interaction) {
             .setCustomId(`quote_no_coupon_${order.id}`)
             .setLabel("不使用優惠券")
             .setStyle(ButtonStyle.Secondary),
+          ...(isVipPointsActive() ? [pointsDisableButton("quote", order.id)] : []),
         ),
       ],
     });
@@ -3116,7 +3192,8 @@ async function confirmSelfServicePlayers(interaction) {
   selfServiceDispatchTimers.delete(String(order.id));
   await interaction.message.edit({ components: [] }).catch(() => null);
   await publishClaimSuccess(waitingPaymentOrder, selectedIds);
-  await sendSelfServicePaymentSelection(interaction.channel, waitingPaymentOrder);
+  if (isVipPointsActive()) await sendOrderPointsCouponPrompt(interaction.channel, waitingPaymentOrder);
+  else await sendSelfServicePaymentSelection(interaction.channel, waitingPaymentOrder);
   return interaction.editReply({ content: "✅ 已確認陪陪，請先完成付款。" });
 }
 
@@ -3130,6 +3207,7 @@ const SELF_SERVICE_PAYMENT_CHOICES = Object.freeze({
 });
 
 async function sendSelfServicePaymentSelection(channel, order) {
+  order = await vipPoints().applyOrder(order);
   const amount = Number(order.final_price ?? order.price ?? 0);
   const selectedIds = String(order.preferred_player || "").split(",").filter(Boolean);
   const enabled = (method) => {
@@ -3257,10 +3335,10 @@ async function paySelfServiceOrderByGateway(interaction) {
     return interaction.editReply({ content: "⚠️ 這張訂單已進入付款流程，請使用原本的付款訊息。" });
   }
   if (!(ecpay ? paymentHelpers.ecpayAvailable : paymentHelpers.jkopayAvailable)) {
-    return interaction.editReply({ content: `❌ ${paymentMethod}目前無法使用，請稍後再試。` });
+    return interaction.editReply({ content: `❌ ${formatWalletPaymentName(paymentMethod)}目前無法使用，請稍後再試。` });
   }
   if (!createPayment) {
-    return interaction.editReply({ content: `❌ ${paymentMethod}尚未完成設定。` });
+    return interaction.editReply({ content: `❌ ${formatWalletPaymentName(paymentMethod)}尚未完成設定。` });
   }
   if (processingSelfServicePayments.has(order.id)) {
     return interaction.editReply({ content: "⚠️ 系統正在建立付款單，請勿重複點擊。" });
@@ -3331,8 +3409,8 @@ async function paySelfServiceOrderByGateway(interaction) {
       throw error;
     }
   } catch (error) {
-    console.error(`[自助下單${paymentMethod}] 失敗`, error);
-    return interaction.editReply({ content: `❌ 建立${paymentMethod}付款失敗：${error.message || error}` });
+    console.error(`[自助下單${formatWalletPaymentName(paymentMethod)}] 失敗`, error);
+    return interaction.editReply({ content: `❌ 建立${formatWalletPaymentName(paymentMethod)}付款失敗：${error.message || error}` });
   } finally {
     processingSelfServicePayments.delete(order.id);
   }
@@ -3556,6 +3634,7 @@ async function submitSelfServiceExtension(interaction) {
   if (!Number.isInteger(amount)) return interaction.editReply({ content: "❌ 加時金額不是整數，請改用可整除的數量。" });
   const staffId = String(order.assigned_player || "").split(",").filter(Boolean)[0] || null;
   const { data: extension, error } = await supabase.from("order_extensions").insert({
+    guild_id: order.guild_id || process.env.GUILD_ID || "1206138511535898654",
     order_id: order.id,
     order_no: order.order_no || null,
     customer_id: order.customer_id,
@@ -3932,7 +4011,9 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
   const deltaModeMenu = new StringSelectMenuBuilder()
     .setCustomId(`delta_mode_${flowId}`)
     .setPlaceholder("請選擇三角洲服務內容")
-    .addOptions([
+    .addOptions(isOctoberValorantPricingActive() ? getActiveDeltaServiceOptions().map(({ label, value, price, unit }) => ({
+      label, value, description: `NT$${price}／${unit}`,
+    })) : [
       {
         label: "娛樂陪玩",
         value: "娛樂陪玩",
@@ -3968,6 +4049,8 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
   const isDeltaOrder = initial.category === "delta";
   const isLolRoundOrder =
     initial.category === "lol" && initial.itemLabel !== "ARAM";
+  const hasMixedQuantityUnits = isOctoberValorantPricingActive() &&
+    (isLolRoundOrder || isDeltaOrder);
   const isApexOrder = initial.category === "apex";
   const isLolOrder = initial.category === "lol";
   const buttonRow = new ActionRowBuilder().addComponents(
@@ -4011,9 +4094,11 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
     new ActionRowBuilder().addComponents(genderMenu),
     ...(initial.category === "valorant"
       ? []
+      : hasMixedQuantityUnits
+      ? [new ActionRowBuilder().addComponents(roundsMenu), new ActionRowBuilder().addComponents(durationMenu)]
       : isLolRoundOrder
-      ? [new ActionRowBuilder().addComponents(roundsMenu)]
-      : [new ActionRowBuilder().addComponents(durationMenu)]),
+        ? [new ActionRowBuilder().addComponents(roundsMenu)]
+        : [new ActionRowBuilder().addComponents(durationMenu)]),
   ];
 
   await channel.send({
@@ -4028,7 +4113,7 @@ async function sendQuickServiceNeedPanel(channel, flowId, initial = {}) {
             `請依序選擇${isDeltaOrder ? "服務內容、" : ""}${
               isApexOrder ? "段位、" : ""
             }${isLolOrder ? "段位 / 娛樂、" : ""}人數、性別偏好與${
-              isLolRoundOrder ? "局數" : "時間"
+              hasMixedQuantityUnits ? "價目表對應的時數／局數／保底單數" : isLolRoundOrder ? "局數" : "時間"
             }。\n` +
             `有特殊需求可以按「填寫備註 / 自訂需求」。\n\n` +
             `填寫完成後請按「送出訂單」，系統會先依現行價目表自動報價；無法計算時才會轉交客服。`
@@ -4159,18 +4244,18 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
       ? "系統會在本頻道顯示綠界虛擬 ATM 帳號；實際轉帳完成後才會自動核帳。"
       : ["CVS", "BARCODE"].includes(payment.onlyMethod)
         ? "系統會在本頻道顯示超商繳費資訊；實際繳費完成後才會自動核帳。"
-        : label === "訂單" && payment.selfService !== true
+        : ["訂單", "加時"].includes(label) && payment.selfService !== true
           ? "刷卡會在官網站內直接輸入卡號；超商繳費資訊會顯示在本頻道。匯款請選擇原銀行匯款，並由客服確認入帳。"
           : `刷卡會在官網站內直接輸入卡號；${isEcpayAtmAvailable() ? "匯款虛擬帳號與" : "虛擬 ATM 於 9 月 28 日開放，"}超商繳費資訊會直接顯示在本頻道。實際付款成功後才會自動核帳。`;
   const paymentRows = buildEcpayPaymentRows(payment, Number(amount), {
     topup: label === "購買ASD",
-    onlyMethod: payment.onlyMethod || null,
+    onlyMethod: payment.onlyMethod || payment.preferredMethod || null,
     selfService: label === "自助訂單" || payment.selfService === true,
-    allowAtm: label !== "訂單" || payment.selfService === true,
+    allowAtm: !["訂單", "加時"].includes(label) || payment.selfService === true,
   });
   const message = await channel.send({
     content: `<@${userId}>`,
-    embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle(`💳 ${label}綠界支付`).setDescription(
+    embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle(`💳 ${label}${({ CARD: "線上刷卡", ATM: "ATM 轉帳", CVS: "超商代碼", BARCODE: "超商條碼" })[payment.onlyMethod || payment.preferredMethod] || "付款"}`).setDescription(
       `應付金額：NT$${Number(amount).toLocaleString("zh-TW")}\n` +
       `綠界訂單編號：${payment.platformOrderId}\n\n` +
       methodDescription,
@@ -6317,7 +6402,9 @@ async function showDeltaStart(channel, flowId) {
   const modeMenu = new StringSelectMenuBuilder()
     .setCustomId(`delta_mode_${flowId}`)
     .setPlaceholder("請選擇三角洲玩法")
-    .addOptions([
+    .addOptions(isOctoberValorantPricingActive() ? getActiveDeltaServiceOptions().map(({ label, value, price, unit }) => ({
+      label, value, description: `NT$${price}／${unit}`,
+    })) : [
       { label: "基礎陪護", value: "基礎陪護" },
       { label: "機密雙護", value: "機密雙護" },
       { label: "機密雙護（保底）", value: "機密雙護（保底）" },
@@ -6678,6 +6765,11 @@ function getOrderItemOptions(game) {
   }
 
   if (game === "三角洲行動") {
+    if (isOctoberValorantPricingActive()) {
+      return getActiveDeltaServiceOptions().map(({ label, value, price, unit }) => ({
+        label, value, description: `NT$${price}／${unit}`,
+      }));
+    }
     return [
       {
         label: "機密雙護",
@@ -6839,9 +6931,9 @@ async function handleNewOrderGameSelect(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個選單。",
+      content: "❌ 只有下單者、客服或管理員可以操作這個選單。",
       flags: 64,
     });
   }
@@ -6861,7 +6953,9 @@ async function handleNewOrderGameSelect(interaction) {
     }
     await paymentHelpers.startTipFlowInChannel(
       interaction.channel,
-      interaction.user
+      pending.userId === interaction.user.id
+        ? interaction.user
+        : await interaction.client.users.fetch(pending.userId)
     );
     return interaction.update({
       content: "💝 已切換為打賞流程，請在下方選擇要打賞的禮物。",
@@ -6939,9 +7033,9 @@ async function handleNewOrderItemSelect(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個選單。",
+      content: "❌ 只有下單者、客服或管理員可以操作這個選單。",
       flags: 64,
     });
   }
@@ -7010,9 +7104,9 @@ async function handleNewOrderRankSelect(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個選單。",
+      content: "❌ 只有下單者、客服或管理員可以操作這個選單。",
       flags: 64,
     });
   }
@@ -7069,9 +7163,9 @@ async function handleNewOrderCountSelect(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個選單。",
+      content: "❌ 只有下單者、客服或管理員可以操作這個選單。",
       flags: 64,
     });
   }
@@ -7133,9 +7227,9 @@ async function handleNewOrderGenderSelect(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個選單。",
+      content: "❌ 只有下單者、客服或管理員可以操作這個選單。",
       flags: 64,
     });
   }
@@ -7159,9 +7253,9 @@ async function handleNewOrderPlayerSelect(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個選單。",
+      content: "❌ 只有下單者、客服或管理員可以操作這個選單。",
       flags: 64,
     });
   }
@@ -7316,9 +7410,9 @@ async function handleNewOrderDurationSelect(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個選單。",
+      content: "❌ 只有下單者、客服或管理員可以操作這個選單。",
       flags: 64,
     });
   }
@@ -7371,9 +7465,9 @@ async function submitNewOrderReserveTime(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個表單。",
+      content: "❌ 只有下單者、客服或管理員可以操作這個表單。",
       flags: 64,
     });
   }
@@ -7712,9 +7806,9 @@ async function openNewOrderNoteModal(interaction) {
     });
   }
 
-  if (pending.userId !== interaction.user.id) {
+  if (!canCustomerOrStaffSubmit(interaction, pending.userId)) {
     return interaction.reply({
-      content: "❌ 只有下單者可以操作這個按鈕。",
+      content: "❌ 只有下單者、客服或管理員可以操作這個按鈕。",
       flags: 64,
     });
   }
@@ -7919,7 +8013,7 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
       service_flow_key: serviceFlowKey,
       order_no: orderNo,
       customer_id: pending.userId,
-      customer_username: pending.username || interaction.user.username,
+      customer_username: pending.username || (pending.userId === interaction.user.id ? interaction.user.username : String(pending.userId)),
       channel_id: pending.channelId || interaction.channel.id,
 
       game: pending.game,
@@ -8109,7 +8203,55 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
   }
   return true;
 }
-async function sendStaffQuotePanel(order) {
+async function createWebsiteOrder(payload) {
+  const guild=await client.guilds.fetch('1206138511535898654');
+  let member;
+  try { member=await guild.members.fetch(payload.userId); }
+  catch(error){if(Number(error.code)===10007)return null;throw error;}
+  if(member.pending)return null;
+  const marker=`website_request:${payload.requestId}`;
+  const channels=await guild.channels.fetch();
+  let channel=channels.find(c=>c?.type===ChannelType.GuildText&&c.topic===`owner:${payload.userId};${marker}`);
+  if(!channel){
+    const parent=await resolveTicketParentId(guild,ORDER_TICKET_CATEGORY_ID,'訂單區');
+    await guild.roles.fetch();
+    const staffIds=[process.env.STAFF_ROLE,process.env.STAFF_ROLE_ID,process.env.CUSTOMER_SERVICE_ROLE_ID,
+      '1210642900355125288',...parseRoleIds(process.env.STAFF_ROLE_IDS),...parseRoleIds(process.env.CUSTOMER_SERVICE_ROLE_IDS)].filter(id=>id&&guild.roles.cache.has(id));
+    if(!staffIds.length)throw Error('未設定有效客服身分組，暫不建立官網私人頻道');
+    channel=await guild.channels.create({name:`官網需求-${payload.requestId.slice(-8).toLowerCase()}`,type:ChannelType.GuildText,parent,
+      topic:`owner:${payload.userId};${marker}`,
+      permissionOverwrites:[{id:guild.id,deny:['ViewChannel']},
+        {id:client.user.id,allow:['ViewChannel','SendMessages','ReadMessageHistory','ManageChannels']},
+        {id:payload.userId,allow:['ViewChannel','SendMessages','ReadMessageHistory','AttachFiles']},
+        ...[...new Set(staffIds)].map(id=>({id,allow:['ViewChannel','SendMessages','ReadMessageHistory','AttachFiles']}))]});
+  }
+  const r=payload.requirements;
+  const note=`官網需求 ${payload.requestId}\n平台／模式：${r.platform||'未填'}\n要打段位／地圖：${r.targetRank||'未填'}\n陪陪段位：${r.companionRank||'不指定'}\n備註：${r.notes||'無'} [MANUAL_DISPATCH]`;
+  const key=`website:${payload.requestId}`;
+  const existing=await supabase.from('play_orders').select('*').eq('guild_id',guild.id).eq('service_flow_key',key).maybeSingle();
+  if(existing.error)throw existing.error;
+  let order=existing.data;
+  if(!order){
+    const result=await supabase.from('play_orders').insert({guild_id:guild.id,service_flow_key:key,order_no:await getNextPlayOrderNumber(),
+      customer_id:payload.userId,customer_username:member.user.username,customer_name:r.customerName,
+      channel_id:channel.id,source_channel_id:channel.id,game:r.game,order_item:r.serviceType,service:`${r.game}｜${r.serviceType}`,
+      rank_preference:r.targetRank||null,player_count:r.companionCount,duration_text:r.quantity,note,
+      price:0,final_price:0,original_price:0,discount_rate:1,discount_amount:0,
+      payment_method:'未選擇',paid:false,status:'waiting_quote',quote_status:'waiting_quote',confirmed_by_customer:false}).select('*').single();
+    if(result.error)throw result.error;order=result.data;
+  }
+  if(order.customer_id!==payload.userId||order.channel_id!==channel.id)throw Error('官網需求對應的訂單或頻道不一致');
+  const messages=await channel.messages.fetch({limit:100});
+  const hasRequirement=messages.some(m=>m.author.id===client.user.id&&m.embeds?.some(e=>e.footer?.text===marker));
+  if(!hasRequirement)await channel.send({content:`<@${payload.userId}> 官網需求已帶入，請在此與客服確認報價。`,allowedMentions:{users:[payload.userId],parse:[]},
+    nonce:require('node:crypto').createHash('sha256').update(marker).digest('hex').slice(0,24),enforceNonce:true,
+    embeds:[new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle('🌐 官網需求單').setFooter({text:marker})
+      .setDescription(`需求編號：${payload.requestId}\n稱呼：${r.customerName}\n遊戲：${r.game}\n需求：${r.serviceType}\n平台／模式：${r.platform||'未填'}\n要打段位／地圖：${r.targetRank||'未填'}\n陪陪段位：${r.companionRank||'不指定'}\n時數／局數：${r.quantity}\n陪陪人數：${r.companionCount}\n備註：${r.notes||'無'}\n\n尚未報價、尚未付款，確認後才會進入後續流程。`)]});
+  const hasQuote=messages.some(m=>m.author.id===client.user.id&&m.components?.some(row=>row.components.some(c=>c.customId===`staff_quote_price_${order.id}`)));
+  if(!hasQuote&&order.status==='waiting_quote')await sendStaffQuotePanel(order,{nonce:require('node:crypto').createHash('sha256').update(marker+':quote').digest('hex').slice(0,24)});
+  return {channelId:channel.id,orderId:order.id};
+}
+async function sendStaffQuotePanel(order, options = {}) {
   const channel = await client.channels
     .fetch(order.channel_id)
     .catch(() => null);
@@ -8152,6 +8294,7 @@ async function sendStaffQuotePanel(order) {
   );
   const row = new ActionRowBuilder().addComponents(...controls);
   await channel.send({
+    ...(options.nonce?{nonce:options.nonce,enforceNonce:true}:{}),
     content:
       `<@&${process.env.STAFF_ROLE}> 有新的需求等待報價。\n` +
       (isManualDispatchOrder(order)
@@ -8215,10 +8358,7 @@ async function sendStaffQuotePanel(order) {
 }
 async function handleStaffAiQuote(interaction) {
   await deferReplyOnce(interaction);
-  if (
-    !memberHasRole(interaction.member, process.env.STAFF_ROLE) &&
-    !interactionHasPermission(interaction, PermissionFlagsBits.Administrator)
-  ) {
+  if (!canCustomerOrStaffSubmit(interaction, null)) {
     return interaction.editReply({
       content: "❌ 只有客服或管理員可以使用 AI 輔助報價。",
     });
@@ -8254,10 +8394,7 @@ async function handleStaffAiQuote(interaction) {
   }
 }
 async function openStaffQuotePriceModal(interaction) {
-  if (
-    !memberHasRole(interaction.member, process.env.STAFF_ROLE) &&
-    !interactionHasPermission(interaction, PermissionFlagsBits.Administrator)
-  ) {
+  if (!canCustomerOrStaffSubmit(interaction, null)) {
     return interaction.reply({
       content: "❌ 只有客服可以填寫報價",
       flags: 64,
@@ -8380,10 +8517,11 @@ async function handleOrderQuotePriceConfirm(interaction) {
     .select("id").maybeSingle();
   if (updateError || !updated) return interaction.editReply({ content: "❌ 報價狀態已變更，請重新整理。" });
   await interaction.channel.send({
-    content: `<@${order.customer_id}> 已確認報價 NT$${price.toLocaleString("zh-TW")}，請選擇是否使用優惠券。`,
+    content: `<@${order.customer_id}> 已確認報價 NT$${price.toLocaleString("zh-TW")}，請選擇是否使用${isVipPointsActive() ? "點數或" : ""}優惠券。${await pointsPromptText(order.customer_id)}`,
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`quote_use_coupon_${order.id}`).setLabel("使用優惠券").setEmoji("🎟️").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`quote_no_coupon_${order.id}`).setLabel("不使用優惠券").setStyle(ButtonStyle.Secondary),
+      ...(isVipPointsActive() ? [pointsDisableButton("quote", order.id)] : []),
     )],
   });
   await interaction.message?.edit({ components: [] }).catch(() => null);
@@ -8743,6 +8881,8 @@ async function handleQuoteSelectCoupon(interaction) {
   });
 }
 async function sendPaymentMethodSelect(channel, order) {
+  order = await vipPoints().applyOrder(order);
+  if (isSelfServiceOrder(order)) return sendSelfServicePaymentSelection(channel, order);
   const salaryDeductionEnabled = await isActiveSalaryDeductionStaff(
     order.customer_id,
   );
@@ -8756,7 +8896,7 @@ async function sendPaymentMethodSelect(channel, order) {
   );
 
   await channel.send({
-    content: `<@${order.customer_id}> 請選擇付款方式：`,
+    content: `<@${order.customer_id}> 請選擇付款方式：${order.vip_points_used ? `\n點數折抵：${order.vip_points_used} 點；應付金額：NT$${order.final_price}` : ""}`,
     components: rows,
   });
 }
@@ -8797,7 +8937,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
     return interaction.editReply({
       content:
         `❌ 這張訂單已經完成付款，不能重複選擇付款方式。\n` +
-        `目前付款方式：${order.payment_method || "已付款"}`,
+        `目前付款方式：${formatWalletPaymentName(order.payment_method || "已付款")}`,
     });
   }
   if (paymentMethod === "綠界支付" && selection?.requestedMethod &&
@@ -8832,6 +8972,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
         customerId: order.customer_id,
         amount,
         eligibility,
+        orderDetails: order,
         confirmId: `salary_quote_confirm_${order.id}`,
         cancelId: `salary_quote_cancel_${order.id}`,
         transferId: `salary_quote_transfer_${order.id}`,
@@ -8849,7 +8990,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
     const ecpay = paymentMethod === "綠界支付";
     const createPayment = ecpay ? paymentHelpers.createEcpayServicePayment : paymentHelpers.createJkopayServicePayment;
     if (!(ecpay ? paymentHelpers.ecpayAvailable : paymentHelpers.jkopayAvailable) || !createPayment)
-      return interaction.editReply({ content: `❌ ${paymentMethod}目前無法使用，請改選其他付款方式。` });
+      return interaction.editReply({ content: `❌ ${formatWalletPaymentName(paymentMethod)}目前無法使用，請改選其他付款方式。` });
     const amount = Number(order.final_price || order.price || 0);
     try {
       const payment = await createPayment({
@@ -8872,9 +9013,9 @@ async function handleQuotePaymentMethodSelect(interaction) {
         if (selection.requestedMethod !== "CARD") payment.preferredMethod = selection.requestedMethod;
       }
       await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, order.customer_id, amount, payment, "訂單");
-      return interaction.editReply({ content: `✅ 已建立${paymentMethod}付款連結，付款完成後會自動核帳。` });
+      return interaction.editReply({ content: `✅ 已建立${formatWalletPaymentName(paymentMethod)}付款連結，付款完成後會自動核帳。` });
     } catch (err) {
-      return interaction.editReply({ content: `❌ 建立${paymentMethod}付款失敗：${err.message || err}` });
+      return interaction.editReply({ content: `❌ 建立${formatWalletPaymentName(paymentMethod)}付款失敗：${err.message || err}` });
     }
   }
   let paidNow = false;
@@ -8891,9 +9032,9 @@ async function handleQuotePaymentMethodSelect(interaction) {
         embeds: [
           new EmbedBuilder()
             .setColor("#66ccff")
-            .setTitle("💳 儲值卡 / 錢包付款完成")
+            .setTitle("💳 錢包付款完成")
             .setDescription(
-              `<@${order.customer_id}> 已使用儲值卡 / 錢包付款。\n\n` +
+              `<@${order.customer_id}> 已使用錢包付款。\n\n` +
                 `扣款金額：${result.amount} 星雨幣\n` +
                 `剩餘餘額：${result.finalCoins} 星雨幣`
             )
@@ -8902,7 +9043,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
       });
     } catch (err) {
       return interaction.editReply({
-        content: `❌ 儲值卡付款失敗：${err.message}`,
+        content: `❌ 錢包付款失敗：${err.message}`,
       });
     }
   } else if (isMonthlyPayment(paymentMethod)) {
@@ -8967,7 +9108,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
           .setColor("#ffaa00")
           .setTitle("💳 特殊付款方式")
           .setDescription(
-            `<@${order.customer_id}> 你選擇了：${paymentMethod}\n\n` +
+            `<@${order.customer_id}> 你選擇了：${formatWalletPaymentName(paymentMethod)}\n\n` +
               `請等待客服提供付款帳號 / 錢包地址。\n` +
               `付款完成後請上傳付款截圖，等待客服確認。`
           )
@@ -8990,7 +9131,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
     });
   }
   return interaction.editReply({
-    content: `✅ 已選擇付款方式：${paymentMethod}`,
+    content: `✅ 已選擇付款方式：${formatWalletPaymentName(paymentMethod)}`,
   });
 }
 
@@ -9256,7 +9397,7 @@ async function sendCustomerFinalConfirm(channel, order) {
       },
       {
         name: "💳 付款方式",
-        value: order.payment_method || "未選擇",
+        value: formatWalletPaymentName(order.payment_method || "未選擇"),
         inline: true,
       },
       {
@@ -9296,6 +9437,18 @@ async function transitionServicePayment(interaction, prefix, group, action) {
     return interaction.editReply({ content: "❌ 只有客服可以操作訂單付款或取消。" });
   }
   const target = interaction.customId.replace(prefix, "");
+  if (action !== "cancel") {
+    let paymentQuery = supabase.from("play_orders")
+      .select("payment_method")
+      .eq("guild_id", interaction.guildId || interaction.guild?.id || process.env.GUILD_ID)
+      .eq("paid", false);
+    paymentQuery = group ? paymentQuery.eq("order_group_id", target) : paymentQuery.eq("id", target);
+    const { data: paymentOrders, error: paymentError } = await paymentQuery;
+    if (paymentError) throw paymentError;
+    if ((paymentOrders || []).some((order) => isSalaryDeductionPaymentMethod(order.payment_method))) {
+      return interaction.editReply({ content: "❌ 員工扣薪必須使用專屬扣薪確認按鈕，不能用一般付款按鈕核帳。" });
+    }
+  }
   let orders = await transitionUnpaidOrders(supabase, {
     orderId: group ? null : target, groupId: group ? target : null,
     guildId: interaction.guildId || interaction.guild?.id || process.env.GUILD_ID, action,
@@ -9807,7 +9960,7 @@ async function submitStaffEditOrder(interaction) {
             `💰 金額：NT$${
               updatedOrder.final_price || updatedOrder.price || 0
             }\n` +
-            `💳 付款方式：${updatedOrder.payment_method || "未選擇"}\n` +
+            `💳 付款方式：${formatWalletPaymentName(updatedOrder.payment_method || "未選擇")}\n` +
             `📝 備註：${updatedOrder.note || "無"}\n\n` +
             `請闆闆重新確認訂單內容。`
         )
@@ -9916,6 +10069,7 @@ async function submitExtendOrder(interaction) {
   const { data: extension, error: insertError } = await supabase
     .from("order_extensions")
     .insert({
+      guild_id: order.guild_id || process.env.GUILD_ID || "1206138511535898654",
       order_id: order.id,
       order_no: order.order_no || null,
       customer_id: order.customer_id,
@@ -9961,11 +10115,10 @@ async function sendExtensionPaymentMethodSelect(channel, extension) {
   );
   const rows = buildPaymentMethodButtonRows(
     `extension_payment_method_${extension.id}`,
-    getCanonicalPaymentOptions({
-      includeWallet: true,
-      includeEcpay: paymentHelpers.ecpayAvailable,
-      includeMonthly: true,
-      includeSalary: salaryDeductionEnabled,
+    getGeneralOrderPaymentOptions({
+      ecpayAvailable: paymentHelpers.ecpayAvailable,
+      salaryEligible: salaryDeductionEnabled,
+      amount: Number(extension.amount || 0),
     }),
   );
 
@@ -9997,7 +10150,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
 
   const selection = getPaymentMethodSelection(interaction, "extension_payment_method_");
   const extensionId = selection?.entityId;
-  const paymentMethod = selection?.paymentMethod;
+  const paymentMethod = normalizeSalaryDeductionPaymentMethod(selection?.paymentMethod);
 
   const { data: extension, error } = await supabase
     .from("order_extensions")
@@ -10023,6 +10176,14 @@ async function handleExtensionPaymentMethodSelect(interaction) {
     return interaction.editReply({
       content: "⚠️ 這筆加時已經付款過了，不能重複選擇付款方式。",
     });
+  }
+
+  if (paymentMethod === "匯款") {
+    try {
+      await assertBankTransferCanBeSelected(supabase, "extension", extension.id);
+    } catch (error) {
+      return interaction.editReply({ content: `❌ ${error.message}` });
+    }
   }
 
   if (paymentMethod === "扣薪") {
@@ -10059,6 +10220,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
         customerId: extension.customer_id,
         amount,
         eligibility,
+        orderDetails: extension,
         confirmId: `salary_extension_confirm_${extension.id}`,
         cancelId: `salary_extension_cancel_${extension.id}`,
         purpose: "續單",
@@ -10077,7 +10239,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
     const ecpay = paymentMethod === "綠界支付";
     const createPayment = ecpay ? paymentHelpers.createEcpayServicePayment : paymentHelpers.createJkopayServicePayment;
     if (!(ecpay ? paymentHelpers.ecpayAvailable : paymentHelpers.jkopayAvailable) || !createPayment)
-      return interaction.editReply({ content: `❌ ${paymentMethod}目前無法使用，請改選其他付款方式。` });
+      return interaction.editReply({ content: `❌ ${formatWalletPaymentName(paymentMethod)}目前無法使用，請改選其他付款方式。` });
     try {
       const payment = await createPayment({
         kind: "extension",
@@ -10096,7 +10258,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
       if (updateError) throw updateError;
       if (ecpay) payment.preferredMethod = selection?.requestedMethod;
       await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, extension.customer_id, amount, payment, "加時");
-      return interaction.editReply({ content: `✅ 已建立加時${paymentMethod}付款連結，付款完成後會自動核帳。` });
+      return interaction.editReply({ content: `✅ 已建立加時${formatWalletPaymentName(paymentMethod)}付款連結，付款完成後會自動核帳。` });
     } catch (err) {
       return interaction.editReply({ content: `❌ 建立街口付款失敗：${err.message || err}` });
     }
@@ -10211,7 +10373,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
     }
   }
 
-  // 儲值卡直接扣款
+  // 錢包直接扣款
   if (paymentMethod.includes("儲值卡")) {
     await supabase
       .from("order_extensions")
@@ -10224,7 +10386,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`confirm_extension_wallet_${extension.id}`)
-        .setLabel("確認使用儲值卡付款")
+        .setLabel("確認使用錢包付款")
         .setEmoji("💳")
         .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
@@ -10237,9 +10399,9 @@ async function handleExtensionPaymentMethodSelect(interaction) {
       embeds: [
         new EmbedBuilder()
           .setColor(QIUNAI_WATER_BLUE)
-          .setTitle("💳 確認加時儲值卡付款")
+          .setTitle("💳 確認加時錢包付款")
           .setDescription(
-            `請確認是否使用儲值卡 / 錢包付款。\n\n` +
+            `請確認是否使用錢包付款。\n\n` +
               `原訂單：${extension.order_no || extension.order_id}\n` +
               `加時內容：${extension.extension_text}\n` +
               `扣款金額：${Number(extension.amount || 0).toLocaleString(
@@ -10252,7 +10414,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
       components: [row],
     });
     return interaction.editReply({
-      content: "✅ 已選擇儲值卡付款，請闆闆確認是否使用此付款方式。",
+      content: "✅ 已選擇錢包付款，請闆闆確認是否使用此付款方式。",
     });
   }
   const { data: updatedExtension, error: updateError } = await supabase
@@ -10288,7 +10450,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
           .setColor("#ffaa00")
           .setTitle("💳 特殊付款方式")
           .setDescription(
-            `<@${extension.customer_id}> 你選擇了：${paymentMethod}\n\n` +
+            `<@${extension.customer_id}> 你選擇了：${formatWalletPaymentName(paymentMethod)}\n\n` +
               `請等待客服提供付款帳號 / 錢包地址。\n` +
               `付款完成後請上傳付款截圖，等待客服確認。`
           )
@@ -10310,7 +10472,7 @@ async function handleExtensionPaymentMethodSelect(interaction) {
   });
 
   return interaction.editReply({
-    content: `✅ 已選擇加時付款方式：${paymentMethod}`,
+    content: `✅ 已選擇加時付款方式：${formatWalletPaymentName(paymentMethod)}`,
   });
 }
 
@@ -10515,7 +10677,7 @@ async function handleConfirmExtensionWallet(interaction) {
 
   if (interaction.user.id !== extension.customer_id) {
     return interaction.editReply({
-      content: "❌ 只有下單闆闆可以確認加時儲值卡付款",
+      content: "❌ 只有下單闆闆可以確認加時錢包付款",
     });
   }
 
@@ -10537,10 +10699,10 @@ async function handleConfirmExtensionWallet(interaction) {
     },
   );
   if (paymentError || !paymentResult) {
-    console.error("[加時儲值卡確認] 原子付款失敗", paymentError);
+    console.error("[加時錢包確認] 原子付款失敗", paymentError);
     return interaction.editReply({
       content:
-        `❌ 儲值卡扣款失敗。\n` +
+        `❌ 錢包扣款失敗。\n` +
         `可能是 ASD 餘額不足、加時已使用其他方式付款，或錢包系統異常。\n` +
         `錯誤：${paymentError?.message || "未取得付款結果"}`,
     });
@@ -10585,7 +10747,7 @@ async function handleConfirmExtensionWallet(interaction) {
 
   await recordPaidExtensionConsumption(
     paidExtension,
-    `續單儲值卡付款 ${paidExtension.order_no || paidExtension.order_id}`,
+    `續單錢包付款 ${paidExtension.order_no || paidExtension.order_id}`,
   );
 
   await paymentHelpers.recordAccountingLedger?.({
@@ -10620,13 +10782,13 @@ async function handleConfirmExtensionWallet(interaction) {
     embeds: [
       new EmbedBuilder()
         .setColor("#57F287")
-        .setTitle("✅ 加時儲值卡付款完成")
+        .setTitle("✅ 加時錢包付款完成")
         .setDescription(
           `原訂單：${extension.order_no || extension.order_id}\n` +
             `闆闆：<@${extension.customer_id}>\n` +
             `加時內容：${extension.extension_text}\n` +
             `加時金額：NT$${amount.toLocaleString("zh-TW")}\n` +
-            `付款方式：儲值卡\n` +
+            `付款方式：錢包\n` +
             `扣款後餘額：${Number(finalCoins || 0).toLocaleString(
               "zh-TW"
             )} ASD` +
@@ -10639,7 +10801,7 @@ async function handleConfirmExtensionWallet(interaction) {
   });
 
   return interaction.editReply({
-    content: "✅ 已確認使用儲值卡完成加時付款",
+    content: "✅ 已確認使用錢包完成加時付款",
   });
 }
 async function handleStaffConfirmExtensionPaid(interaction) {
@@ -10679,6 +10841,12 @@ async function handleStaffConfirmExtensionPaid(interaction) {
   if (extension.paid) {
     return interaction.editReply({
       content: "⚠️ 這筆加時已經確認付款過了",
+    });
+  }
+
+  if (isSalaryDeductionPaymentMethod(extension.payment_method)) {
+    return interaction.editReply({
+      content: "❌ 員工扣薪必須使用專屬扣薪確認按鈕，不能用一般付款按鈕核帳。",
     });
   }
 
@@ -10907,10 +11075,7 @@ async function openSaveOrderNoteModal(interaction) {
 async function openDispatchPlayerMenu(interaction) {
   const orderId = interaction.customId.replace("dispatch_assign_players_", "");
 
-  if (
-    !memberHasRole(interaction.member, process.env.STAFF_ROLE) &&
-    !interactionHasPermission(interaction, PermissionFlagsBits.Administrator)
-  ) {
+  if (!canCustomerOrStaffSubmit(interaction, null)) {
     return interaction.editReply({
       content: "❌ 只有客服可以派單",
     });
@@ -10975,10 +11140,7 @@ async function submitDispatchPlayers(interaction) {
 
   const orderId = interaction.customId.replace("submit_dispatch_players_", "");
 
-  if (
-    !memberHasRole(interaction.member, process.env.STAFF_ROLE) &&
-    !interactionHasPermission(interaction, PermissionFlagsBits.Administrator)
-  ) {
+  if (!canCustomerOrStaffSubmit(interaction, null)) {
     return interaction.editReply({
       content: "❌ 只有客服可以派單",
       components: [],
@@ -10995,6 +11157,7 @@ async function submitDispatchPlayers(interaction) {
       preferred_player: preferredPlayerValue,
     })
     .eq("id", orderId)
+    .in("status", ["waiting_quote", "quoted", "waiting_payment", "pending"])
     .select()
     .single();
 
@@ -11245,7 +11408,7 @@ async function handleTopupPaymentMethodSelect(interaction) {
       `👤 會員：${interaction.user}\n\n` +
         `🔢 購買編號：${topupNo}\n` +
         `💵 購買金額：NT$${amount}\n` +
-        `💳 付款方式：${method}\n` +
+        `💳 付款方式：${formatWalletPaymentName(method)}\n` +
         `📝 備註：${note}`
     );
 
@@ -11283,7 +11446,7 @@ async function handleTopupPaymentMethodSelect(interaction) {
           .setColor("#ffaa00")
           .setTitle("💳 特殊付款方式")
           .setDescription(
-            `<@${interaction.user.id}> 你選擇了：${method}\n\n` +
+            `<@${interaction.user.id}> 你選擇了：${formatWalletPaymentName(method)}\n\n` +
               `請等待客服提供付款帳號 / 錢包地址。\n` +
               `付款完成後請上傳付款截圖，等待客服確認。`
           )
@@ -11293,7 +11456,7 @@ async function handleTopupPaymentMethodSelect(interaction) {
   }
 
   return interaction.editReply({
-    content: `✅ 已選擇付款方式：${method}`,
+    content: `✅ 已選擇付款方式：${formatWalletPaymentName(method)}`,
     components: [],
   });
 }
@@ -11492,7 +11655,7 @@ async function submitSaveOrderNote(interaction) {
       },
       {
         name: "💳 付款方式",
-        value: order.payment_method || "未填寫",
+        value: formatWalletPaymentName(order.payment_method || "未填寫"),
         inline: true,
       },
       {
@@ -11702,7 +11865,7 @@ async function submitChangeOrderPrice(interaction) {
       },
       {
         name: "💳 付款方式",
-        value: order.payment_method || "未填寫",
+        value: formatWalletPaymentName(order.payment_method || "未填寫"),
         inline: true,
       },
       {
@@ -12456,6 +12619,7 @@ async function handleValorantRankSelect(interaction) {
 
   const unit = pending.valorantCompanionRank
     ? getValorantExpectedUnit({
+        platformOrMode: pending.playMode,
         serviceType: pending.rank,
         rankOrMap: pending.valorantCompanionRank,
       })
@@ -12515,6 +12679,10 @@ async function handleLolRankSelect(interaction) {
   }
 
   pending.rank = interaction.values[0];
+  if (isOctoberValorantPricingActive()) {
+    pending.rounds = null;
+    pending.duration = null;
+  }
 
   await pendingServiceOrders.set(flowId, pending);
 
@@ -12539,6 +12707,11 @@ async function handleServicePlayerCountSelect(interaction) {
   }
 
   const selectedCount = Number(interaction.values[0]);
+
+  if (isOctoberValorantPricingActive() && pending.category === "delta" &&
+      String(pending.deltaMode || "").includes("保底單") && selectedCount !== 2) {
+    return interaction.editReply({ content: "❌ 這個雙護保底項目固定兩位陪陪，請選 2 位。" });
+  }
 
   if (isValorantEntertainmentSkillOrder(pending) && selectedCount < 2) {
     return interaction.editReply({
@@ -12919,7 +13092,18 @@ async function handleServiceDurationSelect(interaction) {
     });
   }
 
+  if (isOctoberValorantPricingActive()) {
+    if (pending.category === "delta" && String(pending.deltaMode || "").includes("保底單")) {
+      return interaction.editReply({ content: "❌ 這個三角洲保底項目以單數計價，請選擇保底單數。" });
+    }
+    if (pending.category === "lol" && pending.itemLabel !== "ARAM" &&
+        !(pending.rank === "娛樂" && pending.playMode === "娛樂")) {
+      return interaction.editReply({ content: "❌ 此英雄聯盟組合以局數計價；只有一般娛樂 260 元是每小時。" });
+    }
+  }
+
   pending.duration = interaction.values[0];
+  pending.rounds = null;
 
   await pendingServiceOrders.set(flowId, pending);
 
@@ -12949,7 +13133,18 @@ async function handleServiceRoundsSelect(interaction) {
     });
   }
 
+  if (isOctoberValorantPricingActive()) {
+    if (pending.category === "delta" && !String(pending.deltaMode || "").includes("保底單")) {
+      return interaction.editReply({ content: "❌ 此三角洲項目以小時計價，請選擇時間。" });
+    }
+    if (pending.category === "lol" && pending.itemLabel !== "ARAM" &&
+        pending.rank === "娛樂" && pending.playMode === "娛樂") {
+      return interaction.editReply({ content: "❌ 一般娛樂每小時 NT$260，請選擇時間。" });
+    }
+  }
+
   pending.rounds = interaction.values[0];
+  pending.duration = null;
 
   await pendingServiceOrders.set(flowId, pending);
 
@@ -12958,8 +13153,8 @@ async function handleServiceRoundsSelect(interaction) {
   return interaction.editReply({
     content:
       pending.rounds === "custom"
-        ? "✅ 已選擇自訂局數，請在頻道內告訴客服想要的局數。"
-        : `✅ 已選擇局數：${pending.rounds} 局`,
+        ? `✅ 已選擇自訂${pending.category === "delta" ? "保底單數" : "局數"}，請在頻道內告訴客服數量。`
+        : `✅ 已選擇${pending.category === "delta" ? "保底單數" : "局數"}：${pending.rounds} ${pending.category === "delta" ? "單" : "局"}`,
   });
 }
 
@@ -13007,6 +13202,21 @@ async function handleDeltaModeSelect(interaction) {
   }
 
   pending.deltaMode = interaction.values[0];
+  if (isOctoberValorantPricingActive()) {
+    pending.duration = null;
+    pending.rounds = null;
+    if (pending.deltaMode.includes("保底單")) {
+      pending.playerCount = 2;
+      const countMenu = new StringSelectMenuBuilder()
+        .setCustomId(`service_rounds_${flowId}`)
+        .setPlaceholder("請選擇保底單數")
+        .addOptions([1, 2, 3, 4].map((count) => ({ label: `${count} 單`, value: String(count) })));
+      await interaction.channel.send({
+        content: "這個雙護保底項目依單數計價，固定兩位陪陪；請選擇保底單數。",
+        components: [new ActionRowBuilder().addComponents(countMenu)],
+      });
+    }
+  }
 
   pending.serviceType = `三角洲行動｜${
     pending.deltaPlatform || pending.itemLabel || "未選平台"
@@ -13412,11 +13622,12 @@ async function sendServiceCouponPrompt(channel, flowId, pending) {
     new ButtonBuilder()
       .setCustomId(`service_no_coupon_${flowId}`)
       .setLabel("不使用優惠券")
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(ButtonStyle.Secondary),
+    ...(isVipPointsActive() ? [pointsDisableButton("service", flowId)] : [])
   );
 
   await channel.send({
-    content: `<@${pending.customerId}> ${pending.autoQuote ? "系統已完成自動報價" : "客服已完成報價"}，請選擇是否使用優惠券。`,
+    content: `<@${pending.customerId}> ${pending.autoQuote ? "系統已完成自動報價" : "客服已完成報價"}，請選擇是否使用${isVipPointsActive() ? "點數或" : ""}優惠券。`,
     embeds: [
       new EmbedBuilder()
         .setColor(QIUNAI_WATER_BLUE)
@@ -13424,7 +13635,8 @@ async function sendServiceCouponPrompt(channel, flowId, pending) {
         .setDescription(
           `服務：${getServiceName(pending.category)}\n` +
             `${buildServiceQuoteAmountText(pending)}\n\n` +
-            `請先選擇是否使用優惠券，再選擇付款方式。`
+            `請先選擇是否使用優惠券，再選擇付款方式。` +
+            await pointsPromptText(pending.customerId) + (pending.pointsEnabled === false ? "\n本單點數折抵已關閉。" : "")
         )
         .setTimestamp(),
     ],
@@ -13470,6 +13682,14 @@ async function handleServiceQuoteConfirm(interaction) {
   return interaction.editReply({ content: `✅ 已確認報價 NT$${price.toLocaleString("zh-TW")}，請選擇優惠券與付款方式。` });
 }
 async function sendServicePaymentMethodSelect(channel, flowId, pending) {
+  if (isVipPointsActive()) {
+    const couponAmount = Math.max(0, getServiceOriginalPrice(pending) - Number(pending.discountAmount || 0));
+    const reservation = await vipPoints().reserve(pending.customerId, `flow:${flowId}`, couponAmount, pending.pointsEnabled !== false);
+    pending.finalPrice = reservation.amount_due;
+    pending.pointsUsed = reservation.points;
+    pending.pointsCheckoutKey = reservation.checkout_key;
+    await pendingServiceOrders.set(flowId, pending);
+  }
   const salaryDeductionEnabled = await isActiveSalaryDeductionStaff(
     pending.customerId,
   );
@@ -13490,7 +13710,8 @@ async function sendServicePaymentMethodSelect(channel, flowId, pending) {
         .setTitle("💳 選擇付款方式")
         .setDescription(
           `服務：${getServiceName(pending.category)}\n` +
-            `${buildServiceQuoteAmountText(pending)}\n\n` +
+            `${buildServiceQuoteAmountText(pending)}\n` +
+            (pending.pointsUsed ? `點數折抵：${pending.pointsUsed} 點\n應付金額：NT$${pending.finalPrice}\n` : "") + `\n` +
             `付款完成後請上傳付款證明。`
         )
         .setTimestamp(),
@@ -13993,7 +14214,7 @@ async function createPlayOrderFromServicePending(pending, channelId) {
 
   const serviceText = buildServiceTextFromPending(pending);
 
-  return getOrCreateServiceOrder(supabase, {
+  const createdOrder = await getOrCreateServiceOrder(supabase, {
       guild_id: pending.guildId || process.env.GUILD_ID,
       service_flow_key: pending.flowId ? `${pending.flowId}:${pending.splitRole || "single"}` : null,
       order_group_id: pending.serviceGroupId || null,
@@ -14048,6 +14269,8 @@ async function createPlayOrderFromServicePending(pending, channelId) {
 
       status: "waiting_payment",
     }, getNextPlayOrderNumber);
+  if (!pending.splitRole) await vipPoints().bind(pending.customerId, pending.pointsCheckoutKey, [createdOrder]);
+  return createdOrder;
 }
 function clonePendingForValorantSplit(
   pending,
@@ -14145,6 +14368,7 @@ async function createValorantSplitOrdersFromPending(pending, channelId) {
     console.error("[特戰分單] 讀取分單失敗", error);
     throw new Error("建立分單後讀取失敗");
   }
+  await vipPoints().bind(pending.customerId, pending.pointsCheckoutKey, orders);
 
   return {
     groupId,
@@ -14198,7 +14422,7 @@ async function sendServiceWalletConfirm(interaction, order, orderGroup) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(confirmId)
-      .setLabel("確認使用儲值卡付款")
+      .setLabel("確認使用錢包付款")
       .setEmoji("💳")
       .setStyle(ButtonStyle.Success),
 
@@ -14213,9 +14437,9 @@ async function sendServiceWalletConfirm(interaction, order, orderGroup) {
     embeds: [
       new EmbedBuilder()
         .setColor(QIUNAI_WATER_BLUE)
-        .setTitle("💳 確認儲值卡付款")
+        .setTitle("💳 確認錢包付款")
         .setDescription(
-          `請確認是否使用儲值卡 / 錢包付款。\n\n` +
+          `請確認是否使用錢包付款。\n\n` +
             `扣款金額：NT$${totalAmount.toLocaleString("zh-TW")}\n\n` +
             (isGroup
               ? `此為特戰娛樂＋技術合併付款，系統會一次扣總額，扣款後分開派單。`
@@ -14298,9 +14522,9 @@ async function handleServicePaymentMethodSelect(interaction) {
     return interaction.editReply({ content: "❌ 請先確認最新報價金額。" });
   }
 
-  const paymentMethod = selection?.paymentMethod;
+  const paymentMethod = normalizeSalaryDeductionPaymentMethod(selection?.paymentMethod);
 
-  if (pending.checkoutStarted && pending.paymentMethod !== paymentMethod) {
+  if (pending.checkoutStarted && normalizeSalaryDeductionPaymentMethod(pending.paymentMethod) !== paymentMethod) {
     return interaction.editReply({ content: "這筆需求已建立付款確認，請使用原付款訊息；如需更改付款方式，請聯繫客服。" });
   }
 
@@ -14331,6 +14555,7 @@ async function handleServicePaymentMethodSelect(interaction) {
         customerId: pending.customerId,
         amount,
         eligibility,
+        orderDetails: pending,
         confirmId: `salary_service_confirm_${flowId}`,
         cancelId: `salary_service_cancel_${flowId}`,
         transferId: `salary_service_transfer_${flowId}`,
@@ -14374,6 +14599,7 @@ async function handleServicePaymentMethodSelect(interaction) {
       pending,
       orderGroup ? orderGroup.orders : order
     );
+    await vipPoints().bind(pending.customerId, pending.pointsCheckoutKey, orderGroup ? orderGroup.orders : [order]);
   } catch (err) {
     console.error("[新版下單] 建立訂單失敗", err);
     return interaction.editReply({
@@ -14383,7 +14609,7 @@ async function handleServicePaymentMethodSelect(interaction) {
   if (paymentMethod === "儲值卡") {
     await sendServiceWalletConfirm(interaction, order, orderGroup);
     return interaction.editReply({
-      content: "✅ 已選擇儲值卡 / 錢包付款，請確認是否使用此付款方式。",
+      content: "✅ 已選擇錢包付款，請確認是否使用此付款方式。",
     });
   }
   if (paymentMethod === "月結") {
@@ -14395,7 +14621,7 @@ async function handleServicePaymentMethodSelect(interaction) {
   if (paymentMethod === "街口支付" || paymentMethod === "綠界支付") {
     const ecpay = paymentMethod === "綠界支付";
     const createPayment = ecpay ? paymentHelpers.createEcpayServicePayment : paymentHelpers.createJkopayServicePayment;
-    if (!createPayment) return interaction.editReply({ content: `❌ ${paymentMethod}尚未完成設定。` });
+    if (!createPayment) return interaction.editReply({ content: `❌ ${formatWalletPaymentName(paymentMethod)}尚未完成設定。` });
     const orders = orderGroup ? orderGroup.orders : [order];
     const amount = orders.reduce(
       (sum, current) => sum + Number(current.final_price || current.price || 0),
@@ -14422,9 +14648,9 @@ async function handleServicePaymentMethodSelect(interaction) {
       }
       await (ecpay ? sendEcpayPaymentPrompt : sendJkopayPaymentPrompt)(interaction.channel, pending.customerId, amount, payment, "訂單");
       await pendingServiceOrders.delete(flowId);
-      return interaction.editReply({ content: `✅ 已建立${paymentMethod}付款連結，付款完成後會自動核帳並派單。` });
+      return interaction.editReply({ content: `✅ 已建立${formatWalletPaymentName(paymentMethod)}付款連結，付款完成後會自動核帳並派單。` });
     } catch (err) {
-      return interaction.editReply({ content: `❌ 建立${paymentMethod}付款失敗：${err.message || err}` });
+      return interaction.editReply({ content: `❌ 建立${formatWalletPaymentName(paymentMethod)}付款失敗：${err.message || err}` });
     }
   }
 
@@ -14443,7 +14669,7 @@ async function handleServicePaymentMethodSelect(interaction) {
   if (paymentMethod === "加密貨幣" || paymentMethod === "虛擬貨幣" || paymentMethod === "美金轉帳") {
     await interaction.channel.send({
       content:
-        `<@${pending.customerId}> 你選擇了${paymentMethod}付款。\n` +
+        `<@${pending.customerId}> 你選擇了${formatWalletPaymentName(paymentMethod)}付款。\n` +
         `請等待客服提供${paymentMethod === "美金轉帳" ? "轉帳帳號" : "錢包地址"}，付款後請上傳付款證明。`,
     });
   }
@@ -14467,7 +14693,7 @@ async function handleServicePaymentMethodSelect(interaction) {
 
   await interaction.channel.send({
     content:
-      `<@&${process.env.STAFF_ROLE}> 客人已選擇付款方式：${paymentMethod}\n` +
+      `<@&${process.env.STAFF_ROLE}> 客人已選擇付款方式：${formatWalletPaymentName(paymentMethod)}\n` +
       (orderGroup
         ? `本次為特戰娛樂＋技術合併付款，合計 NT$${orderGroup.totalPrice.toLocaleString(
             "zh-TW"
@@ -14480,7 +14706,7 @@ async function handleServicePaymentMethodSelect(interaction) {
   await pendingServiceOrders.delete(flowId);
 
   return interaction.editReply({
-    content: `✅ 已選擇付款方式：${paymentMethod}，請依照頻道內資訊完成付款。`,
+    content: `✅ 已選擇付款方式：${formatWalletPaymentName(paymentMethod)}，請依照頻道內資訊完成付款。`,
   });
 }
 
@@ -14494,7 +14720,7 @@ async function handleSalaryServiceConfirm(interaction) {
 
   const flowId = interaction.customId.replace("salary_service_confirm_", "");
   const pending = await pendingServiceOrders.get(flowId);
-  if (!pending || pending.paymentMethod !== "扣薪") {
+  if (!pending || !isSalaryDeductionPaymentMethod(pending.paymentMethod)) {
     return interaction.editReply({
       content: "❌ 這筆扣薪付款已過期或已處理，請重新下單。",
     });
@@ -14636,7 +14862,7 @@ async function handleSalaryServiceTransfer(interaction) {
   }
   const flowId = interaction.customId.replace("salary_service_transfer_", "");
   const pending = await pendingServiceOrders.get(flowId);
-  if (!pending || pending.paymentMethod !== "扣薪") {
+  if (!pending || !isSalaryDeductionPaymentMethod(pending.paymentMethod)) {
     return interaction.editReply({ content: "❌ 這筆扣薪付款已過期或已處理。" });
   }
   const amount = getServiceFinalPrice(pending);
@@ -14780,7 +15006,7 @@ async function handleServiceConfirmWallet(interaction) {
     .maybeSingle();
 
   if (error || !order) {
-    console.error("[儲值卡確認] 找不到訂單", error);
+    console.error("[錢包確認] 找不到訂單", error);
     return interaction.editReply({
       content: "❌ 找不到訂單",
     });
@@ -14834,9 +15060,9 @@ async function handleServiceConfirmWallet(interaction) {
       embeds: [
         new EmbedBuilder()
           .setColor("#57F287")
-          .setTitle("✅ 儲值卡付款完成")
+          .setTitle("✅ 錢包付款完成")
           .setDescription(
-            `<@${order.customer_id}> 已確認使用儲值卡付款。\n\n` +
+            `<@${order.customer_id}> 已確認使用錢包付款。\n\n` +
               `扣款金額：${Number(result.amount || 0).toLocaleString(
                 "zh-TW"
               )} ASD\n` +
@@ -14852,15 +15078,15 @@ async function handleServiceConfirmWallet(interaction) {
     await interaction.message?.edit({ components: [] }).catch(() => null);
 
     return interaction.editReply({
-      content: "✅ 儲值卡付款成功，已派單。",
+      content: "✅ 錢包付款成功，已派單。",
     });
   } catch (err) {
-    console.error("[儲值卡確認] 付款或派單失敗", err);
+    console.error("[錢包確認] 付款或派單失敗", err);
 
     return interaction.editReply({
       content: paymentCompleted
         ? `⚠️ ASD 扣款已完成，本次不會再扣款；Discord 派單將自動補發：${err.message || err}`
-        : `❌ 儲值卡付款失敗：${err.message || err}`,
+        : `❌ 錢包付款失敗：${err.message || err}`,
     });
   }
 }
@@ -15067,6 +15293,7 @@ async function handleServiceCancelOrder(interaction) {
 }
 async function handleDispatchInteraction(interaction) {
   const customId = interaction.customId || "";
+  if (/^(service|quote)_disable_points_/.test(customId)) return disableCheckoutPoints(interaction);
   const paymentSelection = [
     "quote_payment_method_",
     "extension_payment_method_",
@@ -15076,6 +15303,14 @@ async function handleDispatchInteraction(interaction) {
   const key = paymentSelection?.entityId ||
     customId.match(/(VG-[\w-]+|[0-9a-f]{8}-[0-9a-f-]{27}|\d{16,22}_\d{13})$/i)?.[1];
   return guardOrderOperation(key, async () => {
+    if (isVipPointsActive() && /^(quote_no_coupon_|quote_use_coupon_|quote_select_coupon_)/.test(customId)) {
+      const orderId = customId.replace(/^quote_(?:no_coupon|use_coupon|select_coupon)_/, "");
+      const { data: locked } = await supabase.from("play_orders").select("vip_point_checkout_key,paid").eq("id", orderId).maybeSingle();
+      if (locked?.vip_point_checkout_key || locked?.paid) {
+        await deferReplyOnce(interaction);
+        return interaction.editReply({ content: "已進入付款階段，不能重新套用優惠券；如需更改請取消後重新下單。" });
+      }
+    }
     // Once checkout starts, old requirements/coupon/quote controls cannot rewrite its amount.
     if (key && /^\d{16,22}_\d{13}$/.test(key) &&
         /^(service_|submit_service_|order_|valorant_|apex_|lol_|steam_|delta_)/.test(customId) &&
@@ -15529,7 +15764,7 @@ async function handleDispatchInteractionInner(interaction) {
         });
       }
       return interaction.editReply({
-        content: "已取消加時儲值卡付款，請重新選擇付款方式或聯繫客服。",
+        content: "已取消加時錢包付款，請重新選擇付款方式或聯繫客服。",
       });
     }
     if (interaction.customId.startsWith("staff_confirm_extension_paid_")) {
@@ -15809,7 +16044,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
     if (!paidOrders.length) throw new Error(`${paymentLabel}付款成功，但找不到可恢復的已付款訂單`);
     for (const order of paidOrders) {
       await paymentHelpers.sendOrderReceiptSafely?.(order);
-      await paymentHelpers.countOrderVipSpentOnce?.(order, `${paymentMethod}付款完成`);
+      await paymentHelpers.countOrderVipSpentOnce?.(order, `${formatWalletPaymentName(paymentMethod)}付款完成`);
       if (selfServiceFlow) {
         const selectedIds = selfServicePlayerIds.length
           ? selfServicePlayerIds
@@ -15892,7 +16127,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
       );
       await channel.send({
         embeds: [new EmbedBuilder().setColor("#57F287").setTitle(`✅ ${paymentLabel}訂單付款完成`).setDescription(
-          `<@${payment.user_id}> 已完成${paymentMethod} NT$${Number(payment.amount).toLocaleString("zh-TW")}。\n` +
+          `<@${payment.user_id}> 已完成${formatWalletPaymentName(paymentMethod)} NT$${Number(payment.amount).toLocaleString("zh-TW")}。\n` +
             `${paymentLabel}訂單編號：${payment.platform_order_id}\n` +
             (selfServiceFlow
               ? "系統已自動加入陪陪並發送報單。"
@@ -15953,7 +16188,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
       userId: payment.user_id,
       amount: Number(payment.amount),
       sourceKey: `${providerKey}-service:${payment.platform_order_id}:extension`,
-      note: `加時${paymentMethod} ${extension.order_no || extension.order_id}`,
+      note: `加時${formatWalletPaymentName(paymentMethod)} ${extension.order_no || extension.order_id}`,
     });
     if (channel?.isTextBased()) {
       await channel.send({
@@ -15974,6 +16209,8 @@ async function handleJkopayServicePaid({ payment, transaction }) {
 }
 
 module.exports = {
+  createWebsiteOrder,
+  isActivePaymentStaff: isActiveSalaryDeductionStaff,
   setup,
   handleDispatchInteraction,
   sendPlayerPanel,

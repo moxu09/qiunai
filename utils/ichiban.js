@@ -1,5 +1,6 @@
 const { createHash } = require('node:crypto');
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
+const {GUILD,ticketCount,ICHIBAN_TICKETS,ticketBalanceButton}=require('./drawTickets');
 
 const CHANNEL_ID = '1513321718784196718';
 const PAGE_URL = 'https://qiunai.gaming.wearestilllhere.com/ichiban';
@@ -30,7 +31,7 @@ function buildPanel({ prizes, stock, enabled }) {
     new ButtonBuilder().setCustomId(`${PREFIX}mine`).setLabel('🧾 我的最近一抽').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setLabel('🌐 查看網頁版').setStyle(ButtonStyle.Link).setURL(PAGE_URL),
   );
-  return { embeds: [embed], components: [row] };
+  return { embeds: [embed], components: [row,new ActionRowBuilder().addComponents(ticketBalanceButton('ichiban'))] };
 }
 
 function createIchiban({ supabase, client, getPanelMessage, savePanelMessage, enabled = false }) {
@@ -79,31 +80,34 @@ function createIchiban({ supabase, client, getPanelMessage, savePanelMessage, en
     }
     if (action === 'draw') {
       if (!enabled) { await interaction.reply({ content: '一番賞正式抽獎尚未開放，未扣除 ASD。', flags: 64 }); return true; }
-      const row = new ActionRowBuilder().addComponents(new ButtonBuilder()
-        .setCustomId(`${PREFIX}confirm_${interaction.user.id}_${requestIdForInteraction(interaction.id)}`).setLabel('確認扣除 300 ASD 並抽取').setStyle(ButtonStyle.Danger));
-      await interaction.reply({ content: '每抽 300 ASD，按下確認後才會扣款並鎖定抽紙。抽取後無法取消。', components: [row], flags: 64 });
-      return true;
+      if ((interaction.guildId||interaction.guild?.id)!==GUILD) { await interaction.reply({content:'此入口僅供秋奈使用',flags:64});return true; }
+      await interaction.deferReply({flags:64});
+      let count;
+      try { count=await ticketCount(supabase,interaction.user.id,ICHIBAN_TICKETS); }
+      catch { await interaction.editReply({content:'暫時無法確認抽獎券，未扣券也未扣款，請稍後重試。'});return true; }
+      const requestId=requestIdForInteraction(interaction.id);
+      if(count){
+        const row=new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`${PREFIX}confirm_ticket_${interaction.user.id}_${requestId}`).setLabel('使用一番賞券・不扣 ASD').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`${PREFIX}confirm_${interaction.user.id}_${requestId}`).setLabel('不使用券・付 300 ASD').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`${PREFIX}cancel_${interaction.user.id}`).setLabel('取消').setStyle(ButtonStyle.Secondary));
+        await interaction.editReply({content:`🎟️ 你有 ${count} 張秋奈一番賞券，這次要使用 1 張嗎？\n使用券不扣 ASD；不使用則扣 300 ASD。`,components:[row]});return true;
+      }
+      return executeDraw(interaction,requestId,false);
+    }
+    if(action.startsWith('cancel_')){
+      if(action.slice(7)!==interaction.user.id){await interaction.reply({content:'這不是你的抽獎選項',flags:64});return true;}
+      await interaction.update({content:'已取消，未扣券也未扣款。',components:[]});return true;
     }
     if (action.startsWith('confirm_')) {
-      const [ownerId, requestId] = action.slice('confirm_'.length).split('_');
+      const useTicket=action.startsWith('confirm_ticket_');
+      const [ownerId, requestId] = action.slice(useTicket?'confirm_ticket_'.length:'confirm_'.length).split('_');
       if (ownerId !== interaction.user.id || !/^[0-9a-f-]{36}$/.test(requestId || '')) {
         await interaction.reply({ content: '這不是你的抽獎確認按鈕。', flags: 64 }); return true;
       }
       if (!enabled) { await interaction.reply({ content: '一番賞正式抽獎尚未開放，未扣除 ASD。', flags: 64 }); return true; }
       await interaction.deferUpdate();
-      const { data, error } = await supabase.rpc('qiunai_ichiban_draw_asd', {
-        p_discord_user_id: interaction.user.id,
-        p_request_id: requestId,
-      });
-      if (error) {
-        await interaction.editReply({ content: `抽獎未完成，未扣除 ASD：${error.message}`, components: [] });
-        return true;
-      }
-      const row = new ActionRowBuilder().addComponents(new ButtonBuilder()
-        .setCustomId(`${PREFIX}reveal_${data.draw_id}`).setLabel('🪄 往右掀開抽紙').setStyle(ButtonStyle.Success));
-      await interaction.editReply({ content: `🎟️ 秋奈一番賞｜抽紙 #${data.ticket_no}\n\n┏━━━━━━━━━━━━━━━┓\n┃　✨ 抓住紙角往右掀開　→　┃\n┗━━━━━━━━━━━━━━━┛\n\n已扣 300 ASD；按下方按鈕揭曉。`, components: [row] });
-      void publishPanel().catch((panelError) => console.error('[一番賞] 更新獎池面板失敗', panelError));
-      return true;
+      return executeDraw(interaction,requestId,useTicket);
     }
     if (action.startsWith('reveal_')) {
       const drawId = action.slice('reveal_'.length);
@@ -135,6 +139,14 @@ function createIchiban({ supabase, client, getPanelMessage, savePanelMessage, en
       return true;
     }
     return false;
+  }
+  async function executeDraw(interaction,requestId,useTicket){
+    const {data,error}=await supabase.rpc('qiunai_ichiban_with_ticket',{
+      p_user_id:interaction.user.id,p_request_id:requestId,p_use_ticket:useTicket});
+    if(error){await interaction.editReply({content:`抽獎未完成，未扣券也未扣款：${error.message}`,components:[]});return true;}
+    const row=new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`${PREFIX}reveal_${data.draw_id}`).setLabel('🪄 往右掀開抽紙').setStyle(ButtonStyle.Success));
+    await interaction.editReply({content:`🎟️ 秋奈一番賞｜抽紙 #${data.ticket_no}\n\n┏━━━━━━━━━━━━━━━┓\n┃　✨ 抓住紙角往右掀開　→　┃\n┗━━━━━━━━━━━━━━━┛\n\n${data.tickets_used?'已使用 1 張一番賞券，未扣 ASD':'已扣 300 ASD'}；按下方按鈕揭曉。`,components:[row]});
+    void publishPanel().catch(error=>console.error('[一番賞] 更新面板失敗',error.message));return true;
   }
   return { publishPanel, handle, loadStock };
 }

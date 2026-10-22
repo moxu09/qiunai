@@ -8,6 +8,17 @@ const { isEcpayAtmAvailable } = require("./ecpayAtmSchedule");
 // A BARCODE payment has one set of three codes and must not be sent twice.
 const directDeliveries = new Map();
 
+async function assertBankTransferCanBeSelected(supabase, kind, entityKey) {
+  const { data, error } = await supabase.from("ecpay_service_payments")
+    .select("status,metadata,raw_result")
+    .eq("organization_code", "qiunai").eq("payment_kind", kind)
+    .eq("entity_key", String(entityKey)).maybeSingle();
+  if (error) throw new Error("無法核對原付款資訊，請聯繫客服，勿重複付款");
+  if (data?.status === "paid" || (data?.status === "pending" &&
+      (data.metadata?.ecpay_direct_method || data.raw_result?.PaymentType)))
+    throw new Error("此筆已有有效綠界繳費資訊或已付款，請使用原訊息；需先由客服確認原交易失效，才能改用銀行匯款");
+}
+
 const METHODS = Object.freeze({
   ATM: { label: "匯款／ATM 虛擬帳號", min: 16, max: 49_999 },
   CVS: { label: "超商代碼", min: 34, max: 20_000 },
@@ -21,7 +32,7 @@ function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = nu
     throw new Error("綠界付款連結不正確");
   const buttons = [];
   if (!onlyMethod || onlyMethod === "CARD") {
-    buttons.push(new ButtonBuilder().setLabel("站內刷卡").setEmoji("💳")
+    buttons.push(new ButtonBuilder().setLabel("線上刷卡").setEmoji("💳")
       .setStyle(ButtonStyle.Link).setURL(`${base}/payments/ecpay/service/insite?order=${encodeURIComponent(order)}`));
   }
   for (const [method, limit] of Object.entries(METHODS)) {
@@ -84,6 +95,10 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
     if (payment.amount < limit.min || payment.amount > limit.max)
       throw new Error("此付款方式不適用這筆金額或訂單");
     const issuedMethod = payment.raw_result?.PaymentType || payment.metadata?.ecpay_direct_method;
+    // 人工單及人工加時的舊按鈕不可新取 ATM 號碼；已取號交易保留原資訊。
+    if (method === "ATM" && ["order", "extension", "tip"].includes(payment.payment_kind) &&
+        payment.metadata?.flow !== "self_service" && issuedMethod !== "ATM")
+      throw new Error("人工訂單、人工續單與人工打賞請使用原銀行匯款，並由客服確認入帳；此按鈕不再提供新的綠界 ATM 帳號");
     if (issuedMethod && issuedMethod !== method)
       throw new Error(`這筆綠界付款單已產生${issuedMethod}繳費資訊，無法改成${method}；請勿重複付款，請聯繫客服處理`);
     const deliveredId = payment.metadata?.ecpay_direct_message_id || directDeliveries.get(order)?.messageId;
@@ -159,4 +174,4 @@ async function sendPreferredEcpayDirect(channel, userId, order, supabase, baseUr
   return !failure;
 }
 
-module.exports = { buildEcpayPaymentRows, handleEcpayDirect, sendPreferredEcpayDirect, renderBarcodes };
+module.exports = { buildEcpayPaymentRows, handleEcpayDirect, sendPreferredEcpayDirect, renderBarcodes, assertBankTransferCanBeSelected };

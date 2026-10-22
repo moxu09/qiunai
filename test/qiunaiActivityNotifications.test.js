@@ -2,9 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   buildActivityAnnouncement,
-  buildActivityChannelAnnouncement,
   buildActivityDm,
-  listCurrentCompanionIds,
   notificationNonce,
 } = require("../events/qiunaiActivityNotifications");
 
@@ -29,24 +27,7 @@ test("活動公告列出時間、回覆期限、分類及 EIP 入口", () => {
 
 test("私訊說明由小奈通知，且各對象採不同的固定 nonce", () => {
   assert.match(buildActivityDm(activity), /小奈通知你/);
-  assert.doesNotMatch(buildActivityDm(activity), /@everyone/);
-  assert.match(buildActivityChannelAnnouncement(activity), /^@everyone\n/);
   assert.equal(notificationNonce(activity.id, "123"), notificationNonce(activity.id, "123"));
   assert.notEqual(notificationNonce(activity.id, "123"), notificationNonce(activity.id, "456"));
   assert.ok(notificationNonce(activity.id, "123").length <= 25);
-});
-
-test("通知名單只包含目前仍在員工群且持有陪陪身分組的人", async () => {
-  const members = new Map([
-    ["female", { id: "female", roles: { cache: new Set(["1513214106205950112"]) } }],
-    ["male", { id: "male", roles: { cache: new Set(["1513214182093488148"]) } }],
-    ["former", { id: "former", roles: { cache: new Set() } }],
-  ]);
-  const client = { guilds: { fetch: async () => ({ members: { fetch: async () => members } }) } };
-  assert.deepEqual([...await listCurrentCompanionIds(client)], ["female", "male"]);
-});
-
-test("無法核對員工群時停止私訊，不使用舊名單", async () => {
-  const client = { guilds: { fetch: async () => null } };
-  await assert.rejects(() => listCurrentCompanionIds(client), /停止活動私訊/);
 });

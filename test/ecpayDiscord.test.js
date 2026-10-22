@@ -17,7 +17,7 @@ test("綠界刷卡留在站內；ATM 與超商由機器人直接取號", () => {
   const rows = buildEcpayPaymentRows(payment, 100);
   const buttons = rows[0].components.map(button => button.toJSON());
   assert.equal(buttons[0].url, `https://pay.example/payments/ecpay/service/insite?order=${order}`);
-  assert.equal(buttons[0].label, "站內刷卡");
+  assert.equal(buttons[0].label, "線上刷卡");
   assert.deepEqual(buttons.slice(1).map(button => button.custom_id), [
     `ecpay_direct_ATM_${order}`, `ecpay_direct_CVS_${order}`, `ecpay_direct_BARCODE_${order}`,
   ]);
@@ -30,7 +30,7 @@ test("自助訂單選擇單一綠界方式時只顯示該方式", () => {
   Date.now = () => ECPAY_ATM_START;
   try {
     const card = buildEcpayPaymentRows(payment, 100, { onlyMethod: "CARD" })[0].components.map(button => button.toJSON());
-    assert.deepEqual(card.map(button => button.label), ["站內刷卡"]);
+    assert.deepEqual(card.map(button => button.label), ["線上刷卡"]);
     const cvs = buildEcpayPaymentRows(payment, 100, { onlyMethod: "CVS" })[0].components.map(button => button.toJSON());
     assert.deepEqual(cvs.map(button => button.label), ["超商代碼"]);
     const barcode = buildEcpayPaymentRows(payment, 100, { onlyMethod: "BARCODE" })[0].components.map(button => button.toJSON());
@@ -110,7 +110,7 @@ test("人工訂單與舊按鈕匯款回到連線銀行，自助購幣仍走綠�
     const manualButtons = buildEcpayPaymentRows(payment, 100, { allowAtm: false })[0].components.map(button => button.toJSON());
     assert.equal(manualButtons.some(button => button.custom_id?.includes("_ATM_")), false);
     const dispatch = readFileSync(join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
-    assert.match(dispatch, /allowAtm: label !== "訂單" \|\| payment\.selfService === true/);
+    assert.ok(dispatch.includes('allowAtm: !["訂單", "加時"].includes(label) || payment.selfService === true'));
     assert.match(dispatch, /async function sendBankTransferInfo\(channel\) \{[\s\S]*?銀行：824連線銀行/);
   } finally {
     Date.now = originalNow;
@@ -146,7 +146,7 @@ test("虛擬 ATM 取號後直接發到原付款頻道，未標記已付款", asy
   const supabase = { from(table) {
     assert.equal(table, "ecpay_service_payments");
     return { select() { return this; }, update() { return this; }, eq() { return this; },
-      async maybeSingle() { return { data: { user_id: "123", channel_id: "456", status: "pending", amount: 100, payment_kind: "order" }, error: null }; } };
+      async maybeSingle() { return { data: { user_id: "123", channel_id: "456", status: "pending", amount: 100, payment_kind: "order", metadata: { flow: "self_service" } }, error: null }; } };
   } };
   const originalFetch = global.fetch;
   const originalSecret = process.env.SUPABASE_SERVICE_ROLE_KEY;

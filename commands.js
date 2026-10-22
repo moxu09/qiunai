@@ -1,6 +1,13 @@
 const { SlashCommandBuilder } = require("discord.js");
 
 module.exports = [
+  new SlashCommandBuilder().setName("首充返利")
+    .setDescription("查看或選擇本月首充消費點數返利方案")
+    .addStringOption(option => option.setName("方案").setDescription("已領本月返利後不能更換")
+      .addChoices({name:"每月首充返利",value:"monthly"},{name:"每週首充返利",value:"weekly"})),
+  new SlashCommandBuilder().setName("支付")
+    .setDescription("客服私密查詢顧客本月、上月已付款訂單及付款方式")
+    .addUserOption(option => option.setName("玩家").setDescription("要查詢的顧客").setRequired(true)),
   new SlashCommandBuilder().setName("ping").setDescription("測試機器人"),
 
   new SlashCommandBuilder().setName("rank").setDescription("查看排名"),

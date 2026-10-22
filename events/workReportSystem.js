@@ -497,6 +497,27 @@ function buildUpdatedReportEmbed(message, meta) {
     0,
   );
   const expectedMinutes = Number(meta.expectedDurationMinutes || 0);
+  const serviceEnded = Boolean(
+    meta.closedEarly ||
+      (meta.endedAt && !meta.pendingSegmentStart &&
+        (!expectedMinutes || totalMinutes >= expectedMinutes)),
+  );
+  const reportState = serviceEnded
+    ? "已結束｜薪資待審核"
+    : meta.pendingSegmentStart
+      ? "服務進行中｜等待結束時間"
+      : totalMinutes > 0
+        ? "工時不足｜尚未結束"
+        : "等待開始時間";
+  const baseTitle = (embed.data.title || "訂單工時申報")
+    .replace(/｜(?:已結束|進行中|尚未結束)$/, "");
+  embed.setTitle(`${baseTitle}｜${serviceEnded ? "已結束" : totalMinutes > 0 && !meta.pendingSegmentStart ? "尚未結束" : "進行中"}`);
+  embed.setColor(serviceEnded ? "#22c55e" : "#38bdf8");
+  embed.setDescription(serviceEnded
+    ? "✅ 本筆服務已結束，報時已完成並送交薪資後台審核；服務結束不代表薪資已核准或入帳。"
+    : meta.pendingSegmentStart
+      ? "開始時間已儲存，請於服務結束後輸入結束時間。"
+      : "本筆服務尚未完成，請繼續報時或由客服協助存單／結單。");
   const segmentLines = segments.map(
     (segment, index) =>
       `第 ${index + 1} 段｜${formatTaipeiDateTime(segment.startedAt)} ～ ${formatTaipeiDateTime(segment.endedAt)}｜${durationText(segment.minutes)}`,
@@ -507,6 +528,7 @@ function buildUpdatedReportEmbed(message, meta) {
     );
   }
   const timeFields = [
+    { name: "申報狀態", value: reportState, inline: false },
     {
       name: "預定時長",
       value: expectedMinutes ? durationText(expectedMinutes) : "未設定",
@@ -533,7 +555,7 @@ function buildUpdatedReportEmbed(message, meta) {
   const baseFields = (embed.data.fields || [])
     .filter(
       (field) =>
-        !["預定時長", "累積時長", "報時紀錄", "不足時長"].includes(field.name),
+        !["申報狀態", "預定時長", "累積時長", "報時紀錄", "不足時長"].includes(field.name),
     )
     .map((field) =>
       field.name === "金額" && Number(meta.orderAmount) > 0
@@ -1884,6 +1906,8 @@ function createWorkReportSystem({
         lastEditedBy: interaction.user.id,
         lastEditedAt: new Date().toISOString(),
       };
+      const existingRate = Number(current.salary_rate || 0);
+      const recalculatedSalary = Math.round(amount * existingRate / 100);
       const updatePayload =
         appKey === "deepnight"
           ? {
@@ -1891,12 +1915,16 @@ function createWorkReportSystem({
               price: amount,
               final_price: amount,
               platform_income: amount,
+              staff_salary: recalculatedSalary,
+              platform_expense: recalculatedSalary + Number(current.bonus_amount || 0),
               ...(!isGift ? { duration_minutes: durationMinutes } : {}),
               note: JSON.stringify(nextMeta),
             }
           : {
               order_amount: amount,
               platform_income: amount,
+              staff_salary: recalculatedSalary,
+              platform_expense: recalculatedSalary + Number(current.bonus_amount || 0),
               admin_note: JSON.stringify(nextMeta),
             };
       const { data: updated, error: updateError } = await supabase
@@ -2366,7 +2394,7 @@ function createWorkReportSystem({
             ? `已由客服結單，實際工時 ${durationText(totalMinutes)}，薪資已自動同步，不需再次批准。`
             : `已由客服結單，實際工時 ${durationText(totalMinutes)}，已送後台審核。`
           : `已存單，尚差 ${durationText(shortageMinutes)}，系統已通知客戶。`,
-        embeds: [buildUpdatedReportEmbed(interaction.message, meta)],
+        embeds: [buildUpdatedReportEmbed(interaction.message, closedMeta)],
         components: isClose ? [] : [
           new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`work_report_supplement_${reportId}`)
@@ -2553,14 +2581,17 @@ function createWorkReportSystem({
         isStart ? "submit_work_report_start_" : "submit_work_report_end_",
         "",
       );
+      // 先確認收到表單，再等候資料庫及薪資同步，避免超過 Discord 的回應期限。
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({ flags: 64 });
+      }
       const enteredTime = parseTaipeiWorkTime(
         interaction.fields.getTextInputValue("work_time"),
       );
       if (!enteredTime)
-        return interaction.reply({
+        return interaction.editReply({
           content:
             "時間格式不正確，請使用 YYYY-MM-DD HH:mm，例如 2026-07-19 20:30；也可只輸入 HH:mm。",
-          flags: 64,
         });
       const { data: current, error: readError } = await supabase
         .from(salaryTable)
@@ -2568,15 +2599,13 @@ function createWorkReportSystem({
         .eq("id", reportId)
         .maybeSingle();
       if (readError || !current) {
-        return interaction.reply({
+        return interaction.editReply({
           content: "讀取工時申報失敗，請稍後再試。",
-          flags: 64,
         });
       }
       if (!canEnterWorkReportTime(current, { isEnd: !isStart })) {
-        return interaction.reply({
+        return interaction.editReply({
           content: "這筆工時申報已送出或目前不能再填寫時間。",
-          flags: 64,
         });
       }
       const meta = parseWorkReportMeta(current);
@@ -2586,9 +2615,8 @@ function createWorkReportSystem({
         : new Date(meta.pendingSegmentStart || 0);
       const segmentEnd = isStart ? null : enteredTime;
       if (!isStart && (!segmentStart.getTime() || segmentEnd <= segmentStart)) {
-        return interaction.reply({
+        return interaction.editReply({
           content: "請先輸入開始時間，且結束時間必須晚於開始時間。",
-          flags: 64,
         });
       }
       if (segmentEnd) {
@@ -2655,20 +2683,22 @@ function createWorkReportSystem({
         .eq("status", current.status)
         .select()
         .maybeSingle();
-      if (error || !data)
-        return interaction.reply({
-          content: "申報送出失敗，請稍後再試。",
-          flags: 64,
+      if (error || !data) {
+        console.error("[工時申報] 儲存時間失敗", { reportId, isStart, error });
+        return interaction.editReply({
+          content: error
+            ? "申報送出失敗，請稍後再試；若持續失敗請聯繫客服。"
+            : "這筆申報剛被更新，請查看最新報單再填寫，避免重複報時。",
         });
-      await interaction.reply({
+      }
+      await interaction.editReply({
         content: !segmentEnd
           ? `第 ${segments.length + 1} 段開始時間已儲存，完成後請輸入結束時間。`
           : isComplete
             ? automaticPayload
               ? `本段時間已儲存，累積 ${durationText(totalMinutes)}，薪資已自動同步，不需再次批准。`
-              : `本段時間已儲存，累積 ${durationText(totalMinutes)}，已送到薪資後台等待審核。`
+              : `✅ 本筆服務已結束，累積 ${durationText(totalMinutes)}，已送到薪資後台等待審核。`
             : `本段時間已儲存，目前累積 ${durationText(totalMinutes)}，尚不足 ${durationText(expectedMinutes - totalMinutes)}。請選擇繼續報時、存單或由客服結單。`,
-        flags: 64,
       });
       const nextComponents = !segmentEnd
         ? [
@@ -2726,10 +2756,18 @@ function createWorkReportSystem({
             ];
       await interaction.message
         .edit({
+          ...(isComplete ? {
+            content: `${current.discord_id ? `<@${current.discord_id}> ` : ""}✅ 本筆服務已結束，工時已送交薪資後台審核。`,
+          } : {}),
           embeds: [buildUpdatedReportEmbed(interaction.message, nextMeta)],
           components: nextComponents,
         })
-        .catch(() => {});
+        .catch(async (panelError) => {
+          console.error("[工時申報] 時間已儲存但報單畫面更新失敗", { reportId, error: panelError.message });
+          await interaction.editReply({
+            content: `${isComplete ? "本筆服務已結束，已送薪資後台審核" : "報時已儲存"}，但原報單畫面暫時更新失敗；請勿重複報時，請聯繫客服更新畫面。`,
+          });
+        });
       return true;
     }
     return false;
@@ -2750,6 +2788,7 @@ function createWorkReportSystem({
 module.exports = {
   QIUNAI_ONBOARDING_GUIDE_FOOTER,
   buildReportAmounts,
+  buildUpdatedReportEmbed,
   buildSafeReportChannelOverwrites,
   findExistingStaffReportChannel,
   buildEmploymentOnboardingGuideEmbed,

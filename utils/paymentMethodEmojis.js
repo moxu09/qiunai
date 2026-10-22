@@ -115,13 +115,13 @@ function getCanonicalPaymentOptions({
       value: "街口支付",
     },
     ...(includeEcpay ? [{
-      label: "綠界支付",
-      description: isEcpayAtmAvailable() ? "可選適用的信用卡、ATM 或超商付款，成功後自動核帳" : "可選站內刷卡或超商付款，成功後自動核帳",
-      value: "綠界支付",
+      label: "線上刷卡",
+      description: "在官網站內輸入卡號，付款成功後自動核帳",
+      value: "線上刷卡",
     }] : []),
     {
-      label: includeEcpay && isEcpayAtmAvailable() ? "匯款／ATM 虛擬帳號" : "匯款帳號",
-      description: includeEcpay && isEcpayAtmAvailable() ? "綠界專屬虛擬帳號，繳費後自動核帳" : "顯示銀行帳號，付款後上傳截圖",
+      label: "匯款帳號",
+      description: "顯示原銀行帳號，付款後上傳截圖，由客服確認入帳",
       value: "匯款",
     },
     {
@@ -192,6 +192,10 @@ function isGeneralEcpayAmountAllowed(method, amount) {
   return Boolean(range && Number.isInteger(value) && value >= range[0] && value <= range[1]);
 }
 
+function getTipPaymentOptions({ includeEcpay = false, includeSalary = false, amount = null } = {}) {
+  return getGeneralOrderPaymentOptions({ ecpayAvailable: includeEcpay, salaryEligible: includeSalary, amount });
+}
+
 function findDefinition(value) {
   const text = String(value || "");
   return PAYMENT_EMOJI_DEFINITIONS.find((definition) =>
@@ -250,7 +254,7 @@ function getPaymentMethodSelection(interaction, prefix) {
     if (ecpayMethods[method]) return { paymentMethod: "綠界支付", requestedMethod: ecpayMethods[method] };
     const bank = ["匯款", "匯款帳號", "匯款轉帳", "匯款 / 轉帳"].includes(method);
     if (!bank) return { paymentMethod: method };
-    if (prefix === "quote_payment_method_" || prefix === "service_payment_method_") {
+    if (["quote_payment_method_", "service_payment_method_", "extension_payment_method_", "tip_payment_"].includes(prefix)) {
       return { paymentMethod: "匯款" };
     }
     if (process.env.ECPAY_ACCEPT_PAYMENTS === "true" && isEcpayAtmAvailable()) {
@@ -329,6 +333,7 @@ module.exports = {
   ensurePaymentMethodEmojis,
   buildPaymentMethodButtonRows,
   getCanonicalPaymentOptions,
+  getTipPaymentOptions,
   getGeneralOrderPaymentOptions,
   isGeneralEcpayAmountAllowed,
   getPaymentMethodSelection,

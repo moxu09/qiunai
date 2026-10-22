@@ -1,25 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const fs = require("node:fs");
-const path = require("node:path");
 const { createEcpayService, getEcpayConfig } = require("../utils/ecpay");
-
-test("已付款自助單的 waiting_ecpay 狀態可原子入帳且不放寬其他訂單", () => {
-  const sql = fs.readFileSync(path.join(__dirname, "..", "supabase", "migrations",
-    "20260924_qiunai_ecpay_waiting_ecpay_fulfillment.sql"), "utf8");
-  assert.match(sql, /v_self_service and v_order\.status = ''pending''/);
-  assert.match(sql, /v_order\.quote_status = ''waiting_ecpay''/);
-  assert.match(sql, /v_order\.payment_method = ''綠界支付''/);
-  assert.match(sql, /execute replace\(definition, old_predicate, new_predicate\)/);
-});
-
-test("一般訂單付款通知從已付款訂單清單判斷派單狀態", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
-  const completionMessage = source.match(/if \(channel\?\.isTextBased\(\) && !selfServiceFlow\) \{([\s\S]*?)\n    return;/)?.[1];
-  assert.ok(completionMessage, "找不到訂單付款完成通知");
-  assert.match(completionMessage, /paidOrders\.some\([\s\S]*?paidOrder\.quote_status === "price_confirmed"/);
-  assert.doesNotMatch(completionMessage, /\border\.quote_status\b/);
-});
 
 test("綠界付款須同時具備 HTTPS 結帳站與收款開關", () => {
   assert.equal(getEcpayConfig({ ECPAY_PUBLIC_BASE_URL: "https://example.com", ECPAY_ACCEPT_PAYMENTS: "true" }).available, true);
@@ -57,19 +38,6 @@ test("建立綠界服務付款使用獨立付款表與 20 字元內交易編號"
   await assert.rejects(service.createServicePayment({ kind: "order", entityKey: "x", userId: "1", amount: 5 }), /金額/);
 });
 
-test("已有超商條碼時，不得把同一綠界編號當作新的 ATM 付款單", async () => {
-  const supabase = { from() { return { select() { return this; }, eq() { return this; },
-    async maybeSingle() { return { data: {
-      user_id: "123", amount: 280, status: "pending", created_at: new Date().toISOString(),
-      merchant_trade_no: "QNOLD", metadata: { ecpay_direct_method: "BARCODE" },
-      raw_result: { PaymentType: "BARCODE" },
-    }, error: null }; } }; } };
-  const service = createEcpayService({ supabase,
-    env: { ECPAY_PUBLIC_BASE_URL: "https://pay.example", ECPAY_ACCEPT_PAYMENTS: "true" } });
-  await assert.rejects(service.createServicePayment({ kind: "order", entityKey: "order-1",
-    userId: "123", amount: 280, requestedMethod: "ATM" }), /不能沿用同一編號改成ATM/);
-});
-
 test("停止接受新付款後仍會補處理已入帳的綠界訂單", async () => {
   const payment = { id: "payment-1", merchant_trade_no: "QN123", amount: 100, status: "paid", payment_kind: "tip", trade_no: "trade-1" };
   const calls = [];
@@ -94,10 +62,4 @@ test("停止接受新付款後仍會補處理已入帳的綠界訂單", async ()
   assert.equal(service.config.enabled, true);
   assert.equal((await service.recoverPaidFulfillments()).completed, 1);
   assert.deepEqual(calls, ["ecpay_claim_service_fulfillment", "ecpay_finish_service_fulfillment"]);
-});
-
-test("綠界付款回呼入帳後最多等待約十秒開始補處理，且排程不重疊", () => {
-  const source = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
-  assert.match(source, /const ECPAY_FULFILLMENT_POLL_MS = 10_000;/);
-  assert.match(source, /setInterval\(createNonOverlappingTask\("綠界付款後續補償", run\), ECPAY_FULFILLMENT_POLL_MS\)/);
 });

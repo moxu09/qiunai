@@ -26,7 +26,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: "金流",
-    commands: ["發錢", "扣錢", "街口查詢", "街口退款", "發紅包"],
+    commands: ["發錢", "扣錢", "街口查詢", "街口退款", "發紅包", "發送回饋點數"],
   },
   {
     title: "訂單與客服",
@@ -34,7 +34,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: "優惠券與身分組",
-    commands: ["發送優惠券", "使用優惠券", "給與身份組"],
+    commands: ["發送優惠券", "使用優惠券", "使用抽獎券", "給與身份組"],
   },
   {
     title: "VIP 累積",
