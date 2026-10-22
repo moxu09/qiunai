@@ -75,6 +75,7 @@ const { parseAllowedServices } = require("./utils/services");
 const { ORDER_FLOW_TTL_MS } = require("./utils/orderFlow");
 const { scheduleChannelDeletion } = require("./utils/channelCleanup");
 const { createCustomerServiceTickets } = require("./events/customerServiceTickets");
+const { createQiunaiReferrals } = require("./events/qiunaiReferrals");
 const {
   buildDiscordArchiveHtml,
   classifyOrderArchive,
@@ -253,6 +254,7 @@ const customerServiceTickets = createCustomerServiceTickets({
   isStaff: isAdminOrStaff,
   resolveParent: guild => resolveTicketParentId(guild, ORDER_TICKET_CATEGORY_ID, "訂單區"),
 });
+const qiunaiReferrals = createQiunaiReferrals({ db: supabase, client });
 const ichiban = createIchiban({
   supabase,
   client,
@@ -738,6 +740,9 @@ async function saveTipAllocations({
     throw new Error("不能打賞自己");
   }
   const orders = [];
+  const purchaseGroupId = idempotencyKey?.startsWith("manual-tip:")
+    ? `tip:manual:${idempotencyKey.slice("manual-tip:".length)}`
+    : `tip:flow:${require("node:crypto").randomUUID()}`;
   for (const allocation of allocations) {
     const tipOrder = await saveTipToPlayOrders({
       guildId,
@@ -748,6 +753,7 @@ async function saveTipAllocations({
       channelId,
       paid: true,
       idempotencyKey: idempotencyKey ? `${idempotencyKey}:${allocation.staffId}` : null,
+      purchaseGroupId,
     });
     orders.push(tipOrder);
     if (countReason) {
@@ -770,6 +776,7 @@ async function saveTipToPlayOrdersForStaff({
     throw new Error("不能打賞自己");
   }
   const orders = [];
+  const purchaseGroupId = `tip:flow:${require("node:crypto").randomUUID()}`;
 
   for (const staffId of staffIds) {
     const tipOrder = await saveTipToPlayOrders({
@@ -780,6 +787,7 @@ async function saveTipToPlayOrdersForStaff({
       amount: Number(amount),
       channelId,
       paid,
+      purchaseGroupId,
     });
 
     orders.push(tipOrder);
@@ -3049,6 +3057,7 @@ async function saveTipToPlayOrders({
   channelId,
   paid = true,
   idempotencyKey = null,
+  purchaseGroupId = null,
 }) {
   const note = idempotencyKey ? `打賞｜${idempotencyKey}` : "打賞";
   const ensureSalaryOrder = async (order) => {
@@ -3092,6 +3101,7 @@ async function saveTipToPlayOrders({
       customer_username: `<@${tipperId}>`,
       assigned_player: staffId,
       order_type: "打賞",
+      order_group_id: purchaseGroupId,
       order_item: item,
       game: "打賞",
       service: `打賞：${item}`,
@@ -4527,6 +4537,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
         channelId: payment.channel_id,
         paid: true,
         idempotencyKey: `${paymentLabel}:${payment.platform_order_id}:${allocationIndex}`,
+        purchaseGroupId: `tip:${paymentLabel}:${payment.platform_order_id}`,
       }),
     );
   }
@@ -8314,6 +8325,7 @@ client.once(Events.ClientReady, async () => {
       { name: "私人房間面板", run: () => sendPrivateRoomPanel(client) },
       { name: "入職申請面板", run: () => employmentSystem.sendPanel() },
       { name: "客服臨時表單", run: () => customerServiceTickets.ensurePanel() },
+      { name: "邀請碼面板", run: () => qiunaiReferrals.ensurePanel() },
       { name: "執行長投訴面板", run: () => complaintSystem.sendPanel() },
       {
         name: "電腦稽核審核員權限",
@@ -8353,6 +8365,7 @@ client.once(Events.ClientReady, async () => {
       { name: "VIP 每月優惠券自動發放", run: () => startMonthlyCouponScheduler(supabase, client, createNonOverlappingTask) },
       { name: "NAS 每日個人影片上傳連結", run: () => startNasUploadNotificationScheduler(supabase, client, createNonOverlappingTask) },
       { name: "VIP 完單回饋通知", run: () => cashbackNotifier.start() },
+      { name: "邀請獎勵核對", run: () => qiunaiReferrals.start() },
       { name: "綠界付款後續補償排程", run: startEcpayFulfillmentRecoveryScheduler },
       {
         name: "考核討論串刪除排程",
@@ -8816,6 +8829,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (await complaintSystem.handleInteraction(interaction)) return;
     if (await customerServiceTickets.handle(interaction)) return;
+    if (await qiunaiReferrals.handle(interaction)) return;
     if (await employmentSystem.handleInteraction(interaction)) return;
 
     // ===== Modal Submit：交給 dispatchSystem =====
