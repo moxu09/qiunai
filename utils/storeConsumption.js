@@ -1,7 +1,11 @@
-async function getStoreConsumptionField(db, guildId, userId) {
+async function getStoreConsumptionField(db, guildId, userId, { businessGuildId, staffGuildId } = {}) {
   if (!guildId || !userId) throw new Error("缺少店家或會員資料");
+  // An employee server belongs to its business server; it has no VIP ledger.
+  // Only map the explicitly configured employee server, never another store.
+  const storeGuildId = businessGuildId && staffGuildId && String(guildId) === String(staffGuildId)
+    ? String(businessGuildId) : String(guildId);
   const { data, error } = await db.from("user_vips")
-    .select("total_spent").eq("guild_id", String(guildId))
+    .select("total_spent").eq("guild_id", storeGuildId)
     .eq("user_id", String(userId)).maybeSingle();
   if (error) throw error;
   const amount = Number(data?.total_spent ?? 0);
@@ -12,9 +16,9 @@ async function getStoreConsumptionField(db, guildId, userId) {
   };
 }
 
-async function addStoreConsumptionField(embed, { db, guildId, userId, logger = console }) {
+async function addStoreConsumptionField(embed, { db, guildId, userId, businessGuildId, staffGuildId, logger = console }) {
   try {
-    embed.addFields(await getStoreConsumptionField(db, guildId, userId));
+    embed.addFields(await getStoreConsumptionField(db, guildId, userId, { businessGuildId, staffGuildId }));
   } catch (error) {
     logger.error("[查詢累積｜本店消費]", error.message);
     embed.addFields({ name: "本店累積消費", value: "暫時無法取得，請稍後再試。" });

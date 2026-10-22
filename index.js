@@ -11113,6 +11113,8 @@ async function handleSlashCommand(interaction) {
     if (interaction.commandName === "查詢累積") {
       await require("./utils/storeConsumption").addStoreConsumptionField(embed, {
         db: supabase, guildId: interaction.guildId, userId: target.id,
+        businessGuildId: process.env.GUILD_ID || "1206138511535898654",
+        staffGuildId: QIUNAI_STAFF_GUILD_ID,
       });
     }
     const payload = {
