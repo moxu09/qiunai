@@ -49,7 +49,7 @@ language sql stable security definer set search_path=public as $$
    and coalesce(p.status,'') not in('cancelled','canceled','refunded','已取消','已退款')
    and coalesce(p.order_type,'訂單') in('訂單','一般訂單','打賞')
  ), keyed as (
-  select p.id,coalesce(p.final_price,p.price,0)::numeric amount,coalesce(p.paid_at,p.created_at) at,
+  select p.id,p.created_at,coalesce(p.final_price,p.price,0)::numeric amount,coalesce(p.paid_at,p.created_at) at,
    coalesce(nullif(p.order_group_id,''),w.purchase_key,
     case when p.original_note ~ '^打賞｜manual-tip:[^:]+:[^:]+$'
       then 'tip:manual:'||split_part(split_part(p.original_note,'manual-tip:',2),':',1)
@@ -62,7 +62,7 @@ language sql stable security definer set search_path=public as $$
     then regexp_replace(raw_key,':[0-9]+$','') else raw_key end k,* from keyed
  )
  select k,sum(greatest(0,amount)),min(at),array_agg(id order by at,id)
- from grouped group by k order by min(at),min(id::text)
+ from grouped group by k order by min(at),min(created_at),min(id::text)
 $$;
 
 create or replace function public.qiunai_referral_get_code(p_user_id text)
@@ -91,11 +91,6 @@ begin
  update public.qiunai_referrals set last_checked_at=now(),last_error=null where invitee_id=p_invitee_id;
  select count(*) into purchases from public.qiunai_referral_purchases(p_invitee_id);
  select * into first_purchase from public.qiunai_referral_purchases(p_invitee_id) limit 1;
- -- Equal recorded payment times must not let UUID ordering choose a larger second purchase.
- if purchases>1 then
-  select min(p.paid_amount) into first_purchase.paid_amount
-  from public.qiunai_referral_purchases(p_invitee_id) p where p.paid_at is not distinct from first_purchase.paid_at;
- end if;
  if purchases=0 or first_purchase.paid_amount<500 then
   if purchases>1 then
    update public.qiunai_referrals set status='ineligible' where invitee_id=p_invitee_id;

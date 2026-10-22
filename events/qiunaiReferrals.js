@@ -56,9 +56,11 @@ function createQiunaiReferrals({ db, client, logger = console, intervalMs = 3000
   }
   async function start() {
     if (timer) return;
-    await reconcile();
+    // Schedule recovery before the first RPC so transient startup failures retry.
     timer = setInterval(() => reconcile().catch(error => logger.error('[邀請獎勵核對失敗]', error.message)), intervalMs);
     timer.unref?.();
+    try { await reconcile(); }
+    catch (error) { logger.error('[邀請獎勵核對失敗]', error.message); }
   }
   async function handle(interaction) {
     if (!interaction.customId?.startsWith('qref_')) return false;

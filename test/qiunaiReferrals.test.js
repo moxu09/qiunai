@@ -1,6 +1,30 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {createQiunaiReferrals,referralPanel,resultText,GUILD_ID,CHANNEL_ID}=require('../events/qiunaiReferrals');
 const code='QN0123456789ABCDEF';
+test('啟動資料庫斷線後仍會自動重試，重複啟動不重複排程',async t=>{
+ t.mock.timers.enable({apis:['setInterval']});
+ let calls=0;const errors=[];
+ const system=createQiunaiReferrals({db:{rpc:async()=>++calls===1?{error:Error('startup outage')}:{data:{processed:0}}},
+  client:{},logger:{error:(...args)=>errors.push(args)},intervalMs:30});
+ await system.start();assert.equal(calls,1);assert.equal(errors.length,1);
+ await system.start();assert.equal(calls,1);
+ t.mock.timers.tick(30);await new Promise(resolve=>setImmediate(resolve));assert.equal(calls,2);
+ system.stop();t.mock.timers.tick(90);assert.equal(calls,2);
+});
+test('排程中途斷線仍會重試，正在核對時不重複呼叫',async t=>{
+ t.mock.timers.enable({apis:['setInterval']});
+ let calls=0,release;const errors=[];const blocked=new Promise(resolve=>release=resolve);
+ const system=createQiunaiReferrals({db:{rpc:async()=>{
+  calls++;if(calls===2)return {error:Error('temporary outage')};
+  if(calls===3)await blocked;return {data:{processed:0}};
+ }},client:{},logger:{error:(...args)=>errors.push(args)},intervalMs:30});
+ await system.start();
+ t.mock.timers.tick(30);await new Promise(resolve=>setImmediate(resolve));assert.equal(errors.length,1);
+ t.mock.timers.tick(30);assert.equal(calls,3);
+ await system.reconcile();t.mock.timers.tick(90);assert.equal(calls,3);
+ release();await new Promise(resolve=>setImmediate(resolve));
+ t.mock.timers.tick(30);await new Promise(resolve=>setImmediate(resolve));assert.equal(calls,4);system.stop();
+});
 function fixture(result={status:'pending',paid_amount:0}){
  const calls=[],replies=[];let fail=false;
  const db={rpc:async(name,args)=>{calls.push({name,args});return fail?{error:Error('database unavailable')}:{data:name==='qiunai_referral_get_code'?code:result};}};

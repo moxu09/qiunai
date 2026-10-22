@@ -11,6 +11,8 @@ const {PGlite}=require(process.env.REFERRAL_PGLITE_MODULE||'@electric-sql/pglite
  create table tip_payment_operations(operation_key text primary key,guild_id text,user_id text,result jsonb);`);
  const sql=fs.readFileSync(path.join(__dirname,'../supabase/migrations/20261022000000_qiunai_referral_rewards.sql'),'utf8');
  await db.exec(sql);await db.exec(sql);
+ const recovery=fs.readFileSync(path.join(__dirname,'../supabase/migrations/20261022010000_qiunai_referral_recovery.sql'),'utf8');
+ await db.exec(recovery);await db.exec(recovery);
  const code=async u=>(await db.query('select qiunai_referral_get_code($1) r',[u])).rows[0].r;
  const bind=async(u,c)=>(await db.query('select qiunai_referral_bind($1,$2) r',[u,c])).rows[0].r;
  const evaluate=async u=>(await db.query('select qiunai_referral_evaluate($1) r',[u])).rows[0].r;
@@ -47,6 +49,17 @@ const {PGlite}=require(process.env.REFERRAL_PGLITE_MODULE||'@electric-sql/pglite
  assert.equal(batch.failed,1);assert.equal(await count(healthy),2,'單筆失敗不能阻擋其他人的獎勵');
  assert.match((await db.query('select last_error from qiunai_referrals where invitee_id=$1',[beforeFailure])).rows[0].last_error,/test-fail/);
  await db.exec('drop trigger fail_coupon on user_items');assert.equal((await evaluate(beforeFailure)).status,'rewarded');
+ // Payment timestamps can be rounded to the same second. Creation order,
+ // never amount or random UUID order, must break that tie.
+ for(const amounts of [[500,499],[499,500]]){
+  const sameTime=uid();await bind(sameTime,c);
+  await order(sameTime,amounts[0],{id:amounts[0]===500?'ffffffff-ffff-ffff-ffff-fffffffffff1':'ffffffff-ffff-ffff-ffff-fffffffffff2',paid_at:'2026-10-22T01:00:00Z',created_at:'2026-10-22T00:00:01Z'});
+  await order(sameTime,amounts[1],{id:amounts[0]===500?'00000000-0000-0000-0000-000000000001':'00000000-0000-0000-0000-000000000002',paid_at:'2026-10-22T01:00:00Z',created_at:'2026-10-22T00:00:02Z'});
+  const result=await evaluate(sameTime);
+  assert.equal(result.status,amounts[0]>=500?'rewarded':'ineligible');
+  assert.equal(await count(sameTime),amounts[0]>=500?2:0);
+  if(amounts[0]>=500)assert.equal(Number((await db.query('select paid_amount from qiunai_referrals where invitee_id=$1',[sameTime])).rows[0].paid_amount),500);
+ }
  await db.exec('set role authenticated');await assert.rejects(code(uid()),/permission denied/);await db.exec('reset role');
  await db.close();console.log('PASS: stable codes, self-invite rejection, before/after payment, one-purchase gate, net amount, logical tip grouping, coupon-use idempotency, repeated referrals, polling, transaction rollback and RLS/RPC access');
 })().catch(e=>{console.error(e);process.exitCode=1});
