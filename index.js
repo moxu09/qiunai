@@ -2660,6 +2660,9 @@ async function handleTipPaymentSelect(interaction) {
   }
 
   // 在任何付款相關的非同步操作之前鎖住返回功能。
+  if (tipData.checkoutStarted || tipData.paymentMethod || tipData.paid || tipData.walletPaid) {
+    return interaction.editReply({ content: "❌ 此筆打賞已進入付款流程，請使用已建立的付款訊息；請勿重複選擇付款方式。" });
+  }
   tipData.checkoutStarted = true;
   setPendingTip(tipId, tipData);
   if (isBankTransfer(paymentMethod)) {
@@ -2864,6 +2867,33 @@ async function handleTipPaymentSelect(interaction) {
   });
 }
 // ===== Panel Message =====
+async function cancelTipPaymentChoice(interaction, tipId, kind) {
+  const data = pendingTips.get(tipId);
+  const method = String(data?.paymentMethod || "");
+  const matches = kind === "salary" ? method.includes("扣薪")
+    : /儲值|錢包|餘額/.test(method);
+  if (!data || !matches || !canAdvanceTipFlow(interaction, data) ||
+      (data.channelId && data.channelId !== interaction.channel.id)) {
+    return interaction.editReply({ content: "❌ 此付款訊息已失效或你沒有操作權限。", components: [] });
+  }
+  if (data.paymentAttempted || data.paid || data.walletPaid) {
+    return interaction.editReply({ content: "❌ 此筆已送出付款確認，請先聯繫客服確認付款結果，不可改用其他方式重複付款。" });
+  }
+  const next = structuredClone(data);
+  const oldStamp = Number(String(data.flowId || tipId).split("_").at(-1)) || 0;
+  next.flowId = `${data.tipperId || data.createdBy}_${Math.max(Date.now(), oldStamp + 1)}`;
+  next.checkoutStarted = false;
+  next.keepForPayment = false;
+  delete next.paymentMethod;
+  delete next.requestedMethod;
+  pendingTips.delete(tipId);
+  setPendingTip(next.flowId, next);
+  await interaction.message.edit({ components: [] }).catch(() => {});
+  await sendTipPaymentSelectPrompt(interaction.channel, next.flowId,
+    formatTipStaffMentions(getTipStaffIds(next)));
+  return interaction.editReply({ content: "✅ 已取消此付款方式，請使用新的付款選單；舊確認按鈕已失效。", components: [] });
+}
+
 async function getPanelMessage(panelName, guildId = process.env.GUILD_ID) {
   const { data, error } = await supabase
     .from("panel_messages")
@@ -3162,7 +3192,7 @@ async function getActiveQiunaiCommissionActivity(finishedAt) {
     .maybeSingle();
   if (error) {
     console.error("[抽成計算] 讀取活動抽成失敗", error);
-    return null;
+    throw new Error("暫時無法確認活動抽成，已停止薪資計算，請稍後重試。", { cause: error });
   }
   const rate = Number(data?.activity_rate || 0);
   return rate > 0
@@ -13356,6 +13386,7 @@ async function handleButtonInteraction(interaction) {
       }
 
       try {
+        tipData.paymentAttempted = true;
         const payment = await dispatchSystem.applySalaryDeductionPayment({
           customerId: tipperId,
           amount: totalAmount,
@@ -13407,19 +13438,7 @@ async function handleButtonInteraction(interaction) {
     }
     if (customId.startsWith("cancel_tip_salary_")) {
       const tipId = customId.replace("cancel_tip_salary_", "");
-      const tipData = pendingTips.get(tipId);
-      if (tipData && !canAdvanceTipFlow(interaction, tipData)) {
-        return await interaction.editReply({ content: "❌ 你無法取消這筆付款。" });
-      }
-      if (tipData) {
-        tipData.paymentMethod = null;
-        setPendingTip(tipId, tipData);
-      }
-      await interaction.message.edit({ components: [] }).catch(() => {});
-      return await interaction.editReply({
-        content: "✅ 已取消員工扣薪，請重新選擇付款方式。",
-        components: [],
-      });
+      return await cancelTipPaymentChoice(interaction, tipId, "salary");
     }
     if (customId.startsWith("confirm_tip_wallet_")) {
       const tipId = customId.replace("confirm_tip_wallet_", "");
@@ -13453,6 +13472,7 @@ async function handleButtonInteraction(interaction) {
       }
 
       return await runTipWalletConfirmation(`${getGuildId(interaction)}:${tipId}`, async () => {
+      tipData.paymentAttempted = true;
       let payment;
       try {
         payment = await payTipAllocationsWithWalletAtomic({
@@ -13528,10 +13548,7 @@ async function handleButtonInteraction(interaction) {
     }
     if (customId.startsWith("cancel_tip_wallet_")) {
       const tipId = customId.replace("cancel_tip_wallet_", "");
-      return await interaction.editReply({
-        content: "已取消錢包付款，請重新選擇付款方式或聯繫客服。",
-        components: [],
-      });
+      return await cancelTipPaymentChoice(interaction, tipId, "wallet");
     }
     // ===== 確認打賞付款 =====
     if (customId.startsWith("confirm_tip_paid_")) {
