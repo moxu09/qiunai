@@ -17,6 +17,7 @@ alter table public.qiunai_referrals enable row level security;
 revoke all on public.qiunai_referral_codes,public.qiunai_referrals from public,anon,authenticated;
 grant all on public.qiunai_referral_codes,public.qiunai_referrals to service_role;
 create index if not exists qiunai_referrals_pending on public.qiunai_referrals(last_checked_at) where status='pending';
+alter table public.qiunai_referrals add column if not exists last_error text;
 
 create or replace function public.qiunai_referral_original_note(p_note text)
 returns text language plpgsql immutable set search_path=public as $$
@@ -87,9 +88,14 @@ begin
  select * into r from public.qiunai_referrals where invitee_id=p_invitee_id for update;
  if not found then return jsonb_build_object('status','unbound'); end if;
  if r.status<>'pending' then return jsonb_build_object('status',r.status,'already_granted',r.status='rewarded'); end if;
- update public.qiunai_referrals set last_checked_at=now() where invitee_id=p_invitee_id;
+ update public.qiunai_referrals set last_checked_at=now(),last_error=null where invitee_id=p_invitee_id;
  select count(*) into purchases from public.qiunai_referral_purchases(p_invitee_id);
  select * into first_purchase from public.qiunai_referral_purchases(p_invitee_id) limit 1;
+ -- Equal recorded payment times must not let UUID ordering choose a larger second purchase.
+ if purchases>1 then
+  select min(p.paid_amount) into first_purchase.paid_amount
+  from public.qiunai_referral_purchases(p_invitee_id) p where p.paid_at is not distinct from first_purchase.paid_at;
+ end if;
  if purchases=0 or first_purchase.paid_amount<500 then
   if purchases>1 then
    update public.qiunai_referrals set status='ineligible' where invitee_id=p_invitee_id;
@@ -135,16 +141,21 @@ end $$;
 -- Reconciliation reads payments only. Coupon failures cannot roll back real payments.
 create or replace function public.qiunai_referral_process_pending(p_limit integer default 100)
 returns jsonb language plpgsql security definer set search_path=public as $$
-declare r record; result jsonb; processed integer:=0; rewarded integer:=0;
+declare r record; result jsonb; processed integer:=0; rewarded integer:=0; failed integer:=0;
 begin
  for r in select invitee_id from public.qiunai_referrals where status='pending'
   order by last_checked_at nulls first,created_at limit greatest(1,least(coalesce(p_limit,100),200))
  loop
   if not pg_try_advisory_xact_lock(hashtextextended('qiunai-referral:'||r.invitee_id,0)) then continue; end if;
-  result:=public.qiunai_referral_evaluate(r.invitee_id); processed:=processed+1;
-  if result->>'status'='rewarded' then rewarded:=rewarded+1; end if;
+  begin
+   result:=public.qiunai_referral_evaluate(r.invitee_id); processed:=processed+1;
+   if result->>'status'='rewarded' then rewarded:=rewarded+1; end if;
+  exception when others then
+   update public.qiunai_referrals set last_checked_at=now(),last_error=left(sqlerrm,300) where invitee_id=r.invitee_id;
+   failed:=failed+1;
+  end;
  end loop;
- return jsonb_build_object('processed',processed,'rewarded',rewarded);
+ return jsonb_build_object('processed',processed,'rewarded',rewarded,'failed',failed);
 end $$;
 revoke all on function public.qiunai_referral_original_note(text),public.qiunai_referral_purchases(text),
  public.qiunai_referral_get_code(text),public.qiunai_referral_evaluate(text),public.qiunai_referral_bind(text,text),public.qiunai_referral_process_pending(integer) from public,anon,authenticated;

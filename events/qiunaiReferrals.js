@@ -50,6 +50,7 @@ function createQiunaiReferrals({ db, client, logger = console, intervalMs = 3000
     try {
       const result = await db.rpc('qiunai_referral_process_pending', { p_limit: 100 });
       if (result.error) throw result.error;
+      if (Number(result.data?.failed) > 0) logger.error('[邀請獎勵]', `${result.data.failed} 筆暫時發券失敗，已保留錯誤並排隊重試`);
       return result.data;
     } finally { busy = false; }
   }

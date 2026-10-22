@@ -15,7 +15,8 @@ const {PGlite}=require(process.env.REFERRAL_PGLITE_MODULE||'@electric-sql/pglite
  const bind=async(u,c)=>(await db.query('select qiunai_referral_bind($1,$2) r',[u,c])).rows[0].r;
  const evaluate=async u=>(await db.query('select qiunai_referral_evaluate($1) r',[u])).rows[0].r;
  const count=async u=>(await db.query('select count(*)::int n from user_items where user_id=$1',[u])).rows[0].n;
- const order=async(u,amount,extra={})=>{const row={customer_id:u,guild_id:guild,price:amount,final_price:amount,...extra};const fields=Object.keys(row);return(await db.query(`insert into play_orders(${fields.join(',')}) values(${fields.map((_,i)=>'$'+(i+1)).join(',')}) returning id`,Object.values(row))).rows[0].id;};
+ let orderSequence=0;
+ const order=async(u,amount,extra={})=>{const row={customer_id:u,guild_id:guild,price:amount,final_price:amount,paid_at:new Date(Date.UTC(2026,9,22,0,0,++orderSequence)).toISOString(),...extra};const fields=Object.keys(row);return(await db.query(`insert into play_orders(${fields.join(',')}) values(${fields.map((_,i)=>'$'+(i+1)).join(',')}) returning id`,Object.values(row))).rows[0].id;};
  const inviter=uid(),c=await code(inviter);assert.match(c,/^QN[A-F0-9]{16}$/);assert.equal(await code(inviter),c);
  await assert.rejects(bind(inviter,c),/自己/);await assert.rejects(bind(uid(),'not-real'),/不存在/);
  const first=uid();assert.equal((await bind(first,c)).status,'pending');await order(first,500);
@@ -40,7 +41,12 @@ const {PGlite}=require(process.env.REFERRAL_PGLITE_MODULE||'@electric-sql/pglite
  assert.equal((await evaluate(rapid)).status,'rewarded','先綁定後的合格首單不能因輪詢前又消費而被拒絕');
  const beforeFailure=uid();await bind(beforeFailure,c);await order(beforeFailure,500);
  await db.exec(`create function reject_second_coupon() returns trigger language plpgsql as $$begin if new.user_id='${beforeFailure}' then raise exception 'test-fail';end if;return new;end$$;create trigger fail_coupon before insert on user_items for each row execute function reject_second_coupon();`);
- const previousInviterCount=await count(inviter);await assert.rejects(evaluate(beforeFailure),/test-fail/);assert.equal(await count(inviter),previousInviterCount,'同一交易發券失敗必須一起回滾');await db.exec('drop trigger fail_coupon on user_items');assert.equal((await evaluate(beforeFailure)).status,'rewarded');
+ const previousInviterCount=await count(inviter);await assert.rejects(evaluate(beforeFailure),/test-fail/);assert.equal(await count(inviter),previousInviterCount,'同一交易發券失敗必須一起回滾');
+ const healthy=uid();await bind(healthy,c);await order(healthy,500);
+ const batch=(await db.query('select qiunai_referral_process_pending(100) r')).rows[0].r;
+ assert.equal(batch.failed,1);assert.equal(await count(healthy),2,'單筆失敗不能阻擋其他人的獎勵');
+ assert.match((await db.query('select last_error from qiunai_referrals where invitee_id=$1',[beforeFailure])).rows[0].last_error,/test-fail/);
+ await db.exec('drop trigger fail_coupon on user_items');assert.equal((await evaluate(beforeFailure)).status,'rewarded');
  await db.exec('set role authenticated');await assert.rejects(code(uid()),/permission denied/);await db.exec('reset role');
  await db.close();console.log('PASS: stable codes, self-invite rejection, before/after payment, one-purchase gate, net amount, logical tip grouping, coupon-use idempotency, repeated referrals, polling, transaction rollback and RLS/RPC access');
 })().catch(e=>{console.error(e);process.exitCode=1});
