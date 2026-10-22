@@ -114,9 +114,21 @@ test('客服須先關閉；存檔必須送到指定頻道且驗證有附件後�
   f.ticket.topic = ticketTopic({ owner: USER, kind: 'monthly', state: 'closed' });
   await f.service.handle(i);
   assert.equal(f.sent[0].destination, ARCHIVE_CHANNEL_ID);
-  assert.equal(f.sent[0].payload.files[0].name, `客服紀錄-${TICKET}.html`);
+  assert.equal(f.sent[0].payload.files[0].name, `monthly-${TICKET}.html`);
+  assert.equal(f.sent[0].payload.files[0].title, `申請月結-${TICKET}`);
   assert.equal(parseTicket(f.ticket.topic).archive, SAVED);
   assert.equal(f.deleted.length, 1);
+});
+test('三種業務各有獨立下載檔名與中文附件標題，均保留工單編號', async () => {
+  for (const [kind, label] of [['monthly','申請月結'],['cooperation','合作洽談'],['other','其他事項']]) {
+    const f = fixture({ closed: true });
+    f.ticket.topic = ticketTopic({ owner: USER, kind, state: 'closed' });
+    await f.service.handle(f.interaction(`qcs_archive_${TICKET}`, { staff: true }));
+    const file = f.sent[0].payload.files[0];
+    assert.equal(file.name, `${kind}-${TICKET}.html`);
+    assert.equal(file.title, `${label}-${TICKET}`);
+    assert.equal(f.deleted.length, 1);
+  }
 });
 for (const key of ['archiveError', 'noAttachment', 'noArchiveAccess', 'tooMany', 'tooLarge', 'newMessage']) {
   test(`存檔未完整成功不刪除：${key}`, async () => {

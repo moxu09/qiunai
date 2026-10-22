@@ -160,7 +160,10 @@ function createCustomerServiceTickets({ client, isStaff, resolveParent,
           throw new Error('紀錄檔超過 Discord 上傳限制，表單不會刪除，請聯繫管理員。');
         }
         const payload = { content: `[客服工單:${channelId}] 📁 ${channel.name}\n申請人：<@${ticket.owner}>｜項目：${OPTIONS[ticket.kind]}\n存檔人：<@${interaction.user.id}>`,
-          files: [new AttachmentBuilder(bytes, { name: `客服紀錄-${channelId}.html` })],
+          files: [new AttachmentBuilder(bytes, {
+            name: `${ticket.kind}-${channelId}.html`,
+            title: `${OPTIONS[ticket.kind]}-${channelId}`,
+          })],
           allowedMentions: { parse: [] } };
         saved = saved ? await saved.edit({ ...payload, attachments: [] }) : await archive.send(payload);
         if (!saved.attachments?.size) throw new Error('未確認存檔附件成功上傳，表單不會刪除。');
