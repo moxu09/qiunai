@@ -77,6 +77,8 @@ test('選完建立私人頻道、標註客服、顯示手刀與需求詢問；�
   await f.service.handle(i); await f.service.handle(f.interaction());
   assert.equal(f.created.length, 1);
   const p = f.created[0];
+  assert.equal(p.permissionOverwrites.find(x => x.id === USER).type, 1);
+  assert.equal(p.permissionOverwrites.find(x => x.id === SUPPORT_ROLE_ID).type, 0);
   assert.equal(p.permissionOverwrites.find(x => x.id === GUILD_ID).deny[0], P.ViewChannel);
   const welcome = f.sent.find(x => x.payload.content?.includes('手刀'));
   assert(welcome.payload.content.includes(`<@&${SUPPORT_ROLE_ID}>`));

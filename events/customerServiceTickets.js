@@ -98,10 +98,10 @@ function createCustomerServiceTickets({ client, isStaff, resolveParent,
         name: `客服-${safeName}-${interaction.id.slice(-6)}`, type: ChannelType.GuildText,
         parent: await resolveParent(interaction.guild), topic: ticketTopic(ticket),
         permissionOverwrites: [
-          { id: GUILD_ID, deny: [P.ViewChannel] },
-          { id: ticket.owner, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.AttachFiles, P.EmbedLinks] },
-          { id: SUPPORT_ROLE_ID, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.AttachFiles] },
-          { id: client.user.id, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.AttachFiles, P.EmbedLinks, P.ManageChannels] },
+          { id: GUILD_ID, type: 0, deny: [P.ViewChannel] },
+          { id: ticket.owner, type: 1, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.AttachFiles, P.EmbedLinks] },
+          { id: SUPPORT_ROLE_ID, type: 0, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.AttachFiles] },
+          { id: client.user.id, type: 1, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.AttachFiles, P.EmbedLinks, P.ManageChannels] },
         ], reason: `客服臨時表單：${OPTIONS[kind]}`,
       });
       try { await welcome(channel, ticket); }
@@ -140,7 +140,7 @@ function createCustomerServiceTickets({ client, isStaff, resolveParent,
         if (ticket.archive) throw new Error('此表單已存檔，請完成刪除；如需新服務請另開表單。');
         const closed = operation === 'close';
         await channel.permissionOverwrites.edit(ticket.owner, { ViewChannel: !closed, SendMessages: !closed },
-          { reason: closed ? '關閉客服表單，保留紀錄供客服處理' : '客服重新開啟表單' });
+          { type: 1, reason: closed ? '關閉客服表單，保留紀錄供客服處理' : '客服重新開啟表單' });
         ticket.state = closed ? 'closed' : 'open';
         await channel.setTopic(ticketTopic(ticket));
         await channel.send({ content: closed ? `🔒 <@${interaction.user.id}> 已關閉客服表單，紀錄尚未刪除。客服可存檔並刪除，或重新開啟。`
