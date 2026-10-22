@@ -74,6 +74,7 @@ const {
 const { parseAllowedServices } = require("./utils/services");
 const { ORDER_FLOW_TTL_MS } = require("./utils/orderFlow");
 const { scheduleChannelDeletion } = require("./utils/channelCleanup");
+const { createCustomerServiceTickets } = require("./events/customerServiceTickets");
 const {
   buildDiscordArchiveHtml,
   classifyOrderArchive,
@@ -246,6 +247,11 @@ const client = new Client({
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.MessageContent,
   ],
+});
+const customerServiceTickets = createCustomerServiceTickets({
+  client,
+  isStaff: isAdminOrStaff,
+  resolveParent: guild => resolveTicketParentId(guild, ORDER_TICKET_CATEGORY_ID, "訂單區"),
 });
 const ichiban = createIchiban({
   supabase,
@@ -8307,6 +8313,7 @@ client.once(Events.ClientReady, async () => {
       { name: "扭蛋面板", run: () => sendGachaPanel(client) },
       { name: "私人房間面板", run: () => sendPrivateRoomPanel(client) },
       { name: "入職申請面板", run: () => employmentSystem.sendPanel() },
+      { name: "客服臨時表單", run: () => customerServiceTickets.ensurePanel() },
       { name: "執行長投訴面板", run: () => complaintSystem.sendPanel() },
       {
         name: "電腦稽核審核員權限",
@@ -8808,6 +8815,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (await complaintSystem.handleInteraction(interaction)) return;
+    if (await customerServiceTickets.handle(interaction)) return;
     if (await employmentSystem.handleInteraction(interaction)) return;
 
     // ===== Modal Submit：交給 dispatchSystem =====
