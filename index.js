@@ -11110,6 +11110,11 @@ async function handleSlashCommand(interaction) {
         value: "此會員等級的專屬卡圖尚未上傳。",
       });
     }
+    if (interaction.commandName === "查詢累積") {
+      await require("./utils/storeConsumption").addStoreConsumptionField(embed, {
+        db: supabase, guildId: interaction.guildId, userId: target.id,
+      });
+    }
     const payload = {
       embeds: [embed],
     };
