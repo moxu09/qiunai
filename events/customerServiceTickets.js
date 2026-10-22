@@ -95,7 +95,7 @@ function createCustomerServiceTickets({ client, isStaff, resolveParent,
       const ticket = { owner: interaction.user.id, kind, state: 'open' };
       const safeName = interaction.user.username.replace(/[^a-zA-Z0-9\u4e00-\u9fff_-]/g, '').slice(0, 16) || '闆闆';
       const channel = await interaction.guild.channels.create({
-        name: `客服-${safeName}-${interaction.id.slice(-6)}`, type: ChannelType.GuildText,
+        name: `${OPTIONS[kind]}-${safeName}`, type: ChannelType.GuildText,
         parent: await resolveParent(interaction.guild), topic: ticketTopic(ticket),
         permissionOverwrites: [
           { id: GUILD_ID, type: 0, deny: [P.ViewChannel] },

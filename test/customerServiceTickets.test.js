@@ -91,6 +91,20 @@ test('同時點兩次選單只建立一次', async () => {
   await Promise.all([f.service.handle(f.interaction()), f.service.handle(f.interaction())]);
   assert.equal(f.created.length, 1);
 });
+test('臨時頻道依業務與使用者名稱命名，不附加流水號', async () => {
+  for (const [kind, label] of [['monthly','申請月結'],['cooperation','合作洽談'],['other','其他事項']]) {
+    const f = fixture();
+    await f.service.handle(f.interaction('qcs_open', { values: [kind] }));
+    assert.equal(f.created[0].name, `${label}-test-user`);
+  }
+});
+test('使用者名稱保留中文、移除不合法符號，空名稱仍有安全預設值', async () => {
+  for (const [username, expected] of [['小奈✨ /客服','小奈客服'],['✨ /','闆闆']]) {
+    const f = fixture();
+    await f.service.handle(f.interaction('qcs_open', { user: { id: USER, username } }));
+    assert.equal(f.created[0].name, `申請月結-${expected}`);
+  }
+});
 test('本人可關閉，只移除本人觀看及留言權限，不刪單；客服可重開', async () => {
   const f = fixture();
   await f.service.handle(f.interaction(`qcs_close_${TICKET}`));
