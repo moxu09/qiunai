@@ -4,6 +4,24 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(require.resolve('../index.js'), 'utf8');
 
+test('付款開始後舊表單與編輯按鈕全部鎖住，但付款確認及取消仍檢查原權限',()=>{
+  const fn=source.slice(source.indexOf('function canAdvanceTipFlow('),
+    source.indexOf('function getTipGiftListText('));
+  const ctx={canOperateTipFlow:({actorId,creatorId,isCustomerService})=>actorId===creatorId||isCustomerService,
+    isAdminOrStaff:()=>false};
+  vm.createContext(ctx);vm.runInContext(fn,ctx);
+  const tip={tipperId:'buyer',checkoutStarted:true};
+  for(const customId of ['tip_quantity_modal_same_x','tip_gift_x','tip_staff_x','tip_broadcast_yes_x',
+    'tip_custom_price_modal_x','tip_back_quantity_x']) {
+    assert.equal(ctx.canAdvanceTipFlow({user:{id:'buyer'},customId},tip),false);
+  }
+  for(const customId of ['confirm_tip_wallet_x','cancel_tip_wallet_x','tip_payment_x']) {
+    assert.equal(ctx.canAdvanceTipFlow({user:{id:'buyer'},customId},tip),true);
+    assert.equal(ctx.canAdvanceTipFlow({user:{id:'other'},customId},tip),false);
+  }
+});
+
+
 function cancelFixture(extra = {}, authorized = true) {
   const tip = {flowId:'buyer_1000',tipperId:'buyer',channelId:'channel',
     paymentMethod:'ASD錢包',checkoutStarted:true,keepForPayment:true,...extra};

@@ -593,6 +593,11 @@ function getTipGiftByKey(key) {
   return findTipGiftByKey(TIP_GIFTS, key);
 }
 function canAdvanceTipFlow(interaction, tipData) {
+  // 已開啟的舊表單也必須遵守付款鎖，不能在付款後改禮物、數量或播報。
+  const paymentAction = /^(confirm_tip_|cancel_tip_|tip_payment_)/.test(interaction.customId || "");
+  if ((tipData?.checkoutStarted || tipData?.paymentMethod || tipData?.paid || tipData?.walletPaid) && !paymentAction) {
+    return false;
+  }
   return canOperateTipFlow({
     actorId: interaction.user.id,
     creatorId: tipData?.createdBy || tipData?.tipperId,
@@ -2359,7 +2364,7 @@ async function openTipCustomPriceModal(interaction) {
       flags: 64,
     });
   }
-  if (!tipData || !tipData.customPriceRequired) {
+  if (!tipData || !tipData.customPriceRequired || !canAdvanceTipFlow(interaction, tipData)) {
     return interaction.reply({
       content: "❌ 這筆客製打賞已失效或已完成定價。",
       flags: 64,
@@ -2415,7 +2420,7 @@ async function handleTipCustomPriceModal(interaction) {
       content: "❌ 只有客服或管理員可以填寫客製打賞金額。",
     });
   }
-  if (!tipData || !tipData.customPriceRequired) {
+  if (!tipData || !tipData.customPriceRequired || !canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({
       content: "❌ 這筆客製打賞已失效或已完成定價。",
     });
