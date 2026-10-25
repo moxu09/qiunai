@@ -1,0 +1,150 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const path = require("node:path");
+const fontkit = require("fontkit");
+const {
+  escapeXml, wrapText, buildTipReceiptData, buildOrderReceiptData,
+  receiptSvg, renderReceiptPng,
+} = require("../utils/receiptImages");
+
+test("匿名打賞收據不包含打賞人名稱，錢包與街口金額單位正確", () => {
+  const source = {
+    tipData: { flowId: "TIP-1", broadcastAnonymous: true, paymentMethod: "ASD 錢包" },
+    allocations: [{ amount: 300, lines: [{ name: "小熊餅乾", quantity: 2 }] }],
+    staffNames: ["小奈"], payerName: "不可公開的名字",
+  };
+  const anonymous = buildTipReceiptData(source);
+  assert.equal(anonymous.payer, "匿名闆闆");
+  assert.equal(anonymous.currency, "ASD");
+  assert.equal(anonymous.amount, 300);
+  assert.doesNotMatch(receiptSvg(anonymous), /不可公開的名字/);
+  const publicPayment = buildTipReceiptData({
+    ...source, tipData: { ...source.tipData, broadcastAnonymous: false, paymentMethod: "街口支付" },
+  });
+  assert.equal(publicPayment.payer, "不可公開的名字");
+  assert.equal(publicPayment.currency, "TWD");
+  assert.equal(buildOrderReceiptData({
+    order: { id: "O-1", service: "特戰英豪", payment_method: "街口支付" },
+    payerName: "闆闆", playerNames: ["小奈"], amount: 250,
+  }).amount, 250);
+  assert.match(receiptSvg(buildOrderReceiptData({
+    order: { id: "O-2", service: "特戰英豪" },
+    payerName: "闆闆", playerNames: ["小奈"], amount: 0,
+  })), /NT\$0/);
+});
+
+test("收據會跳脫使用者文字並限制長欄位，不把輸入當成 SVG 執行", () => {
+  assert.equal(escapeXml('<img onload="x"> &'), '&lt;img onload=&quot;x&quot;&gt; &amp;');
+  assert.equal(wrapText("陪玩".repeat(90), 24, 2).length, 2);
+  assert.deepEqual(wrapText("@𝓐𝓢.店長🦊", 20), ["@𝓐𝓢.店長🦊"]);
+  const svg = receiptSvg({
+    kind: "order",
+    reference: "ORD-123",
+    payer: '<script>alert("x")</script>',
+    recipient: "小奈",
+    details: "特戰英豪",
+    amount: 250,
+    payment: "街口支付",
+    time: "2026-09-30T04:00:00.000Z",
+  });
+  assert.doesNotMatch(svg, /ORD-123/);
+  assert.match(svg, /&lt;script&gt;/);
+  assert.doesNotMatch(svg, /<script>/);
+  assert.match(svg, /NT\$250/);
+});
+
+test("訂單與打賞都產生可辨識的 PNG，且 ASD 不標成新台幣", () => {
+  for (const kind of ["order", "tip"]) {
+    const png = renderReceiptPng({
+      kind,
+      reference: "TEST-1",
+      payer: kind === "tip" ? "匿名闆闆" : "闆闆",
+      recipient: "小奈、阿陌",
+      details: "小熊棉花糖餅乾 × 3",
+      amount: 300,
+      currency: kind === "tip" ? "ASD" : "TWD",
+      payment: kind === "tip" ? "ASD 錢包" : "街口支付",
+      time: "2026-09-30T04:00:00.000Z",
+    });
+    assert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+    assert.equal(png.readUInt32BE(16), 500);
+    assert.ok(png.readUInt32BE(20) > png.readUInt32BE(16));
+    assert.ok(png.length > 15_000);
+  }
+  assert.match(receiptSvg({
+    kind: "tip", payer: "匿名闆闆", recipient: "小奈", details: "打賞",
+    amount: 300, currency: "ASD", payment: "ASD 錢包",
+  }), /ASD 300/);
+  assert.throws(() => renderReceiptPng({ kind: "order", amount: -1 }), /金額無效/);
+});
+
+test("熱感紙收據有鋸齒紙邊、已付款章與逐項打賞金額", () => {
+  const data = buildTipReceiptData({
+    tipData: { flowId: "TIP-2", paymentMethod: "街口支付" },
+    allocations: [{ staffId: "1", amount: 440, lines: [
+      { name: "客製打賞", quantity: 2, subtotal: 440 },
+    ] }],
+    staffNames: ["小奈"],
+    payerName: "闆闆",
+  });
+  assert.equal(data.items[0].amount, 440);
+  const svg = receiptSvg(data);
+  assert.match(svg, /已付款/);
+  assert.match(svg, /polygon points=/);
+  assert.match(svg, /viewBox="0 0 500 /);
+  assert.doesNotMatch(svg, /A 熱感紙收據|fill="#151413"/);
+  assert.match(svg, /感謝您的支持/);
+  assert.doesNotMatch(svg, /編號 |秋奈電競陪玩|深夜不關燈/);
+  assert.match(svg, /440 ASD/);
+  assert.match(svg, /客製打賞/);
+  assert.match(svg, /客製打賞<tspan class="muted"> ×2<\/tspan>/);
+  assert.match(receiptSvg({
+    ...data, time: "2026-09-29T20:56:00.000Z",
+  }), /2026\/09\/30 \(三\) 上午 04:56/);
+});
+
+test("長暱稱與大量明細仍可產生完整直式 PNG，不遺失總額", () => {
+  const items = Array.from({ length: 30 }, (_, index) => ({
+    to: `陪陪${index + 1}的超長暱稱測試資料`,
+    name: "客製語音陪玩與特殊需求".repeat(3),
+    quantity: 2,
+    amount: 100,
+  }));
+  const data = {
+    kind: "tip", reference: "TIP-LONG-1", payer: "闆闆".repeat(20),
+    recipient: items.map((item) => item.to).join("、"), items,
+    amount: 3000, currency: "TWD", payment: "街口支付",
+    time: "2026-09-30T04:00:00.000Z",
+  };
+  const svg = receiptSvg(data);
+  assert.match(svg, /另有 18 位陪陪/);
+  assert.match(svg, /NT\$3,000/);
+  assert.doesNotMatch(svg, /A 熱感紙收據/);
+  const png = renderReceiptPng(data);
+  assert.equal(png.readUInt32BE(16), 500);
+  assert.ok(png.readUInt32BE(20) > 2000);
+  assert.ok(png.length < 8_000_000);
+});
+
+test("實際暱稱的裝飾符號、異體字與花體字都保留且有字型可用", () => {
+  const names = ["˖⸝Floren˖⸝⸝₊˚", "꒰ঌ*̣̥月榜三 Selena", "𝓐𝓢.店長|幽語", "𠮷髙🦊"];
+  const fonts = ["NotoSansCJKtc-Regular.otf", "NotoSans-Regular.ttf", "NotoSansMath-Regular.ttf",
+    "NotoSansSymbols2-Regular.ttf", "NotoSansBengali-Regular.ttf", "NotoSansYi-Regular.ttf", "NotoEmoji.ttf"]
+    .map(name => fontkit.openSync(path.join(__dirname, "..", "assets", "fonts", name)));
+  for (const name of names) {
+    assert.deepEqual(wrapText(name, 50), [name.normalize("NFC")]);
+    for (const char of name) assert.ok(fonts.some(font => font.hasGlyphForCodePoint(char.codePointAt(0))), `缺字：${char}`);
+  }
+  assert.deepEqual(wrapText("👩‍💻👩‍💻", 1, 3), ["👩‍💻", "👩‍💻"]);
+});
+
+test("舊商品摘要的數量只呈現一次，不修改總額", () => {
+  const data = buildTipReceiptData({ tipData: { paymentMethod: "儲值卡 / 錢包" },
+    allocations: [{ staffId: "1", item: "洋蔥圈×2", amount: 100 }], staffNames: ["小奈"], payerName: "闆闆" });
+  assert.equal(data.items[0].name, "洋蔥圈");
+  assert.equal(data.items[0].quantity, 2);
+  assert.equal(data.amount, 100);
+  const svg = receiptSvg(data);
+  assert.match(svg, /洋蔥圈<tspan class="muted"> ×2<\/tspan>/);
+  assert.doesNotMatch(svg, /×2×1/);
+});

@@ -7,3 +7,6 @@ coverage
 *.pid
 *.tmp
 .DS_Store
+
+# 本機驗證與匯出結果，保留在磁碟而不提交
+outputs/

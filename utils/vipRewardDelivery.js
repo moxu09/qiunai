@@ -12,7 +12,7 @@ function rewardIdentity(operation) {
   return { guildId, userId, levelKey };
 }
 
-function createVipRewardCoordinator({ supabase, deliver }) {
+function createVipRewardCoordinator({ supabase, deliver, notificationChannelId = null }) {
   if (!supabase?.rpc || typeof deliver !== "function") {
     throw new Error("VIP 獎勵協調器設定不完整");
   }
@@ -30,9 +30,20 @@ function createVipRewardCoordinator({ supabase, deliver }) {
     if (error) throw new Error(error.message || "鎖定 VIP 獎勵派送失敗");
     const claim = firstRpcObject(data);
     if (!claim?.claimed) return { state: claim?.state || "processing" };
-    const reward = claim.operation || operation;
+    let reward = claim.operation || operation;
     const attempt = Number(claim.attempt || reward.delivery_attempts || 0);
     try {
+      if (notificationChannelId && notificationChannelId !== '1313770637587644507' && !reward.notification_channel_id) {
+        const route = await supabase.from('bot_vip_reward_operations')
+          .update({notification_channel_id: String(notificationChannelId)})
+          .eq('organization_code', 'qiunai').eq('guild_id', guildId).eq('user_id', userId).eq('level_key', levelKey)
+          .is('notification_channel_id', null);
+        if (route.error) throw route.error;
+        const stored = await supabase.from('bot_vip_reward_operations').select('notification_channel_id')
+          .eq('organization_code', 'qiunai').eq('guild_id', guildId).eq('user_id', userId).eq('level_key', levelKey).single();
+        if (stored.error) throw stored.error;
+        reward = {...reward, notification_channel_id: stored.data.notification_channel_id};
+      }
       await deliver(reward);
       const completed = await supabase.rpc(
         "qiunai_complete_vip_reward_delivery",
@@ -67,6 +78,7 @@ function createVipRewardCoordinator({ supabase, deliver }) {
     if (error) throw new Error(error.message || "VIP 升等獎勵原子發放失敗");
     const operation = firstRpcObject(data);
     if (!operation) throw new Error("VIP 升等獎勵未回傳持久操作");
+    if (operation.historical_claim) return { state: "completed", historicalClaim: true };
     return deliverPersisted(operation);
   }
 

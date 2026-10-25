@@ -1,0 +1,65 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const {PGlite}=require(process.env.REFERRAL_PGLITE_MODULE||'@electric-sql/pglite');
+(async()=>{
+ const db=new PGlite();let serial=0;const uid=()=>String(111111111111111111n+BigInt(++serial));
+ const guild='1206138511535898654';
+ await db.exec(`create role anon;create role authenticated;create role service_role;
+ create table user_items(id bigserial primary key,user_id text,item_name text,rarity text,description text,item_type text,guild_id text);
+ create table play_orders(id uuid primary key default gen_random_uuid(),customer_id text,guild_id text,paid boolean default true,is_deleted boolean default false,
+  status text default 'completed',order_type text default '訂單',order_id text,order_no text,order_group_id text,note text,price int,final_price int,
+  paid_at timestamp default now(),created_at timestamp default now());
+ create table tip_payment_operations(operation_key text primary key,guild_id text,user_id text,result jsonb);`);
+ const sql=fs.readFileSync(path.join(__dirname,'../supabase/migrations/20261022000000_qiunai_referral_rewards.sql'),'utf8');
+ await db.exec(sql);await db.exec(sql);
+ const recovery=fs.readFileSync(path.join(__dirname,'../supabase/migrations/20261022010000_qiunai_referral_recovery.sql'),'utf8');
+ await db.exec(recovery);await db.exec(recovery);
+ const code=async u=>(await db.query('select qiunai_referral_get_code($1) r',[u])).rows[0].r;
+ const bind=async(u,c)=>(await db.query('select qiunai_referral_bind($1,$2) r',[u,c])).rows[0].r;
+ const evaluate=async u=>(await db.query('select qiunai_referral_evaluate($1) r',[u])).rows[0].r;
+ const count=async u=>(await db.query('select count(*)::int n from user_items where user_id=$1',[u])).rows[0].n;
+ let orderSequence=0;
+ const order=async(u,amount,extra={})=>{const row={customer_id:u,guild_id:guild,price:amount,final_price:amount,paid_at:new Date(Date.UTC(2026,9,22,0,0,++orderSequence)).toISOString(),...extra};const fields=Object.keys(row);return(await db.query(`insert into play_orders(${fields.join(',')}) values(${fields.map((_,i)=>'$'+(i+1)).join(',')}) returning id`,Object.values(row))).rows[0].id;};
+ const inviter=uid(),c=await code(inviter);assert.match(c,/^QN[A-F0-9]{16}$/);assert.equal(await code(inviter),c);
+ await assert.rejects(bind(inviter,c),/自己/);await assert.rejects(bind(uid(),'not-real'),/不存在/);
+ const first=uid();assert.equal((await bind(first,c)).status,'pending');await order(first,500);
+ assert.equal((await evaluate(first)).status,'rewarded');assert.equal(await count(first),2);assert.equal(await count(inviter),1);
+ assert.equal((await bind(first,c)).already_granted,true);assert.equal(await count(first),2);
+ await db.query('delete from user_items where user_id=$1',[first]);await evaluate(first);assert.equal(await count(first),0,'已使用優惠券也不能再領');
+ const after=uid();await order(after,600);assert.equal((await bind(after,c)).status,'rewarded');assert.equal(await count(inviter),2,'可邀請不同人');
+ const otherCode=await code(uid());await assert.rejects(bind(after,otherCode),/不能重複領取/);
+ const two=uid();await order(two,500);await order(two,500);await assert.rejects(bind(two,c),/超過一單/);
+ const low=uid();await bind(low,c);await order(low,499);assert.equal((await evaluate(low)).status,'pending');await order(low,999);assert.equal((await evaluate(low)).status,'ineligible');assert.equal(await count(low),0);
+ const discounted=uid();await order(discounted,600,{final_price:499});assert.equal((await bind(discounted,c)).status,'pending');
+ const unpaid=uid();await order(unpaid,500,{paid:false});await bind(unpaid,c);assert.equal((await evaluate(unpaid)).status,'pending');await db.query('update play_orders set paid=true where customer_id=$1',[unpaid]);assert.equal((await evaluate(unpaid)).status,'rewarded');
+ const mixed=uid();await order(mixed,999,{order_type:'儲值'});await order(mixed,999,{guild_id:'other'});await order(mixed,999,{order_id:'WORK-123'});await order(mixed,999,{status:'refunded'});assert.equal((await bind(mixed,c)).status,'pending');await order(mixed,500);assert.equal((await evaluate(mixed)).status,'rewarded');
+ const tip=uid();await order(tip,250,{order_type:'打賞',note:'打賞｜manual-tip:FLOW:AAA'});await order(tip,250,{order_type:'打賞',note:'打賞｜manual-tip:FLOW:BBB'});assert.equal((await bind(tip,c)).status,'rewarded');
+ const gateway=uid();await order(gateway,200,{order_type:'打賞',note:JSON.stringify({originalNote:'打賞｜綠界:PAYMENT:0'})});await order(gateway,300,{order_type:'打賞',note:'打賞｜綠界:PAYMENT:1'});assert.equal((await bind(gateway,c)).status,'rewarded');
+ const split=uid();await order(split,250,{order_group_id:'split-service'});await order(split,250,{order_group_id:'split-service'});assert.equal((await bind(split,c)).status,'rewarded');
+ const wallet=uid();const w1=await order(wallet,200,{order_type:'打賞'}),w2=await order(wallet,300,{order_type:'打賞'});
+ await db.query('insert into tip_payment_operations values($1,$2,$3,$4)',[`${guild}:wallet-tip:FLOW_123:0`,guild,wallet,JSON.stringify({orders:[{id:w1}]})]);
+ await db.query('insert into tip_payment_operations values($1,$2,$3,$4)',[`${guild}:wallet-tip:FLOW_123:1`,guild,wallet,JSON.stringify({orders:[{id:w2}]})]);assert.equal((await bind(wallet,c)).status,'rewarded');
+ const polling=uid();await bind(polling,c);await order(polling,500);await db.query('select qiunai_referral_process_pending(100)');assert.equal(await count(polling),2);
+ const rapid=uid();await bind(rapid,c);await order(rapid,500);await order(rapid,600);
+ assert.equal((await evaluate(rapid)).status,'rewarded','先綁定後的合格首單不能因輪詢前又消費而被拒絕');
+ const beforeFailure=uid();await bind(beforeFailure,c);await order(beforeFailure,500);
+ await db.exec(`create function reject_second_coupon() returns trigger language plpgsql as $$begin if new.user_id='${beforeFailure}' then raise exception 'test-fail';end if;return new;end$$;create trigger fail_coupon before insert on user_items for each row execute function reject_second_coupon();`);
+ const previousInviterCount=await count(inviter);await assert.rejects(evaluate(beforeFailure),/test-fail/);assert.equal(await count(inviter),previousInviterCount,'同一交易發券失敗必須一起回滾');
+ const healthy=uid();await bind(healthy,c);await order(healthy,500);
+ const batch=(await db.query('select qiunai_referral_process_pending(100) r')).rows[0].r;
+ assert.equal(batch.failed,1);assert.equal(await count(healthy),2,'單筆失敗不能阻擋其他人的獎勵');
+ assert.match((await db.query('select last_error from qiunai_referrals where invitee_id=$1',[beforeFailure])).rows[0].last_error,/test-fail/);
+ await db.exec('drop trigger fail_coupon on user_items');assert.equal((await evaluate(beforeFailure)).status,'rewarded');
+ // Payment timestamps can be rounded to the same second. Creation order,
+ // never amount or random UUID order, must break that tie.
+ for(const amounts of [[500,499],[499,500]]){
+  const sameTime=uid();await bind(sameTime,c);
+  await order(sameTime,amounts[0],{id:amounts[0]===500?'ffffffff-ffff-ffff-ffff-fffffffffff1':'ffffffff-ffff-ffff-ffff-fffffffffff2',paid_at:'2026-10-22T01:00:00Z',created_at:'2026-10-22T00:00:01Z'});
+  await order(sameTime,amounts[1],{id:amounts[0]===500?'00000000-0000-0000-0000-000000000001':'00000000-0000-0000-0000-000000000002',paid_at:'2026-10-22T01:00:00Z',created_at:'2026-10-22T00:00:02Z'});
+  const result=await evaluate(sameTime);
+  assert.equal(result.status,amounts[0]>=500?'rewarded':'ineligible');
+  assert.equal(await count(sameTime),amounts[0]>=500?2:0);
+  if(amounts[0]>=500)assert.equal(Number((await db.query('select paid_amount from qiunai_referrals where invitee_id=$1',[sameTime])).rows[0].paid_amount),500);
+ }
+ await db.exec('set role authenticated');await assert.rejects(code(uid()),/permission denied/);await db.exec('reset role');
+ await db.close();console.log('PASS: stable codes, self-invite rejection, before/after payment, one-purchase gate, net amount, logical tip grouping, coupon-use idempotency, repeated referrals, polling, transaction rollback and RLS/RPC access');
+})().catch(e=>{console.error(e);process.exitCode=1});

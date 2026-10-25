@@ -18,11 +18,14 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@supabase/supabase-js": "^2.110.8",
+    "bwip-js": "^4.11.4",
     "discord.js": "^14.27.0",
     "dotenv": "^17.4.2",
     "node-cron": "^4.6.0",
     "pdfkit": "^0.19.1",
+    "pngjs": "^7.0.0",
     "sqlite3": "^6.0.1"
   },
   "repository": {

@@ -2,6 +2,8 @@ const { createHash } = require("node:crypto");
 
 const ANNOUNCEMENT_CHANNEL_ID =
   process.env.QIUNAI_ACTIVITY_ANNOUNCEMENT_CHANNEL_ID || "1513185192968454324";
+const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || "1513174069087047731";
+const COMPANION_ROLE_IDS = new Set(["1513214106205950112", "1513214182093488148"]);
 const STAFF_PORTAL_URL = "https://qiunai.wearestilllhere.com/staff";
 const BATCH_SIZE = 20;
 const STALE_CLAIM_MS = 5 * 60 * 1000;
@@ -33,6 +35,10 @@ function buildActivityAnnouncement(activity, options = []) {
   return lines.filter(Boolean).join("\n").slice(0, 1950);
 }
 
+function buildActivityChannelAnnouncement(activity, options = []) {
+  return `@everyone\n${buildActivityAnnouncement(activity, options)}`;
+}
+
 function buildActivityDm(activity, options = []) {
   return [
     "小奈通知你：秋奈有新活動囉！",
@@ -59,13 +65,22 @@ async function findSentMessage(channel, client, content) {
   ) || null;
 }
 
+async function listCurrentCompanionIds(client) {
+  const guild = await client.guilds.fetch(STAFF_GUILD_ID);
+  if (!guild) throw new Error("無法取得秋奈員工群，停止活動私訊以避免發給離職人員");
+  const members = await guild.members.fetch();
+  return new Set([...members.values()].filter((member) =>
+    [...COMPANION_ROLE_IDS].some((roleId) => member.roles.cache.has(roleId)),
+  ).map((member) => member.id));
+}
+
 async function sendAnnouncement(supabase, client, notification, activity, options) {
   if (notification.announcement_status === "sent") return true;
   const channel = await client.channels.fetch(ANNOUNCEMENT_CHANNEL_ID);
   if (!channel?.isTextBased?.() || !channel.send) {
     throw new Error(`找不到秋奈員工群公告頻道 ${ANNOUNCEMENT_CHANNEL_ID}`);
   }
-  const content = buildActivityAnnouncement(activity, options);
+  const content = buildActivityChannelAnnouncement(activity, options);
   if (notification.announcement_status === "pending" && notification.announcement_attempted_at) {
     const existing = await findSentMessage(channel, client, content);
     if (existing) {
@@ -104,7 +119,7 @@ async function sendAnnouncement(supabase, client, notification, activity, option
       content,
       nonce: notificationNonce(activity.id),
       enforceNonce: true,
-      allowedMentions: { parse: [] },
+      allowedMentions: { parse: ["everyone"] },
     });
     await updateNotification(supabase, activity.id, {
       announcement_status: "sent", announcement_message_id: message.id,
@@ -120,7 +135,7 @@ async function sendAnnouncement(supabase, client, notification, activity, option
   }
 }
 
-async function prepareRecipients(supabase, activityId) {
+async function prepareRecipients(supabase, activityId, currentCompanionIds) {
   const { data: notification, error: notificationError } = await supabase
     .from("qiunai_activity_notifications").select("recipients_prepared_at")
     .eq("activity_id", activityId).single();
@@ -131,7 +146,8 @@ async function prepareRecipients(supabase, activityId) {
     .not("discord_id", "is", null).limit(1000);
   if (staffError) throw staffError;
   if (staff.length === 1000) throw new Error("陪陪名單可能超過 1000 位，停止通知以避免漏發");
-  const recipients = [...new Set(staff.map((item) => String(item.discord_id).trim()).filter(Boolean))];
+  const recipients = [...new Set(staff.map((item) => String(item.discord_id).trim())
+    .filter((discordId) => currentCompanionIds.has(discordId)))];
   if (recipients.length) {
     const { error } = await supabase.from("qiunai_activity_notification_deliveries")
       .upsert(recipients.map((discordId) => ({ activity_id: activityId, discord_id: discordId })), {
@@ -143,7 +159,13 @@ async function prepareRecipients(supabase, activityId) {
   console.log(`[活動通知] ${activityId} 已建立 ${recipients.length} 位陪陪的私訊清單`);
 }
 
-async function deliverDm(supabase, client, activity, options, delivery) {
+async function deliverDm(supabase, client, activity, options, delivery, currentCompanionIds) {
+  if (!currentCompanionIds.has(delivery.discord_id)) {
+    await updateDelivery(supabase, activity.id, delivery.discord_id, {
+      status: "failed", last_error: "未在秋奈員工群持有陪陪身分組，略過通知",
+    });
+    return;
+  }
   const now = new Date().toISOString();
   const { data: claimed, error: claimError } = await supabase
     .from("qiunai_activity_notification_deliveries")
@@ -185,7 +207,7 @@ async function deliverDm(supabase, client, activity, options, delivery) {
   }
 }
 
-async function recoverStaleDeliveries(supabase, client, activity, options) {
+async function recoverStaleDeliveries(supabase, client, activity, options, currentCompanionIds) {
   const threshold = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
   const { data: stale, error } = await supabase.from("qiunai_activity_notification_deliveries")
     .select("discord_id,attempted_at").eq("activity_id", activity.id)
@@ -193,6 +215,12 @@ async function recoverStaleDeliveries(supabase, client, activity, options) {
   if (error) throw error;
   const content = buildActivityDm(activity, options);
   for (const delivery of stale || []) {
+    if (!currentCompanionIds.has(delivery.discord_id)) {
+      await updateDelivery(supabase, activity.id, delivery.discord_id, {
+        status: "failed", last_error: "未在秋奈員工群持有陪陪身分組，略過通知",
+      });
+      continue;
+    }
     try {
       const user = await client.users.fetch(delivery.discord_id);
       const channel = await user.createDM();
@@ -236,15 +264,16 @@ async function processActivityNotification(supabase, client, notification) {
     .select("label").eq("activity_id", activity.id).order("sort_order");
   if (optionError) throw optionError;
   if (!await sendAnnouncement(supabase, client, notification, activity, options || [])) return;
-  await prepareRecipients(supabase, activity.id);
-  await recoverStaleDeliveries(supabase, client, activity, options || []);
+  const currentCompanionIds = await listCurrentCompanionIds(client);
+  await prepareRecipients(supabase, activity.id, currentCompanionIds);
+  await recoverStaleDeliveries(supabase, client, activity, options || [], currentCompanionIds);
   const { data: pending, error: pendingError } = await supabase
     .from("qiunai_activity_notification_deliveries")
     .select("discord_id,attempt_count").eq("activity_id", activity.id)
     .eq("status", "pending").order("discord_id").limit(BATCH_SIZE);
   if (pendingError) throw pendingError;
   for (const delivery of pending || []) {
-    await deliverDm(supabase, client, activity, options || [], delivery);
+    await deliverDm(supabase, client, activity, options || [], delivery, currentCompanionIds);
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   const { count: unfinished, error: countError } = await supabase
@@ -294,7 +323,9 @@ function startQiunaiActivityNotificationScheduler(supabase, client, createNonOve
 
 module.exports = {
   buildActivityAnnouncement,
+  buildActivityChannelAnnouncement,
   buildActivityDm,
+  listCurrentCompanionIds,
   notificationNonce,
   processPendingActivityNotifications,
   startQiunaiActivityNotificationScheduler,

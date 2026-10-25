@@ -1,5 +1,6 @@
 module.exports = {
   organization: "qiunai",
+  customerApplicationExceptions: ["404285545024585729"],
   brandName: "秋奈電競",
   signingBaseUrl:
     process.env.EMPLOYMENT_SIGNING_BASE_URL ||
@@ -7,7 +8,7 @@ module.exports = {
   panelChannelId: "1525790871432204340",
   reviewChannelId: "1525790900062523513",
   archiveChannelId: "1530899091243143218",
-  workGuildInvite: "https://discord.gg/NAcWFBRREW",
+  workGuildInvite: "https://discord.gg/E9DYHCAPm8",
   newcomerChannelId: "1524701867790307338",
   examinerRoles: {
     default: ["〢・遊戲審核官"],

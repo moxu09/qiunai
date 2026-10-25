@@ -1,4 +1,5 @@
 const path = require("node:path");
+const { isEcpayAtmAvailable } = require("./ecpayAtmSchedule");
 const {
   ActionRowBuilder,
   ButtonBuilder,
@@ -10,6 +11,10 @@ const PAYMENT_METHOD_CODES = Object.freeze({
   // 舊代碼必須永久保留，否則部署前已送出的付款按鈕會失效。
   "街口掃碼（可刷卡）": "jks",
   街口支付: "jko",
+  綠界支付: "ecp",
+  線上刷卡: "ecp_card",
+  超商代碼: "ecp_cvs",
+  超商條碼: "ecp_barcode",
   匯款: "bank",
   匯款帳號: "bank_account",
   無卡: "atm",
@@ -31,6 +36,9 @@ const PAYMENT_METHOD_BY_CODE = Object.freeze(
 );
 
 const PAYMENT_EMOJI_DEFINITIONS = Object.freeze([
+  { key: "ecpay", name: null, file: null, fallback: "💳", matches: ["綠界", "線上刷卡"] },
+  { key: "cvs_code", name: null, file: null, fallback: "🧾", matches: ["超商代碼"] },
+  { key: "cvs_barcode", name: null, file: null, fallback: "🏪", matches: ["超商條碼"] },
   {
     key: "jkopay",
     // 新版只使用品牌 Logo。保留舊 pay_jkopay 應用程式表情，避免既有訂單訊息失效。
@@ -94,6 +102,7 @@ const uploadedEmojis = new Map();
 
 function getCanonicalPaymentOptions({
   includeWallet = false,
+  includeEcpay = false,
   includeMonthly = false,
   includeSalary = false,
   includeUsd = true,
@@ -105,9 +114,14 @@ function getCanonicalPaymentOptions({
       description: "線上付款連結與街口掃碼整合於同一選項",
       value: "街口支付",
     },
+    ...(includeEcpay ? [{
+      label: "線上刷卡",
+      description: "在官網站內輸入卡號，付款成功後自動核帳",
+      value: "線上刷卡",
+    }] : []),
     {
       label: "匯款帳號",
-      description: "顯示銀行帳號，付款後上傳截圖",
+      description: "顯示原銀行帳號，付款後上傳截圖，由客服確認入帳",
       value: "匯款",
     },
     {
@@ -153,6 +167,35 @@ function getCanonicalPaymentOptions({
   ];
 }
 
+function getGeneralOrderPaymentOptions({ ecpayAvailable = false, salaryEligible = false, amount = null } = {}) {
+  const cardAvailable = ecpayAvailable && (amount == null || isGeneralEcpayAmountAllowed("CARD", amount));
+  const cvsAvailable = ecpayAvailable && (amount == null || isGeneralEcpayAmountAllowed("CVS", amount));
+  const barcodeAvailable = ecpayAvailable && (amount == null || isGeneralEcpayAmountAllowed("BARCODE", amount));
+  return [
+    { label: "街口支付", value: "街口支付", style: ButtonStyle.Danger },
+    { label: "線上刷卡", value: "線上刷卡", style: ButtonStyle.Danger, disabled: !cardAvailable },
+    { label: "轉帳匯款", value: "匯款", style: ButtonStyle.Success },
+    { label: "中信無卡", value: "無卡", style: ButtonStyle.Success },
+    { label: "錢包扣款", value: "儲值卡", style: ButtonStyle.Primary },
+    { label: "加密貨幣", value: "加密貨幣", style: ButtonStyle.Primary },
+    { label: "超商代碼", value: "超商代碼", style: ButtonStyle.Danger, disabled: !cvsAvailable },
+    { label: "超商條碼", value: "超商條碼", style: ButtonStyle.Danger, disabled: !barcodeAvailable },
+    { label: "美金轉帳", value: "美金轉帳", style: ButtonStyle.Success },
+    ...(salaryEligible ? [{ label: "員工扣薪", value: "員工扣薪", style: ButtonStyle.Success }] : []),
+  ];
+}
+
+function isGeneralEcpayAmountAllowed(method, amount) {
+  const limits = { CARD: [6, 199_999], ATM: [16, 49_999], CVS: [34, 20_000], BARCODE: [18, 20_000] };
+  const range = limits[method];
+  const value = Number(amount);
+  return Boolean(range && Number.isInteger(value) && value >= range[0] && value <= range[1]);
+}
+
+function getTipPaymentOptions({ includeEcpay = false, includeSalary = false, amount = null } = {}) {
+  return getGeneralOrderPaymentOptions({ ecpayAvailable: includeEcpay, salaryEligible: includeSalary, amount });
+}
+
 function findDefinition(value) {
   const text = String(value || "");
   return PAYMENT_EMOJI_DEFINITIONS.find((definition) =>
@@ -186,9 +229,10 @@ function buildPaymentMethodButtonRows(baseCustomId, options = []) {
     const code = PAYMENT_METHOD_CODES[method];
     if (!code) throw new Error(`未設定付款方式按鈕代碼：${method}`);
     const button = new ButtonBuilder()
-      .setCustomId(`${baseCustomId}${PAYMENT_BUTTON_MARKER}${code}`)
+      .setCustomId(`${baseCustomId}${PAYMENT_BUTTON_MARKER}${code}__review`)
       .setLabel(String(option.label || method))
-      .setStyle(getPaymentButtonStyle(Math.floor(index / 2)));
+      .setStyle(option.style || getPaymentButtonStyle(Math.floor(index / 2)))
+      .setDisabled(Boolean(option.disabled));
     if (option.emoji) button.setEmoji(option.emoji);
     return button;
   });
@@ -204,18 +248,32 @@ function getPaymentMethodSelection(interaction, prefix) {
   const customId = String(interaction?.customId || "");
   if (!customId.startsWith(prefix)) return null;
   const remainder = customId.slice(prefix.length);
+  // 人工報價與人工開單（包含舊訊息）維持銀行匯款；自助購幣另外由流程明確導向綠界。
+  const resolveBankMethod = (method) => {
+    const ecpayMethods = { 線上刷卡: "CARD", 超商代碼: "CVS", 超商條碼: "BARCODE" };
+    if (ecpayMethods[method]) return { paymentMethod: "綠界支付", requestedMethod: ecpayMethods[method] };
+    const bank = ["匯款", "匯款帳號", "匯款轉帳", "匯款 / 轉帳"].includes(method);
+    if (!bank) return { paymentMethod: method };
+    if (["quote_payment_method_", "service_payment_method_", "extension_payment_method_", "tip_payment_"].includes(prefix)) {
+      return { paymentMethod: "匯款" };
+    }
+    if (process.env.ECPAY_ACCEPT_PAYMENTS === "true" && isEcpayAtmAvailable()) {
+      return { paymentMethod: "綠界支付", requestedMethod: "ATM" };
+    }
+    return { paymentMethod: "匯款" };
+  };
   if (Array.isArray(interaction?.values) && interaction.values[0]) {
-    return { entityId: remainder, paymentMethod: interaction.values[0] };
+    const selected = interaction.values[0];
+    return { entityId: remainder, ...resolveBankMethod(selected) };
   }
   const markerIndex = remainder.lastIndexOf(PAYMENT_BUTTON_MARKER);
   if (markerIndex < 0) return null;
-  const code = remainder.slice(markerIndex + PAYMENT_BUTTON_MARKER.length);
+  const rawCode = remainder.slice(markerIndex + PAYMENT_BUTTON_MARKER.length);
+  const requiresConfirmation = rawCode.endsWith("__review");
+  const code = requiresConfirmation ? rawCode.slice(0, -"__review".length) : rawCode;
   const paymentMethod = PAYMENT_METHOD_BY_CODE[code];
   if (!paymentMethod) return null;
-  return {
-    entityId: remainder.slice(0, markerIndex),
-    paymentMethod,
-  };
+  return { entityId: remainder.slice(0, markerIndex), ...resolveBankMethod(paymentMethod), requiresConfirmation };
 }
 
 async function ensurePaymentMethodEmojis(client) {
@@ -275,6 +333,9 @@ module.exports = {
   ensurePaymentMethodEmojis,
   buildPaymentMethodButtonRows,
   getCanonicalPaymentOptions,
+  getTipPaymentOptions,
+  getGeneralOrderPaymentOptions,
+  isGeneralEcpayAmountAllowed,
   getPaymentMethodSelection,
   getPaymentMethodEmoji,
   withPaymentMethodEmojis,

@@ -9,16 +9,13 @@ const {
 const {
   getSeptemberShiftCommissionRate,
 } = require("../utils/customerServicePoints");
+const { getMonthlyCreditedSalary } = require("../utils/creditedSalaryCommission");
 
 const APPLY = process.argv.includes("--apply");
 const START_AT = process.env.RECONCILE_SALARY_START_AT || "2026-09-01T00:00:00Z";
 const GUILD_ID = process.env.GUILD_ID || "1206138511535898654";
 const PAGE_SIZE = 1000;
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  { auth: { persistSession: false } },
-);
+let supabase;
 
 async function readAll(table, columns, buildQuery) {
   const rows = [];
@@ -32,14 +29,8 @@ async function readAll(table, columns, buildQuery) {
   }
 }
 
-function taipeiMonthStart(value) {
-  const shifted = new Date(new Date(value).getTime() + 8 * 60 * 60 * 1000);
-  const month = shifted.toISOString().slice(0, 7);
-  return new Date(`${month}-01T00:00:00+08:00`).toISOString();
-}
-
-async function getCommission(staff, discordId, finishedAt, historicalRows) {
-  const { data: activity, error } = await supabase
+async function getCommission(staff, discordId, finishedAt, historicalRows, db = supabase) {
+  const { data: activity, error } = await db
     .from("salary_activity_commission_settings")
     .select("activity_rate")
     .eq("app_key", "qiunai")
@@ -84,22 +75,22 @@ async function getCommission(staff, discordId, finishedAt, historicalRows) {
     return withActivity({ rate: 90, level: "年度薪資達標｜隔年 90%" });
   }
 
-  const monthStart = new Date(taipeiMonthStart(finishedAt)).getTime();
-  const priorAmount = historicalRows
-    .filter(
-      (row) =>
-        row.discord_id === discordId &&
-        new Date(row.order_finished_at).getTime() < monthStart,
-    )
-    .reduce((sum, row) => sum + Number(row.order_amount || 0), 0);
+  const previousMonthSalary = await getMonthlyCreditedSalary(
+    db, discordId, finishedAt, -1,
+  );
   return withActivity(
-    priorAmount >= 10000
-      ? { rate: 85, level: "上月前累積接單滿 10,000｜85%" }
+    previousMonthSalary >= 10000
+      ? { rate: 85, level: "上月入帳薪資滿 10,000｜本月 85%" }
       : { rate: 80, level: "預設 80%" },
   );
 }
 
 async function main() {
+  supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_ROLE_KEY,
+    { auth: { persistSession: false } },
+  );
   const [orders, salaryRows, staffRows] = await Promise.all([
     readAll(
       "play_orders",
@@ -198,7 +189,11 @@ async function main() {
   console.log(`[薪資漏單補建] 完成，新增 ${inserted} 筆`);
 }
 
-main().catch((error) => {
-  console.error("[薪資漏單補建] 失敗", error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error("[薪資漏單補建] 失敗", error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { getCommission };

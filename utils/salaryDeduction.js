@@ -1,4 +1,13 @@
 const DEFAULT_SALARY_ADVANCE_LIMIT = 1000;
+const DEFAULT_SALARY_MONTHLY_LIMIT = 30000;
+
+function isSalaryDeductionPaymentMethod(method) {
+  return method === "扣薪" || method === "員工扣薪";
+}
+
+function normalizeSalaryDeductionPaymentMethod(method) {
+  return isSalaryDeductionPaymentMethod(method) ? "扣薪" : method;
+}
 
 function numberValue(value) {
   const number = Number(value || 0);
@@ -10,6 +19,8 @@ function calculateSalaryDeductionState({
   withdrawRequests = [],
   pendingOrders = [],
   pendingAdjustments = [],
+  monthlyDeductions = [],
+  monthlyLimit = DEFAULT_SALARY_MONTHLY_LIMIT,
   amount,
   advanceLimit = DEFAULT_SALARY_ADVANCE_LIMIT,
 }) {
@@ -42,6 +53,9 @@ function calculateSalaryDeductionState({
   const projectedAdvance = Math.max(0, -projectedBalance);
   const shortage = Math.max(0, deductionAmount - Math.max(0, availableBefore));
   const normalizedAdvanceLimit = Math.max(0, numberValue(advanceLimit));
+  const monthlyUsed = monthlyDeductions.reduce((sum, row) => sum + Math.max(0, -numberValue(row.amount)), 0);
+  const monthlyRemaining = Math.max(0, numberValue(monthlyLimit) - monthlyUsed);
+  const monthlyAllowed = deductionAmount <= monthlyRemaining;
 
   return {
     amount: deductionAmount,
@@ -52,11 +66,18 @@ function calculateSalaryDeductionState({
     shortage,
     advanceLimit: normalizedAdvanceLimit,
     remainingAdvance: Math.max(0, normalizedAdvanceLimit - currentAdvance),
-    canUse: deductionAmount > 0 && projectedAdvance <= normalizedAdvanceLimit,
+    monthlyUsed,
+    monthlyLimit: numberValue(monthlyLimit),
+    monthlyRemaining,
+    monthlyAllowed,
+    canUse: deductionAmount > 0 && projectedAdvance <= normalizedAdvanceLimit && monthlyAllowed,
   };
 }
 
 module.exports = {
   DEFAULT_SALARY_ADVANCE_LIMIT,
+  DEFAULT_SALARY_MONTHLY_LIMIT,
   calculateSalaryDeductionState,
+  isSalaryDeductionPaymentMethod,
+  normalizeSalaryDeductionPaymentMethod,
 };

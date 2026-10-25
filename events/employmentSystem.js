@@ -41,6 +41,8 @@ async function hasPaidOrderAtStore({ supabase, discordUserId, guildId }) {
     .eq("guild_id", guildId)
     .eq("customer_id", discordUserId)
     .eq("paid", true)
+    // 打賞雖然會記成已付款 play_orders，並不代表申請人是下單闆闆。
+    .in("order_type", ["訂單", "自助訂單", "訂單追加"])
     .limit(1);
 
   if (error) {
@@ -1394,7 +1396,10 @@ function createEmploymentSystem(client, config, supabase) {
             organization: config.organization,
           }),
         ]);
-        if (isStoreCustomer && !isActiveCompanion) {
+        const hasCustomerApplicationException = (
+          config.customerApplicationExceptions || []
+        ).some((id) => String(id) === String(interaction.user.id));
+        if (isStoreCustomer && !isActiveCompanion && !hasCustomerApplicationException) {
           await interaction.editReply({
             content: "老闆身分不給予申請陪陪，別間店消費則不受影響",
           });

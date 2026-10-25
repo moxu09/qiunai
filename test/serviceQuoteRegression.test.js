@@ -13,10 +13,16 @@ function loadQuoteHandler() {
   loaded._compile(fs.readFileSync(filename, "utf8") + `
     module.exports.__quoteTest = {
       submitServiceQuotePrice,
+      sendServiceQuoteConfirmPrompt,
+      handleServiceQuoteConfirm,
+      sendOrderQuotePriceConfirm,
       wire(store, effects) {
         pendingServiceOrders = store;
-        sendServiceCouponPrompt = async (channel, flowId, pending) => {
+        sendServiceQuoteConfirmPrompt = async (channel, flowId, pending) => {
           effects.prompts.push({ flowId, pending: structuredClone(pending) });
+        };
+        sendServiceCouponPrompt = async (channel, flowId, pending) => {
+          effects.couponPrompts = (effects.couponPrompts || 0) + 1;
         };
       },
     };
@@ -66,12 +72,44 @@ test("客服報價實際回呼可用 cached/raw 客服角色保存報價與報�
       assert.equal(effects.writes[0].pending.quotedPrice, 560);
       assert.equal(effects.writes[0].pending.quotedBy, interaction.user.id);
       assert.equal(effects.writes[0].pending.serviceCouponRecorded, false);
+      assert.equal(effects.writes[0].pending.quoteConfirmedPrice, null);
       assert.match(effects.replies[0].content, /已送出正式報價/);
     }
   } finally {
     if (oldStaffRole === undefined) delete process.env.STAFF_ROLE;
     else process.env.STAFF_ROLE = oldStaffRole;
   }
+});
+
+test("一般新訂單先顯示報價確認，不直接開放優惠券", async () => {
+  const api = loadQuoteHandler();
+  const sent = [];
+  await api.sendOrderQuotePriceConfirm({ async send(payload) { sent.push(payload); } }, {
+    id: "123", order_no: "Q-123", customer_id: "customer", original_price: 560,
+  });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].components[0].components[0].toJSON().custom_id, "quote_confirm_price_123_560");
+  assert.match(sent[0].embeds[0].toJSON().description, /NT\$560/);
+});
+
+test("顧客確認最新報價後才開放優惠券；舊金額與非顧客不得確認", async () => {
+  const api = loadQuoteHandler();
+  const effects = { prompts: [], replies: [], couponPrompts: 0 };
+  let pending = { customerId: "customer", category: "other", quotedPrice: 560, originalPrice: 560, finalPrice: 560, quoteConfirmedPrice: null };
+  api.wire({ async get() { return structuredClone(pending); }, async set(_id, value) { pending = structuredClone(value); } }, effects);
+  const makeInteraction = (customId, userId) => ({
+    customId, user: { id: userId }, channel: {}, message: { async edit() {} },
+    async deferReply() {}, async editReply(reply) { effects.replies.push(reply); return reply; },
+  });
+  await api.handleServiceQuoteConfirm(makeInteraction("service_confirm_quote_flow_560", "someone-else"));
+  await api.handleServiceQuoteConfirm(makeInteraction("service_confirm_quote_flow_500", "customer"));
+  assert.equal(effects.couponPrompts, 0);
+  assert.equal(pending.quoteConfirmedPrice, null);
+  await api.handleServiceQuoteConfirm(makeInteraction("service_confirm_quote_flow_560", "customer"));
+  assert.equal(pending.quoteConfirmedPrice, 560);
+  assert.equal(effects.couponPrompts, 1);
+  await api.handleServiceQuoteConfirm(makeInteraction("service_confirm_quote_flow_560", "customer"));
+  assert.equal(effects.couponPrompts, 1);
 });
 
 test("管理員可報價但無客服點數角色不自動歸屬，雙人分單報價仍正確", async () => {

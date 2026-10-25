@@ -53,12 +53,19 @@ function parseTipQuantityList(value, expectedCount) {
     quantities.length !== expectedCount ||
     quantities.some(
       (quantity) =>
-        !Number.isSafeInteger(quantity) || quantity <= 0 || quantity > 999,
+        !Number.isSafeInteger(quantity) || quantity < 0 || quantity > 999,
     )
   ) {
-    throw new Error(`請依序輸入 ${expectedCount} 個 1～999 的整數數量`);
+    throw new Error(`請依序輸入 ${expectedCount} 個 0～999 的整數數量，0 代表不送這項禮物`);
   }
   return quantities;
+}
+
+function validateTipQuantityMatrix(quantitiesByStaff) {
+  const lists = Object.values(quantitiesByStaff || {});
+  if (!lists.some((list) => Array.isArray(list) && list.some((quantity) => quantity > 0))) {
+    throw new Error("至少需要一項禮物的數量大於 0，不能全部填 0");
+  }
 }
 
 function getTipGiftSelections(tipData = {}) {
@@ -97,12 +104,12 @@ function buildTipAllocations(tipData = {}) {
                 name: String(line.name || "打賞"),
                 price: Number(line.price || 0),
                 customPrice: Boolean(line.customPrice),
-                quantity: Number(line.quantity || 1),
+                quantity: Number(line.quantity ?? 1),
                 subtotal: Number(
-                  line.subtotal || Number(line.price || 0) * Number(line.quantity || 1),
+                  line.subtotal ?? Number(line.price || 0) * Number(line.quantity ?? 1),
                 ),
               }))
-              .filter((line) => line.name && line.subtotal > 0)
+              .filter((line) => line.name && line.quantity > 0 && line.subtotal > 0)
           : [];
         return {
           staffId,
@@ -111,8 +118,9 @@ function buildTipAllocations(tipData = {}) {
             lines.map((line) => `${line.name}×${line.quantity}`).join("、") ||
             String(allocation.item || "打賞"),
           amount:
-            lines.reduce((sum, line) => sum + line.subtotal, 0) ||
-            Number(allocation.amount || 0),
+            Array.isArray(allocation.lines)
+              ? lines.reduce((sum, line) => sum + line.subtotal, 0)
+              : Number(allocation.amount || 0),
         };
       })
       .filter((allocation) => allocation.staffId && allocation.amount > 0);
@@ -128,20 +136,20 @@ function buildTipAllocations(tipData = {}) {
       ? tipData.quantitiesByStaff[staffId]
       : sharedQuantities;
     const lines = gifts.map((gift, index) => {
-      const quantity = Number(quantities[index] || 1);
+      const quantity = Number(quantities[index] ?? 1);
       return {
         ...gift,
         quantity,
         subtotal: Number(gift.price || 0) * quantity,
       };
-    });
+    }).filter((line) => line.quantity > 0);
     return {
       staffId,
       lines,
       item: lines.map((line) => `${line.name}×${line.quantity}`).join("、"),
       amount: lines.reduce((sum, line) => sum + line.subtotal, 0),
     };
-  });
+  }).filter((allocation) => allocation.lines.length > 0);
 }
 
 function getTipAllocationTotal(tipData = {}) {
@@ -162,4 +170,5 @@ module.exports = {
   getTipTotalAmount,
   hasSelfTip,
   parseTipQuantityList,
+  validateTipQuantityMatrix,
 };
