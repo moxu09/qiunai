@@ -1,0 +1,34 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const{PGlite}=require(process.env.MEMBERSHIP_PGLITE_MODULE||'@electric-sql/pglite');
+async function main(){
+ const db=new PGlite(),uid='111111111111111111',higher='222222222222222222',other='333333333333333333';
+ await db.exec(`create role anon;create role authenticated;create role service_role;
+ create table user_items(id bigserial primary key,user_id text,item_name text,rarity text,description text,item_type text,guild_id text);
+ create table user_vips(user_id text,guild_id text,level_key text);
+ create table vip_levels(guild_id text,level_key text,membership_policy_version text);
+ insert into user_vips values('${uid}','1206138511535898654','vip8'),('${higher}','1206138511535898654','vip9'),('${other}','other','vip8');
+ insert into vip_levels values('1206138511535898654','vip8','20261016');`);
+ const sql=fs.readFileSync(path.join(__dirname,'../supabase/migrations/20261016080000_membership_monthly_coupons.sql'),'utf8');
+ await db.exec(sql);await db.exec(sql);
+ await assert.rejects(db.query('select qiunai_grant_monthly_coupons($1,$2)',[uid,'2026-10-01']),/不回溯/);
+ const at=async date=>db.exec(sql.replace("now() at time zone 'Asia/Taipei'",`timestamptz '${date}' at time zone 'Asia/Taipei'`));
+ const grant=async(u,month='2026-11-01')=>(await db.query('select qiunai_grant_monthly_coupons($1,$2) r',[u,month])).rows[0].r;
+ await at('2026-11-01 00:00:00+08');
+ const first=await grant(uid);assert.equal(first.coupon_count,3);assert.equal(first.item_ids.length,3);assert.equal(first.already_granted,false);
+ assert.equal((await grant(uid)).already_granted,true);
+ assert.equal((await grant(higher)).granted,false);assert.equal((await grant(other)).granted,false);
+ assert.equal((await db.query('select count(*)::int n from user_items')).rows[0].n,3);
+ assert.match((await db.query('select description from user_items limit 1')).rows[0].description,/500元內.*每筆限一張/);
+ await db.exec('delete from user_items');assert.equal((await grant(uid)).already_granted,true);
+ assert.equal((await db.query('select count(*)::int n from user_items')).rows[0].n,0);
+ await assert.rejects(grant(uid,'2026-10-01'),/不回溯/);await assert.rejects(grant(uid,'2026-12-01'),/不回溯/);
+ await at('2026-11-02 00:00:00+08');
+ await db.exec(`insert into user_vips values('444444444444444444','1206138511535898654','vip8');`);
+ await assert.rejects(grant('444444444444444444'),/非發放日/);assert.equal((await grant(uid)).already_granted,true);
+ await at('2026-12-01 00:00:00+08');assert.equal((await grant(uid,'2026-12-01')).already_granted,false);
+ await db.exec('set role authenticated');await assert.rejects(grant(uid,'2026-12-01'),/permission denied/);
+ await db.exec('reset role');
+ assert.equal((await db.query("select count(*)::int n from qiunai_membership_monthly_coupons where user_id=$1",[uid])).rows[0].n,2);
+ await db.close();console.log('PASS：月領3券、台北發放日、11月起算、當月去重、已用不重發、跨月新發、未明列等級及其他店別排除、一般會員無發券權限。');
+}
+main().catch(e=>{console.error(e);process.exitCode=1;});

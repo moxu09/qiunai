@@ -75,3 +75,18 @@ test('註冊扣點指令及處理器，沿用私密延遲回覆', () => {
   assert.match(source, /commandName === "扣除消費點數"[\s\S]*?handleManualPointDeduction/);
   assert.match(source, /deferReply\(\{\s*flags: 64/);
 });
+test('會員與客服的點數明細包含人工扣除及負數', async () => {
+  const { getPointSummary } = require('../utils/membershipCashback');
+  let filter;
+  const db = { from: table => {
+    const q = { select: () => q, eq: () => q, order: () => q,
+      or: value => { filter = value; return q; },
+      maybeSingle: async () => ({ data: { balance: 87.66 } }),
+      limit: async () => ({ data: [{ amount: -12.34, operation_key: 'manual-point-deduction:1561500000000000001',
+        note: '人工扣除消費點數：更正重複回饋', created_at: '2026-10-21T00:00:00Z' }] }) };
+    assert.ok(['qiunai_vip_point_accounts', 'qiunai_vip_point_logs'].includes(table)); return q;
+  } };
+  const summary = await getPointSummary(db, '1024589023144058902');
+  assert.match(filter, /operation_key.like.manual-point-deduction:%/);
+  assert.match(summary, /人工扣除｜-12.34 點/); assert.match(summary, /目前可用：87.66 點/);
+});
