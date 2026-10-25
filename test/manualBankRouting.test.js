@@ -4,7 +4,7 @@ const { getCanonicalPaymentOptions, getPaymentMethodSelection } = require("../ut
 const { handleEcpayDirect, assertBankTransferCanBeSelected } = require("../utils/ecpayDiscord");
 
 test("人工訂單、續單的舊按鈕與選單都維持銀行匯款", () => {
-  for (const prefix of ["quote_payment_method_", "service_payment_method_", "extension_payment_method_", "tip_payment_"]) {
+  for (const prefix of ["quote_payment_method_", "service_payment_method_", "extension_payment_method_", "tip_payment_", "topup_payment_method_"]) {
     for (const interaction of [
       { customId: `${prefix}123`, values: ["匯款"] },
       { customId: `${prefix}123__pm_bank` },
@@ -40,7 +40,7 @@ test("人工單及續單的舊 ATM 按鈕不會呼叫綠界新取號", async () 
   const originalFetch = global.fetch;
   global.fetch = async () => { throw new Error("不應呼叫取號 API"); };
   try {
-    for (const kind of ["order", "extension", "tip"]) {
+    for (const kind of ["order", "extension", "tip", "topup"]) {
       assert.match(await pressAtm(kind, { flow: "service" }), /請使用原銀行匯款/);
     }
   } finally { global.fetch = originalFetch; }

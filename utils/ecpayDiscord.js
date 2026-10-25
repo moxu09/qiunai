@@ -95,10 +95,10 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
     if (payment.amount < limit.min || payment.amount > limit.max)
       throw new Error("此付款方式不適用這筆金額或訂單");
     const issuedMethod = payment.raw_result?.PaymentType || payment.metadata?.ecpay_direct_method;
-    // 人工單及人工加時的舊按鈕不可新取 ATM 號碼；已取號交易保留原資訊。
-    if (method === "ATM" && ["order", "extension", "tip"].includes(payment.payment_kind) &&
+    // 人工付款的舊按鈕不可新取 ATM 號碼；已取號交易保留原資訊。
+    if (method === "ATM" && ["order", "extension", "tip", "topup"].includes(payment.payment_kind) &&
         payment.metadata?.flow !== "self_service" && issuedMethod !== "ATM")
-      throw new Error("人工訂單、人工續單與人工打賞請使用原銀行匯款，並由客服確認入帳；此按鈕不再提供新的綠界 ATM 帳號");
+      throw new Error("人工訂單、人工續單、人工打賞與人工購買 ASD 請使用原銀行匯款，並由客服確認入帳；此按鈕不再提供新的綠界 ATM 帳號");
     if (issuedMethod && issuedMethod !== method)
       throw new Error(`這筆綠界付款單已產生${issuedMethod}繳費資訊，無法改成${method}；請勿重複付款，請聯繫客服處理`);
     const deliveredId = payment.metadata?.ecpay_direct_message_id || directDeliveries.get(order)?.messageId;

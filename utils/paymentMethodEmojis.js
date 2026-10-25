@@ -254,7 +254,7 @@ function getPaymentMethodSelection(interaction, prefix) {
     if (ecpayMethods[method]) return { paymentMethod: "綠界支付", requestedMethod: ecpayMethods[method] };
     const bank = ["匯款", "匯款帳號", "匯款轉帳", "匯款 / 轉帳"].includes(method);
     if (!bank) return { paymentMethod: method };
-    if (["quote_payment_method_", "service_payment_method_", "extension_payment_method_", "tip_payment_"].includes(prefix)) {
+    if (["quote_payment_method_", "service_payment_method_", "extension_payment_method_", "tip_payment_", "topup_payment_method_"].includes(prefix)) {
       return { paymentMethod: "匯款" };
     }
     if (process.env.ECPAY_ACCEPT_PAYMENTS === "true" && isEcpayAtmAvailable()) {

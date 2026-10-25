@@ -104,13 +104,13 @@ test("人工訂單與舊按鈕匯款回到連線銀行，自助購幣仍走綠�
     assert.equal(oldButton.requestedMethod, undefined);
     const service = getPaymentMethodSelection({ customId: "service_payment_method_123__pm_bank" }, "service_payment_method_");
     assert.equal(service.paymentMethod, "匯款");
-    const selfTopup = getPaymentMethodSelection({ customId: "topup_payment_method_123__pm_bank" }, "topup_payment_method_");
-    assert.equal(selfTopup.paymentMethod, "綠界支付");
-    assert.equal(selfTopup.requestedMethod, "ATM");
+    const topup = getPaymentMethodSelection({ customId: "topup_payment_method_123__pm_bank" }, "topup_payment_method_");
+    assert.equal(topup.paymentMethod, "匯款");
+    assert.equal(topup.requestedMethod, undefined);
     const manualButtons = buildEcpayPaymentRows(payment, 100, { allowAtm: false })[0].components.map(button => button.toJSON());
     assert.equal(manualButtons.some(button => button.custom_id?.includes("_ATM_")), false);
     const dispatch = readFileSync(join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
-    assert.ok(dispatch.includes('allowAtm: !["訂單", "加時"].includes(label) || payment.selfService === true'));
+    assert.ok(dispatch.includes('allowAtm: !["訂單", "加時", "購買ASD"].includes(label) || payment.selfService === true'));
     assert.match(dispatch, /async function sendBankTransferInfo\(channel\) \{[\s\S]*?銀行：824連線銀行/);
   } finally {
     Date.now = originalNow;
