@@ -1,3 +1,4 @@
+const { recoverPendingEcpayPayments } = require("./utils/ecpayInquiry");
 const { memberHasRole, interactionHasPermission } = require("./utils/interactionPermissions");
 require("dotenv").config();
 const fs = require("node:fs/promises");
@@ -293,7 +294,16 @@ const ECPAY_FULFILLMENT_POLL_MS = 10_000;
 
 async function startEcpayFulfillmentRecoveryScheduler() {
   if (!ecpayService.config.enabled) return null;
+  let lastInquiryAt = 0;
   const run = async () => {
+    if (Date.now() - lastInquiryAt >= 30_000) {
+      lastInquiryAt = Date.now();
+      try {
+        const inquiry = await recoverPendingEcpayPayments(supabase, ecpayService.config.publicBaseUrl);
+        if (["paid", "needs_review", "error"].includes(inquiry.status))
+          console.log(`[ECPAY][INQUIRY] ${inquiry.status}`);
+      } catch (error) { console.error("[ECPAY][INQUIRY]", error.message); }
+    }
     const summary = await ecpayService.recoverPaidFulfillments();
     if (summary.candidates || summary.failed)
       console.log(`[ECPAY][RECOVERY] 候選 ${summary.candidates}、完成 ${summary.completed}、失敗 ${summary.failed}`);

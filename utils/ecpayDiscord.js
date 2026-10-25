@@ -1,3 +1,4 @@
+const { buildEcpayInquiryRow } = require("./ecpayInquiry");
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } = require("discord.js");
 const bwipjs = require("bwip-js");
 const { PNG } = require("pngjs");
@@ -139,7 +140,9 @@ async function handleEcpayDirect(interaction, supabase, baseUrl) {
       files.push(new AttachmentBuilder(await renderBarcodes(info.barcode), { name: `ecpay-${order}-barcodes.png` }));
     }
     content += "\n取號不代表已付款；完成轉帳或超商繳費後，系統收到綠界通知才會自動核帳。請勿重複繳費。";
-    const sent = await interaction.channel.send({ content, files });
+    const sent = await interaction.channel.send({ content, files,
+      components: ["ATM", "CVS"].includes(method) ? [buildEcpayInquiryRow(order)] : [],
+    });
     if (sent?.id) {
       directDeliveries.set(order, { messageId: sent.id });
       setTimeout(() => {

@@ -1,3 +1,4 @@
+const { handleEcpayInquiry } = require("../utils/ecpayInquiry");
 const { memberHasRole, interactionHasPermission } = require("../utils/interactionPermissions");
 const {
   ActionRowBuilder,
@@ -15388,6 +15389,9 @@ async function handleDispatchInteractionInner(interaction) {
   }
 
   if (interaction.isButton()) {
+    if (interaction.customId.startsWith("ecpay_inquiry_")) {
+      return handleEcpayInquiry(interaction, supabase, process.env.ECPAY_PUBLIC_BASE_URL);
+    }
     if (interaction.customId.startsWith("ecpay_direct_")) {
       return handleEcpayDirect(interaction, supabase, process.env.ECPAY_PUBLIC_BASE_URL);
     }
