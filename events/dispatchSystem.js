@@ -6024,9 +6024,14 @@ async function createServiceTicket(interaction, serviceType, initial = {}) {
     finishButtonShown: Boolean(initial.fromPanel),
   });
 
+  const staffRoleId = process.env.STAFF_ROLE || DEFAULT_CUSTOMER_SERVICE_ROLE_ID;
+  const welcomeNotification = {
+    content: `<@${interaction.user.id}> <@&${staffRoleId}>\n🚀 客服人員正手刀衝刺過來啦！`,
+    allowedMentions: { parse: [], roles: [staffRoleId], users: [interaction.user.id] },
+  };
   if (initial.fromPanel) {
     await channel.send({
-      content: `<@${interaction.user.id}>`,
+      ...welcomeNotification,
       embeds: [
         new EmbedBuilder()
           .setColor(QIUNAI_WATER_BLUE)
@@ -6061,7 +6066,7 @@ async function createServiceTicket(interaction, serviceType, initial = {}) {
   }
 
   await channel.send({
-    content: `<@${interaction.user.id}>`,
+    ...welcomeNotification,
     embeds: [
       new EmbedBuilder()
         .setColor(QIUNAI_WATER_BLUE)
