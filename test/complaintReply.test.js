@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { createComplaintSystem } = require("../events/complaintSystem");
 const CEO = "847840193859682304", SENDER = "985810902991388722", MESSAGE = "1564609787516289177";
 
-function fixture({ anonymous = false, sendError = false, editError = false, previous = false } = {}) {
+function fixture({ anonymous = false, sendError = false, editError = false, previous = false, db = null } = {}) {
   const sent = []; const edits = []; const original = { id: MESSAGE, author: { id: "bot" }, embeds: [{
     title: anonymous ? "🕶️ 收到匿名投訴" : "👤 收到實名投訴", description: "私密投訴內容",
     fields: [{ name: "主旨", value: "測試事項" }, { name: "投訴者", value: anonymous ? "匿名（未紀錄發送者）" : `<@${SENDER}>（原帳號）` },
@@ -15,10 +15,10 @@ function fixture({ anonymous = false, sendError = false, editError = false, prev
     sent.push(payload); history.push({ author: { id: "bot" }, embeds: payload.embeds.map(e => e.toJSON()) });
   } };
   const client = { user: { id: "bot" }, users: { fetch: async id => { assert.equal(id, SENDER); return { createDM: async () => dm }; } } };
-  const system = createComplaintSystem(client, { ceoUserId: CEO });
+  const system = createComplaintSystem(client, { ceoUserId: CEO }, db);
   function interaction(kind = "button", user = CEO) {
     const replies = [];
-    return { user: { id: user }, message: original, guildId: null, customId: kind === "button" ? "complaint_mark_handled" : `complaint_reply_${MESSAGE}`,
+    return { user: { id: user }, message: original, guildId: null, channelId: "ceo-dm", customId: kind === "button" ? "complaint_mark_handled" : `complaint_reply_${MESSAGE}`,
       channel: { messages: { fetch: async id => { assert.equal(id, MESSAGE); return original; } } },
       isButton: () => kind === "button", isModalSubmit: () => kind === "modal",
       showModal: async modal => { replies.push(modal.toJSON()); }, reply: async payload => replies.push(payload),
@@ -26,7 +26,7 @@ function fixture({ anonymous = false, sendError = false, editError = false, prev
       fields: { getTextInputValue: () => "已確認此事，會安排後續處理。" }, replies,
     };
   }
-  return { system, interaction, sent, edits, original, dm };
+  return { system, interaction, sent, edits, original, dm, client };
 }
 test("舊實名投訴已處理按鈕開啟回覆表單，尚未送出不改狀態", async () => {
   const f = fixture(); const i = f.interaction(); assert.equal(await f.system.handleInteraction(i), true);
@@ -52,7 +52,7 @@ test("非執行長、公頻及偽造訊息無法回覆", async () => {
     await f.system.handleInteraction(f.interaction(kind)); assert.equal(f.sent.length, 0); assert.equal(f.edits.length, 0);
   }
 });
-test("匿名投訴保留不記錄帳號，僅標記已處理，不嘗試傳送私訊", async () => {
+test("舊匿名投訴沒有留存帳號，僅標記已處理，不嘗試推測身分", async () => {
   const f = fixture({ anonymous: true }); const i = f.interaction(); await f.system.handleInteraction(i);
   assert.equal(f.sent.length, 0); assert.equal(f.edits.length, 1);
   assert.equal(f.edits[0].embeds[0].data.fields.find(x => x.name === "投訴者").value, "匿名（未紀錄發送者）");

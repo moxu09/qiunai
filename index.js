@@ -272,7 +272,7 @@ const deviceAuditReviewerSync = createDeviceAuditReviewerSync({
     process.env.DEVICE_AUDIT_REVIEWER_ROLE_ID || "1513626379437211900",
 });
 const employmentSystem = createEmploymentSystem(client, employmentConfig, supabase);
-const complaintSystem = createComplaintSystem(client, complaintConfig);
+const complaintSystem = createComplaintSystem(client, complaintConfig, supabase);
 const runtimeHealth = createHealthState("rainbot-qiunai");
 let jkopayService;
 let websiteOrderBridge;
