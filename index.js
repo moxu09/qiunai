@@ -75,6 +75,7 @@ const {
 const { parseAllowedServices } = require("./utils/services");
 const { ORDER_FLOW_TTL_MS } = require("./utils/orderFlow");
 const { scheduleChannelDeletion } = require("./utils/channelCleanup");
+const { isInChannelOrder } = require("./utils/inChannelOrder");
 const { createCustomerServiceTickets } = require("./events/customerServiceTickets");
 const { createQiunaiReferrals } = require("./events/qiunaiReferrals");
 const {
@@ -9233,6 +9234,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await dispatchSystem.handleDispatchInteraction(interaction);
       }
       const customId = interaction.customId;
+      if (["owner_cancel_ticket", "close_ticket", "customer_confirm_close_order", "delete_order_now", "save_order_log"].includes(customId)) {
+        const { data: protectedOrder, error: protectionError } = await supabase.from("play_orders")
+          .select("id").eq("channel_id", interaction.channel.id)
+          .like("note", "%[IN_CHANNEL_ORDER]%").limit(1).maybeSingle();
+        if (protectionError || protectedOrder) {
+          const payload = { content: protectionError
+            ? "❌ 無法確認原房保護狀態，請稍後重試。"
+            : "此頻道用於原房加單，會持續保留。請使用單筆訂單的完成或取消功能。", flags: 64 };
+          return interaction.deferred || interaction.replied
+            ? interaction.editReply(payload) : interaction.reply(payload);
+        }
+      }
       if (
         customId.startsWith("bulk_delete_confirm_") ||
         customId.startsWith("bulk_delete_cancel_")
@@ -9898,6 +9911,7 @@ async function handleSlashCommand(interaction) {
         interaction.channel,
         customer,
         game,
+        { inChannelOnly: true },
       );
       return interaction.editReply({
         content:
@@ -13841,7 +13855,7 @@ async function handleButtonInteraction(interaction) {
       reorderInFlight.add(reorderKey);
       try {
         const customer = await client.users.fetch(customerId);
-        await dispatchSystem.startNewOrderFlow(interaction.channel, customer);
+        await dispatchSystem.startNewOrderFlow(interaction.channel, customer, "", { inChannelOnly: isInChannelOrder(order) });
         await interaction.message
           .edit({
             content: `🛒 <@${customerId}> 選擇在此頻道再下一單。`,
@@ -14114,7 +14128,7 @@ async function handleButtonInteraction(interaction) {
               .filter(Boolean),
           ),
         );
-        const playersToRevoke = remainingOrderError
+        const playersToRevoke = remainingOrderError || isInChannelOrder(order)
           ? []
           : assignedPlayers.filter((id) => !remainingPlayerIds.has(id));
         // 完成後立刻收回所有接單陪陪的頻道權限；客人與客服保留存取，
@@ -14137,7 +14151,7 @@ async function handleButtonInteraction(interaction) {
             permissionFailures.map((result) => result.reason),
           );
         }
-        await ensureCompletedOrderChannelAccess(
+        if (!isInChannelOrder(order)) await ensureCompletedOrderChannelAccess(
           interaction.channel,
           order.customer_id,
         );
@@ -14195,6 +14209,14 @@ async function handleButtonInteraction(interaction) {
           ],
         });
         await sendOrderReviewPanel(interaction.channel, order, assignedPlayers);
+        if (isInChannelOrder(order)) {
+          await interaction.channel.send({
+            content: `<@${order.customer_id}> 訂單 ${order.order_no || order.id} 已完成，原房會持續保留。`,
+            components: [new ActionRowBuilder().addComponents(new ButtonBuilder()
+              .setCustomId("customer_reorder_same_channel").setLabel("🛒 再下一單").setStyle(ButtonStyle.Primary))],
+          });
+          return await safeReply(interaction, { content: "✅ 訂單已完成，原頻道保留。", ephemeral: true });
+        }
         if (remainingOrders.length > 0) {
           return await safeReply(interaction, {
             content: `✅ 已完成訂單 ${order.order_no || order.id}；此工單還有 ${remainingOrders.length} 筆訂單進行中，因此暫不關閉頻道。`,

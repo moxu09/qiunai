@@ -56,6 +56,7 @@ const {
 } = require("../utils/paymentMethodEmojis");
 const { getOrCreateServiceOrder, transitionUnpaidOrders, createOperationGuard, isUnpaidWaitingOrder } = require("../utils/serviceOrderSafety");
 const { createPaidOrderDispatcher } = require("../utils/orderDispatchRecovery");
+const { isInChannelOrder, assertInChannelSelection, staffOrderChannelId } = require("../utils/inChannelOrder");
 const {
   getGeneralOrderAutoQuote,
   getValorantMappedCompanionRank,
@@ -1248,7 +1249,7 @@ function stripSelfServiceClaimNotes(note) {
 
 function getPublicOrderNote(note) {
   return stripSelfServiceClaimNotes(note)
-    .replace(/\s*\[(?:SELF_SERVICE(?:_MANUAL)?|MANUAL_DISPATCH)\]/g, "")
+    .replace(/\s*\[(?:SELF_SERVICE(?:_MANUAL)?|MANUAL_DISPATCH|IN_CHANNEL_ORDER)\]/g, "")
     .replace(/\s*\[DISPATCH_AT:[^\]]+\]/g, "")
     .replace(/\s*\[SELECTION_EXTENSION_MINUTES:\d+\]/g, "")
     .trim() || "無";
@@ -1839,6 +1840,7 @@ function getSelfServiceRankFieldLabel(order) {
 }
 
 async function sendSelfServiceDispatch(order) {
+  if (isInChannelOrder(order)) throw new Error("原頻道加單不可送到外部派單區。");
   const dispatchChannel = await client.channels
     .fetch(getClaimDispatchChannelId(order))
     .catch(() => null);
@@ -5101,7 +5103,7 @@ async function findMessageByButton(channel, customId) {
 
 async function findExistingStaffOrderMessage(order) {
   const channel = await client.channels
-    .fetch(isManualDispatchOrder(order) ? getManualDispatchChannelId(order) : process.env.PLAYER_ORDER_CHANNEL)
+    .fetch(staffOrderChannelId(order, isManualDispatchOrder(order) ? getManualDispatchChannelId(order) : process.env.PLAYER_ORDER_CHANNEL))
     .catch(() => null);
   return findMessageByButton(
     channel,
@@ -5430,10 +5432,11 @@ function startFinancialEffectsRecovery() {
 }
 
 async function sendOrderToStaffChannel(order) {
+  assertInChannelSelection(order);
   const channel = await client.channels.fetch(
-    isManualDispatchOrder(order)
+    staffOrderChannelId(order, isManualDispatchOrder(order)
       ? getManualDispatchChannelId(order)
-      : process.env.PLAYER_ORDER_CHANNEL,
+      : process.env.PLAYER_ORDER_CHANNEL),
   );
 
   const preferredText = buildPreferredPlayerText(order.preferred_player);
@@ -5523,6 +5526,7 @@ async function sendStaffOrderControlPanel(channel, order) {
   if (!channel?.isTextBased?.()) {
     throw new Error(`訂單 ${order.order_no || order.id} 的客戶頻道不存在，無法發送客服面板`);
   }
+  assertInChannelSelection(order, channel.id);
   if (isManualDispatchOrder(order) && order.paid) {
     const selectedIds = String(order.preferred_player || "")
       .split(",")
@@ -7901,6 +7905,11 @@ function buildManualQuoteDispatchComponents(orderId) {
 }
 
 async function sendManualQuoteDispatchPrompt(channel, order, { quotedBy = null } = {}) {
+  if (isInChannelOrder(order)) {
+    await sendStaffQuotePanel(order);
+    if (order.preferred_player && order.quote_status === "quoted") await sendOrderQuotePriceConfirm(channel, order);
+    return;
+  }
   const price = Number(order.final_price || order.price || 0);
   return channel.send({
     content: `<@${order.customer_id}> 報價已完成，請確認後正式派單。`,
@@ -7931,6 +7940,9 @@ async function confirmManualQuoteAndDispatch(interaction) {
     .maybeSingle();
   if (error || !order || !isManualDispatchOrder(order)) {
     return interaction.editReply({ content: "❌ 找不到這張人工下單需求。" });
+  }
+  if (isInChannelOrder(order)) {
+    return interaction.editReply({ content: "這張訂單在原頻道內選人及付款，請使用客服選擇陪陪與確認報價按鈕。" });
   }
   if (!canCustomerOrStaffSubmit(interaction, order.customer_id)) {
     return interaction.editReply({ content: "❌ 只有下單者、客服或管理員可以確認正式派單。" });
@@ -8037,7 +8049,7 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
       duration_minutes: pending.durationMinutes || 0,
       duration_text: timeText || "未填寫",
 
-      note: `${pending.note || "無"} [MANUAL_DISPATCH]`.trim(),
+      note: `${pending.note || "無"} [MANUAL_DISPATCH]${pending.inChannelOnly ? " [IN_CHANNEL_ORDER]" : ""}`.trim(),
       price: autoPrice,
       final_price: autoPrice,
       original_price: autoPrice,
@@ -8151,7 +8163,7 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
       }
     )
     .setDescription(autoQuote.ok
-      ? `系統已依現行價目表自動報價 NT$${autoPrice.toLocaleString("zh-TW")}。\n請確認報價後正式派單；選定陪陪後才會進入付款。`
+      ? `系統已依現行價目表自動報價 NT$${autoPrice.toLocaleString("zh-TW")}。\n${isInChannelOrder(order) ? "請客服在本頻道選擇陪陪，再由闆闆確認報價並付款。" : "請確認報價後正式派單；選定陪陪後才會進入付款。"}`
       : `系統無法自動計算：${autoQuote.reason}\n已轉交客服報價；客服填寫金額後，系統會讓你選擇優惠券與付款方式。`)
     .setTimestamp();
 
@@ -8274,7 +8286,7 @@ async function sendStaffQuotePanel(order, options = {}) {
       .setEmoji("💰")
       .setStyle(ButtonStyle.Primary),
   ];
-  if (!isManualDispatchOrder(order) && !isManualQuoteSelfServiceOrder(order)) {
+  if (isInChannelOrder(order) || (!isManualDispatchOrder(order) && !isManualQuoteSelfServiceOrder(order))) {
     controls.push(
       new ButtonBuilder()
         .setCustomId(`dispatch_assign_players_${order.id}`)
@@ -8298,12 +8310,18 @@ async function sendStaffQuotePanel(order, options = {}) {
       .setEmoji("🛠️")
       .setStyle(ButtonStyle.Secondary),
   );
+  if (isInChannelOrder(order)) controls.push(
+    new ButtonBuilder().setCustomId(`manual_quote_cancel_${order.id}`)
+      .setLabel("取消這筆加單").setStyle(ButtonStyle.Danger),
+  );
   const row = new ActionRowBuilder().addComponents(...controls);
   await channel.send({
     ...(options.nonce?{nonce:options.nonce,enforceNonce:true}:{}),
     content:
       `<@&${process.env.STAFF_ROLE}> 有新的需求等待報價。\n` +
-      (isManualDispatchOrder(order)
+      (isInChannelOrder(order)
+        ? "請客服在本頻道選齊陪陪並確認金額，再由闆闆確認報價與付款；此房間會持續保留。"
+        : isManualDispatchOrder(order)
         ? `請客服只需確認金額；老闆確認報價後，系統會自動派單選人。`
         : `請客服確認陪陪與金額後，再讓闆闆選擇付款方式。`),
     embeds: [
@@ -8495,7 +8513,7 @@ async function sendOrderQuotePriceConfirm(channel, order) {
     content: `<@${order.customer_id}> 請確認這張訂單的報價金額。`,
     embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE)
       .setTitle("💰 請顧客確認報價")
-      .setDescription(`訂單編號：${order.order_no || order.id}\n金額：NT$${price.toLocaleString("zh-TW")}\n\n確認後選擇優惠券與付款方式；付款完成後才會自動派單。`)
+      .setDescription(`訂單編號：${order.order_no || order.id}\n金額：NT$${price.toLocaleString("zh-TW")}\n\n${isInChannelOrder(order) ? "確認後選擇優惠券與付款方式；付款完成後，選定的陪陪會在本頻道服務並收到報單。" : "確認後選擇優惠券與付款方式；付款完成後才會自動派單。"}`)
       .setTimestamp()],
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`quote_confirm_price_${order.id}_${price}`).setLabel("確認報價金額").setStyle(ButtonStyle.Success),
@@ -8510,6 +8528,8 @@ async function handleOrderQuotePriceConfirm(interaction) {
   const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
   if (error || !order) return interaction.editReply({ content: "❌ 找不到這張訂單。" });
   if (order.customer_id !== interaction.user.id) return interaction.editReply({ content: "❌ 只有下單的闆闆可以確認報價。" });
+  try { assertInChannelSelection(order, interaction.channelId || interaction.channel?.id); }
+  catch (selectionError) { return interaction.editReply({ content: `❌ ${selectionError.message}` }); }
   const price = Number(order.original_price || order.price || 0);
   if (price !== Number(quotedPrice) || price <= 0) return interaction.editReply({ content: "❌ 報價已更新，請確認最新報價。" });
   if (order.quote_status === "price_confirmed") return interaction.editReply({ content: "✅ 報價已確認，請使用先前的優惠券選擇訊息。" });
@@ -9336,7 +9356,9 @@ async function sendCustomerFinalConfirm(channel, order) {
       const dispatchOrder = await markPaidOrderDispatchPending(order.id);
       const result = await deliverPaidOrder(dispatchOrder, channel?.isTextBased?.() ? channel : null);
       await channel?.send?.({
-        content: `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單${result.alreadyDispatched ? "已派單" : "已自動送往指定派單區"}。`,
+        content: isInChannelOrder(order)
+          ? `<@${order.customer_id}> ✅ 報價已確認、付款已完成，選定的陪陪會在本頻道服務，原房會持續保留。`
+          : `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單${result.alreadyDispatched ? "已派單" : "已自動送往指定派單區"}。`,
       });
     } catch (error) {
       console.error(`[報價確認後派單] ${order.order_no || order.id} 待補派`, error);
@@ -9839,6 +9861,10 @@ async function submitStaffEditOrder(interaction) {
   if (currentOrderError || !currentOrder) {
     return interaction.editReply({ content: "❌ 找不到這張訂單" });
   }
+  if (isInChannelOrder(currentOrder) && !currentOrder.paid &&
+      !["quoted", "waiting_quote"].includes(currentOrder.quote_status)) {
+    return interaction.editReply({ content: "❌ 訂單已進入付款流程，請先處理原付款單再修改內容。" });
+  }
 
   const service = interaction.fields.getTextInputValue("service") || "";
 
@@ -9853,7 +9879,9 @@ async function submitStaffEditOrder(interaction) {
   const preserveDispatch = shouldPreserveDispatchedOrder(currentOrder);
   const updateData = preserveDispatch
     ? {}
-    : { quote_status: "fixed", status: "quoted" };
+    : isInChannelOrder(currentOrder)
+      ? { quote_status: Number(currentOrder.price) > 0 ? "quoted" : "waiting_quote", status: Number(currentOrder.price) > 0 ? "quoted" : "waiting_quote" }
+      : { quote_status: "fixed", status: "quoted" };
   if (playerCountRaw.trim()) {
     const playerCount = Number(playerCountRaw.replace(/[^\d]/g, ""));
     if (!playerCount || playerCount <= 0) {
@@ -9904,7 +9932,9 @@ async function submitStaffEditOrder(interaction) {
   }
 
   if (note.trim()) {
-    updateData.note = note.trim();
+    updateData.note = isInChannelOrder(currentOrder)
+      ? `${getPublicOrderNote(note)} [MANUAL_DISPATCH] [IN_CHANNEL_ORDER]`
+      : note.trim();
   }
 
   const { data: updatedOrder, error } = await supabase
@@ -9928,6 +9958,11 @@ async function submitStaffEditOrder(interaction) {
       content:
         "⚠️ 訂單已修改，但同步陪陪填單失敗，請查看 Railway Logs 後再操作。",
     });
+  }
+
+  if (isInChannelOrder(updatedOrder) && !updatedOrder.paid) {
+    await sendManualQuoteDispatchPrompt(interaction.channel, updatedOrder);
+    return interaction.editReply({ content: "✅ 已修改訂單，請在原頻道重新確認陪陪與報價。" });
   }
 
   const row = new ActionRowBuilder().addComponents(
@@ -10916,7 +10951,7 @@ async function handleStaffConfirmExtensionPaid(interaction) {
     content: "✅ 已確認加時付款",
   });
 }
-async function startNewOrderFlow(channel, user, initialGame = "") {
+async function startNewOrderFlow(channel, user, initialGame = "", { inChannelOnly = false } = {}) {
   const flowId = `${user.id}_${Date.now()}`;
 
   const allowedGame = NEW_ORDER_GAME_OPTIONS.some(
@@ -10930,6 +10965,7 @@ async function startNewOrderFlow(channel, user, initialGame = "") {
     username: user.username,
     guildId: channel.guildId || channel.guild?.id || process.env.GUILD_ID,
     channelId: channel.id,
+    inChannelOnly,
 
     game: allowedGame,
     item: "",
@@ -11157,15 +11193,31 @@ async function submitDispatchPlayers(interaction) {
 
   const preferredPlayerValue = selectedPlayerIds.join(",");
 
-  const { data: order, error } = await supabase
+  const { data: current, error: readError } = await supabase.from("play_orders")
+    .select("*").eq("id", orderId).single();
+  if (readError || !current) return interaction.editReply({ content: "❌ 讀取訂單失敗，請稍後重試。", components: [] });
+  if (isInChannelOrder(current)) {
+    if (current.paid || !["waiting_quote", "quoted"].includes(current.quote_status)) {
+      return interaction.editReply({ content: "❌ 已進入付款流程，不能再變更陪陪。", components: [] });
+    }
+    try { assertInChannelSelection({ ...current, preferred_player: preferredPlayerValue }, interaction.channelId || interaction.channel?.id); }
+    catch (selectionError) { return interaction.editReply({ content: `❌ ${selectionError.message}`, components: [] }); }
+    const options = await getAvailablePlayerOptions(current.dispatch_service_key || current.service || current.order_item || current.game || "");
+    if (selectedPlayerIds.some(id => !options.some(option => option.value === id))) {
+      return interaction.editReply({ content: "❌ 陪陪名單已更新，請重新選擇。", components: [] });
+    }
+  }
+
+  let selectionQuery = supabase
     .from("play_orders")
     .update({
       preferred_player: preferredPlayerValue,
     })
     .eq("id", orderId)
-    .in("status", ["waiting_quote", "quoted", "waiting_payment", "pending"])
-    .select()
-    .single();
+    .eq("paid", false)
+    .in("status", ["waiting_quote", "quoted", "waiting_payment", "pending"]);
+  if (isInChannelOrder(current)) selectionQuery = selectionQuery.eq("quote_status", current.quote_status);
+  const { data: order, error } = await selectionQuery.select().single();
 
   if (error || !order) {
     console.log("[指定派單失敗]", error);
@@ -11175,12 +11227,17 @@ async function submitDispatchPlayers(interaction) {
     });
   }
 
+  if (isInChannelOrder(order) && order.quote_status === "quoted") {
+    await sendOrderQuotePriceConfirm(interaction.channel, order);
+  }
   return interaction.editReply({
     content:
       `✅ 已選擇陪陪：${selectedPlayerIds
         .map((id) => `<@${id}>`)
         .join("、")}\n` +
-      `請繼續完成報價、優惠券與付款方式流程，等闆闆確認後才會正式派單。`,
+      (isInChannelOrder(order)
+        ? "請闆闆在本頻道確認報價，再完成優惠券與付款流程。"
+        : `請繼續完成報價、優惠券與付款方式流程，等闆闆確認後才會正式派單。`),
     components: [],
   });
 }
