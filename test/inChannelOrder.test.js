@@ -69,7 +69,7 @@ test("客服填完金額只送顧客確認，不再重複客服面板，無指�
   const forbidden = fn("sendSelfServiceDispatch", { client: { channels: { fetch() { throw Error("不應讀公開頻道"); } } } });
   await assert.rejects(forbidden(privateOrder), /不可送到外部/);
 });
-test("付款成功與恢復查找均只使用原房，不送公開派單區", async () => {
+test("已指定陪陪的原房單保留原房通知，不重複公開接單", async () => {
   const destinations = []; const sent = [];
   const client = { channels: { fetch: async id => { destinations.push(id); return { send: async message => { sent.push(message); return { id: "message" }; } }; } } };
   const globals = { client, isManualDispatchOrder: () => true, getManualDispatchChannelId: () => "public", buildPreferredPlayerText: () => "陪陪", isManualQuoteSelfServiceOrder: () => false, getPublicOrderNote: () => "需求", findMessageByButton: async () => null };
@@ -77,6 +77,61 @@ test("付款成功與恢復查找均只使用原房，不送公開派單區", as
   await fn("findExistingStaffOrderMessage", globals)(privateOrder);
   assert.deepEqual(destinations, ["vip", "vip"]); assert.equal(sent.length, 1);
   assert.equal(sent[0].components[0].components[0].data.disabled, true);
+});
+test("未指定陪陪的原房加單付款後送接單專區，附可用接單按鈕，恢復查找使用同一目的地", async () => {
+  const destinations = [], sent = [], searched = [];
+  const order = { ...privateOrder, paid: true, preferred_player: null };
+  const globals = {
+    process: { env: { PLAYER_ORDER_CHANNEL: "acceptance", PLAYER_ROLE_ID: "player-role" } },
+    client: { channels: { fetch: async id => { destinations.push(id); return { send: async value => { sent.push(value); return { id: "new-message" }; } }; } } },
+    isManualDispatchOrder: () => true, getManualDispatchChannelId: () => "old-game-dispatch",
+    buildPreferredPlayerText: () => "不指定", isManualQuoteSelfServiceOrder: () => false, getPublicOrderNote: () => "需求",
+    findMessageByButton: async (_, id) => { searched.push(id); return null; },
+  };
+  await fn("sendOrderToStaffChannel", globals)(order);
+  await fn("findExistingStaffOrderMessage", globals)(order);
+  assert.deepEqual(destinations, ["acceptance", "acceptance"]);
+  assert.equal(sent[0].components[0].components[0].data.custom_id, "accept_play_order_order");
+  assert.notEqual(sent[0].components[0].components[0].data.disabled, true);
+  assert.deepEqual(searched, ["accept_play_order_order"]); assert.match(sent[0].content, /接單/);
+  assert.equal(order.channel_id, "vip");
+  assert.equal(policy.staffOrderChannelId(order, "game-dispatch", "acceptance"), "acceptance");
+  assert.throws(() => policy.staffOrderChannelId(order, "game-dispatch", null), /未設定接單專區/);
+});
+test("原房加單接單限已付款本店訂單，同時接單只允許一個成功並發送一份報單", async () => {
+  async function runCase({ paid = true, guild = "shop", concurrent = false } = {}) {
+    const order = { ...privateOrder, preferred_player: null, assigned_player: null, player_count: 1, paid, guild_id: guild, status: "pending" };
+    let assignments = 0, reports = 0, permissionEdits = 0;
+    const db = { from(table) {
+      if (table === "qiunai_staff") {
+        const q = { select() { return this; }, eq() { return this; }, async limit() { return { data: [{ discord_id: "a", status: "available" }] }; } }; return q;
+      }
+      let value; const filters = [];
+      const query = {
+        select() { return this; }, update(v) { value = v; return this; }, eq(k,v) { filters.push([k,v]); return this; },
+        is(k,v) { filters.push([k,v]); return this; }, in() { return this; },
+        async maybeSingle() {
+          if (!value) return { data: { ...order } };
+          if (filters.some(([k,v]) => order[k] !== v)) return { data: null };
+          Object.assign(order, value); if (value.assigned_player) assignments++; return { data: { ...order } };
+        },
+        then(resolve) { resolve({}); },
+      }; return query;
+    } };
+    const channel = { id: "vip", send: async () => {}, permissionOverwrites: { edit: async () => permissionEdits++ } };
+    const accept = fn("acceptPlayOrder", { supabase: db, process: { env: { GUILD_ID: "shop" } }, applyStaffGuildFilter: x => x,
+      workReportSystem: { sendForAcceptedOrder: async () => reports++ }, client: { channels: { fetch: async id => { assert.equal(id, "vip"); return channel; } } }, sendPlayLog: async () => {},
+    });
+    const replies = [];
+    const interaction = id => ({ customId: "accept_play_order_order", user: { id }, editReply: async value => replies.push(value) });
+    if (concurrent) await Promise.all([accept(interaction("a")), accept(interaction("b"))]); else await accept(interaction("a"));
+    return { order, assignments, reports, permissionEdits, replies };
+  }
+  for (const opts of [{ paid: false }, { guild: "other-shop" }]) {
+    const r = await runCase(opts); assert.equal(r.assignments, 0); assert.equal(r.reports, 0); assert.match(r.replies[0].content, /無法接單/);
+  }
+  const r = await runCase({ concurrent: true }); assert.equal(r.assignments, 1); assert.equal(r.reports, 1); assert.equal(r.permissionEdits, 1);
+  assert.equal(r.order.status, "accepted"); assert.equal(r.order.channel_id, "vip");
 });
 test("客服選齊後本地確認報價；付款中、錯誤頻道與無效人選不更新", async () => {
   for (const variant of ["ok", "checkout", "wrong-channel", "invalid", "missing"]) {
@@ -110,7 +165,7 @@ test("原房客服面板移除選陪陪，重送時更新原訊息，首次送�
   assert.deepEqual(buttons, ["staff_quote_price_order", "staff_edit_order_order", "manual_quote_cancel_order"]);
   await send(privateOrder); assert.equal(messages.length, 1); assert.equal(edits, 1);
 });
-test("無指定陪陪的原房訂單付款後照常顯示管理面板，不會對外派單或捏造報單", async () => {
+test("無指定陪陪的原房訂單保留客服面板，尚未接單不捏造報單", async () => {
   const messages = [];
   const send = fn("sendStaffOrderControlPanel", { isManualDispatchOrder: () => true });
   await send({ id: "vip", isTextBased: () => true, send: async value => messages.push(value) }, { ...privateOrder, preferred_player: null, paid: true });

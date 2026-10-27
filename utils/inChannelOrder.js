@@ -19,10 +19,18 @@ function assertInChannelSelection(order, channelId = order?.channel_id) {
   }
 }
 
-function staffOrderChannelId(order, fallback) {
+function requiresInChannelAcceptance(order) {
+  return isInChannelOrder(order) && !String(order.preferred_player || "").trim();
+}
+
+function staffOrderChannelId(order, fallback, acceptanceChannel = fallback) {
   if (!isInChannelOrder(order)) return fallback;
   if (!order.channel_id) throw new Error("原頻道資料遺失，已停止送出訂單。");
+  if (requiresInChannelAcceptance(order)) {
+    if (!acceptanceChannel) throw new Error("未設定接單專區，已停止送出訂單。");
+    return acceptanceChannel;
+  }
   return order.channel_id;
 }
 
-module.exports = { MARKER, isInChannelOrder, selectedPlayerIds, assertInChannelSelection, staffOrderChannelId };
+module.exports = { MARKER, isInChannelOrder, selectedPlayerIds, assertInChannelSelection, staffOrderChannelId, requiresInChannelAcceptance };

@@ -56,7 +56,7 @@ const {
 } = require("../utils/paymentMethodEmojis");
 const { getOrCreateServiceOrder, transitionUnpaidOrders, createOperationGuard, isUnpaidWaitingOrder } = require("../utils/serviceOrderSafety");
 const { createPaidOrderDispatcher } = require("../utils/orderDispatchRecovery");
-const { isInChannelOrder, assertInChannelSelection, staffOrderChannelId } = require("../utils/inChannelOrder");
+const { isInChannelOrder, assertInChannelSelection, staffOrderChannelId, requiresInChannelAcceptance } = require("../utils/inChannelOrder");
 const {
   getGeneralOrderAutoQuote,
   getValorantMappedCompanionRank,
@@ -5103,11 +5103,11 @@ async function findMessageByButton(channel, customId) {
 
 async function findExistingStaffOrderMessage(order) {
   const channel = await client.channels
-    .fetch(staffOrderChannelId(order, isManualDispatchOrder(order) ? getManualDispatchChannelId(order) : process.env.PLAYER_ORDER_CHANNEL))
+    .fetch(staffOrderChannelId(order, isManualDispatchOrder(order) ? getManualDispatchChannelId(order) : process.env.PLAYER_ORDER_CHANNEL, process.env.PLAYER_ORDER_CHANNEL))
     .catch(() => null);
   return findMessageByButton(
     channel,
-    isManualDispatchOrder(order)
+    isManualDispatchOrder(order) && !requiresInChannelAcceptance(order)
       ? `manual_preselected_order_${order.id}`
       : `accept_play_order_${order.id}`,
   );
@@ -5436,7 +5436,7 @@ async function sendOrderToStaffChannel(order) {
   const channel = await client.channels.fetch(
     staffOrderChannelId(order, isManualDispatchOrder(order)
       ? getManualDispatchChannelId(order)
-      : process.env.PLAYER_ORDER_CHANNEL),
+      : process.env.PLAYER_ORDER_CHANNEL, process.env.PLAYER_ORDER_CHANNEL),
   );
 
   const preferredText = buildPreferredPlayerText(order.preferred_player);
@@ -5494,7 +5494,7 @@ async function sendOrderToStaffChannel(order) {
     .setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
-    isManualDispatchOrder(order)
+    isManualDispatchOrder(order) && !requiresInChannelAcceptance(order)
       ? new ButtonBuilder()
           .setCustomId(`manual_preselected_order_${order.id}`)
           .setLabel(isInChannelOrder(order) ? "原頻道訂單已付款" : "老闆已選定陪陪")
@@ -5512,7 +5512,9 @@ async function sendOrderToStaffChannel(order) {
   return channel.send({
     content:
       isInChannelOrder(order)
-        ? `✅ <@${order.customer_id}> 原頻道加單已完成付款，請在本頻道繼續處理。`
+        ? requiresInChannelAcceptance(order)
+          ? `${playerRoleMention} 📢 原頻道加單已付款，請陪陪按「接單」；接單後到原訂單頻道服務。`
+          : `✅ <@${order.customer_id}> 原頻道加單已完成付款，請在本頻道繼續處理。`
         : isManualDispatchOrder(order)
         ? `${preferredText} ✅ 老闆已選定陪陪並完成付款，不再開放其他人接單。`
         : order.dispatch_type === "reserve"
@@ -9368,7 +9370,7 @@ async function sendCustomerFinalConfirm(channel, order) {
       const result = await deliverPaidOrder(dispatchOrder, channel?.isTextBased?.() ? channel : null);
       await channel?.send?.({
         content: isInChannelOrder(order)
-          ? `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單會在本頻道處理，原房會持續保留。`
+          ? `<@${order.customer_id}> ✅ 報價已確認、付款已完成，${requiresInChannelAcceptance(order) ? "接單通知已送往接單專區；陪陪接單後會加入原房服務。" : "訂單會在本頻道處理。"}原房會持續保留。`
           : `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單${result.alreadyDispatched ? "已派單" : "已自動送往指定派單區"}。`,
       });
     } catch (error) {
@@ -12165,6 +12167,9 @@ async function acceptPlayOrder(interaction) {
         content: "❌ 這張訂單已經被接走了，或目前不能接單",
       });
     }
+    if (!order.paid || String(order.guild_id) !== String(process.env.GUILD_ID)) {
+      return interaction.editReply({ content: "❌ 訂單尚未付款或不屬於本店，無法接單。" });
+    }
 
     const orderServiceText = `${order.game || ""}｜${order.order_item || ""}｜${
       order.service || ""
@@ -12266,13 +12271,17 @@ async function acceptPlayOrder(interaction) {
       updatePayload.accepted_at = new Date().toISOString();
     }
 
-    const { data: updated, error: updateError } = await supabase
+    let acceptQuery = supabase
       .from("play_orders")
       .update(updatePayload)
       .eq("id", orderId)
-      .in("status", ["pending", "accepted"])
-      .select()
-      .maybeSingle();
+      .eq("guild_id", process.env.GUILD_ID)
+      .eq("paid", true)
+      .in("status", ["pending", "accepted"]);
+    acceptQuery = order.assigned_player == null
+      ? acceptQuery.is("assigned_player", null)
+      : acceptQuery.eq("assigned_player", order.assigned_player);
+    const { data: updated, error: updateError } = await acceptQuery.select().maybeSingle();
 
     if (updateError) {
       console.log("[接單更新錯誤]", updateError);
