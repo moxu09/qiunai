@@ -14,7 +14,7 @@ function assertInChannelSelection(order, channelId = order?.channel_id) {
     throw new Error("請在原本的下單頻道繼續操作。");
   }
   const ids = selectedPlayerIds(order);
-  if (!ids.length || ids.length !== Number(order.player_count || 1)) {
+  if (ids.length && ids.length !== Number(order.player_count || 1)) {
     throw new Error("請先由客服在原頻道選齊陪陪，再確認報價與付款。");
   }
 }

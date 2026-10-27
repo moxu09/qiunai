@@ -29,10 +29,11 @@ function db(order) {
   };
   return { from: () => query, calls, get inserted() { return inserted; } };
 }
-test("原房付款要求同頻道且選齊陪陪，遺失目的地不可退回公開頻道", () => {
+test("原房付款要求同頻道，不強制選人，遺失目的地不可退回公開頻道", () => {
   assert.doesNotThrow(() => policy.assertInChannelSelection(privateOrder, "vip"));
   assert.throws(() => policy.assertInChannelSelection(privateOrder, "public"), /原本/);
-  for (const preferred_player of [null, "a", "a,a"]) assert.throws(() => policy.assertInChannelSelection({ ...privateOrder, preferred_player }), /選齊/);
+  assert.doesNotThrow(() => policy.assertInChannelSelection({ ...privateOrder, preferred_player: null }));
+  for (const preferred_player of ["a", "a,a"]) assert.throws(() => policy.assertInChannelSelection({ ...privateOrder, preferred_player }), /選齊/);
   assert.equal(policy.staffOrderChannelId(privateOrder, "public"), "vip");
   assert.throws(() => policy.staffOrderChannelId({ ...privateOrder, channel_id: null }, "public"), /停止/);
   assert.equal(policy.staffOrderChannelId({ note: "[MANUAL_DISPATCH]" }, "public"), "public");
@@ -55,16 +56,16 @@ test("自動報價建立原房訂單並保留金額，不呼叫外部派單", as
     isModalSubmit: () => true, editReply: async value => { panel = value; } };
   await fn("createWaitingQuoteOrder", { supabase: database, getNextPlayOrderNumber: async () => "QN1",
     getGeneralOrderAutoQuote: () => ({ ok: true, quote: { total: 1200 } }), pendingNewOrders: { delete: async () => {} },
-    sendManualQuoteDispatchPrompt: async (channel, order) => { prompt = order; assert.equal(channel.id, "vip"); },
+    sendStaffQuotePanel: async order => { prompt = order; }, sendOrderQuotePriceConfirm: async channel => assert.equal(channel.id, "vip"),
   })(interaction, "draft", pending);
   assert.equal(database.inserted.price, 1200); assert.equal(database.inserted.channel_id, "vip");
   assert(policy.isInChannelOrder(prompt)); assert.match(panel.embeds[0].data.description, /本頻道/);
 });
-test("原房報價僅顯示本地客服面板，未選人不進付款", async () => {
+test("客服填完金額只送顧客確認，不再重複客服面板，無指定陪陪也可付款", async () => {
   let panels = 0; let confirms = 0;
   const prompt = fn("sendManualQuoteDispatchPrompt", { sendStaffQuotePanel: async () => panels++, sendOrderQuotePriceConfirm: async () => confirms++ });
-  await prompt({}, { ...privateOrder, preferred_player: null }); assert.equal(panels, 1); assert.equal(confirms, 0);
-  await prompt({}, privateOrder); assert.equal(confirms, 1);
+  await prompt({}, { ...privateOrder, preferred_player: null }); assert.equal(panels, 0); assert.equal(confirms, 1);
+  await prompt({}, privateOrder); assert.equal(confirms, 2);
   const forbidden = fn("sendSelfServiceDispatch", { client: { channels: { fetch() { throw Error("不應讀公開頻道"); } } } });
   await assert.rejects(forbidden(privateOrder), /不可送到外部/);
 });
@@ -89,12 +90,31 @@ test("客服選齊後本地確認報價；付款中、錯誤頻道與無效人�
     assert.equal(confirms, variant === "ok" ? 1 : 0);
   }
 });
-test("未選齊不會確認報價或顯示付款選項", async () => {
-  const database = db({ ...privateOrder, preferred_player: null }); let reply;
-  await fn("handleOrderQuotePriceConfirm", { supabase: database, deferReplyOnce: async () => {} })({
-    customId: "quote_confirm_price_order_600", user: { id: "customer" }, channelId: "vip", editReply: async value => { reply = value; },
+test("未指定陪陪也能確認報價並進入優惠券及付款流程", async () => {
+  const database = db({ ...privateOrder, preferred_player: null }); let reply; const messages = [];
+  await fn("handleOrderQuotePriceConfirm", { supabase: database, deferReplyOnce: async () => {}, isVipPointsActive: () => false, pointsPromptText: async () => "" })({
+    customId: "quote_confirm_price_order_600", user: { id: "customer" }, channelId: "vip", channel: { send: async value => messages.push(value) }, editReply: async value => { reply = value; },
   });
-  assert.match(reply.content, /選齊/); assert.equal(database.calls.filter(c => c[0] === "update").length, 0);
+  assert.match(reply.content, /已確認報價/); assert.equal(database.calls.filter(c => c[0] === "update").length, 1);
+  assert.equal(messages[0].components[0].components[0].data.custom_id, "quote_use_coupon_order");
+});
+test("原房客服面板移除選陪陪，重送時更新原訊息，首次送出有去重nonce", async () => {
+  const messages = []; let existing = null; let edits = 0;
+  const channel = { send: async value => { messages.push(value); existing = { edit: async v => { edits++; messages[0] = v; } }; } };
+  const send = fn("sendStaffQuotePanel", { client: { channels: { fetch: async () => channel } }, require,
+    isManualDispatchOrder: () => true, isManualQuoteSelfServiceOrder: () => false, getPublicOrderNote: () => "測試",
+    findMessageByButton: async () => existing,
+  });
+  await send(privateOrder); assert.equal(messages.length, 1); assert.equal(messages[0].enforceNonce, true);
+  const buttons = messages[0].components[0].components.map(b => b.data.custom_id);
+  assert.deepEqual(buttons, ["staff_quote_price_order", "staff_edit_order_order", "manual_quote_cancel_order"]);
+  await send(privateOrder); assert.equal(messages.length, 1); assert.equal(edits, 1);
+});
+test("無指定陪陪的原房訂單付款後照常顯示管理面板，不會對外派單或捏造報單", async () => {
+  const messages = [];
+  const send = fn("sendStaffOrderControlPanel", { isManualDispatchOrder: () => true });
+  await send({ id: "vip", isTextBased: () => true, send: async value => messages.push(value) }, { ...privateOrder, preferred_player: null, paid: true });
+  assert.equal(messages.length, 1); assert.equal(messages[0].components[1].components[0].data.custom_id, "complete_order_order");
 });
 test("舊正式派單按鈕無法把原房單送出去", async () => {
   let reply;

@@ -5497,7 +5497,7 @@ async function sendOrderToStaffChannel(order) {
     isManualDispatchOrder(order)
       ? new ButtonBuilder()
           .setCustomId(`manual_preselected_order_${order.id}`)
-          .setLabel("老闆已選定陪陪")
+          .setLabel(isInChannelOrder(order) ? "原頻道訂單已付款" : "老闆已選定陪陪")
           .setStyle(ButtonStyle.Success)
           .setDisabled(true)
       : new ButtonBuilder()
@@ -5511,7 +5511,9 @@ async function sendOrderToStaffChannel(order) {
     : "";
   return channel.send({
     content:
-      isManualDispatchOrder(order)
+      isInChannelOrder(order)
+        ? `✅ <@${order.customer_id}> 原頻道加單已完成付款，請在本頻道繼續處理。`
+        : isManualDispatchOrder(order)
         ? `${preferredText} ✅ 老闆已選定陪陪並完成付款，不再開放其他人接單。`
         : order.dispatch_type === "reserve"
         ? `${playerRoleMention} 🕒 預約派單：<@${order.reserved_player}>｜時間：${order.reserved_time}`
@@ -5527,7 +5529,7 @@ async function sendStaffOrderControlPanel(channel, order) {
     throw new Error(`訂單 ${order.order_no || order.id} 的客戶頻道不存在，無法發送客服面板`);
   }
   assertInChannelSelection(order, channel.id);
-  if (isManualDispatchOrder(order) && order.paid) {
+  if (isManualDispatchOrder(order) && order.paid && (!isInChannelOrder(order) || order.preferred_player)) {
     const selectedIds = String(order.preferred_player || "")
       .split(",")
       .map((id) => id.trim())
@@ -7906,8 +7908,7 @@ function buildManualQuoteDispatchComponents(orderId) {
 
 async function sendManualQuoteDispatchPrompt(channel, order, { quotedBy = null } = {}) {
   if (isInChannelOrder(order)) {
-    await sendStaffQuotePanel(order);
-    if (order.preferred_player && order.quote_status === "quoted") await sendOrderQuotePriceConfirm(channel, order);
+    if (order.quote_status === "quoted") await sendOrderQuotePriceConfirm(channel, order);
     return;
   }
   const price = Number(order.final_price || order.price || 0);
@@ -8163,7 +8164,7 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
       }
     )
     .setDescription(autoQuote.ok
-      ? `系統已依現行價目表自動報價 NT$${autoPrice.toLocaleString("zh-TW")}。\n${isInChannelOrder(order) ? "請客服在本頻道選擇陪陪，再由闆闆確認報價並付款。" : "請確認報價後正式派單；選定陪陪後才會進入付款。"}`
+      ? `系統已依現行價目表自動報價 NT$${autoPrice.toLocaleString("zh-TW")}。\n${isInChannelOrder(order) ? "請闆闆在本頻道確認報價並付款。" : "請確認報價後正式派單；選定陪陪後才會進入付款。"}`
       : `系統無法自動計算：${autoQuote.reason}\n已轉交客服報價；客服填寫金額後，系統會讓你選擇優惠券與付款方式。`)
     .setTimestamp();
 
@@ -8214,7 +8215,10 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
       });
     }
   }
-  if (autoQuote.ok) {
+  if (isInChannelOrder(order)) {
+    await sendStaffQuotePanel(order);
+    if (autoQuote.ok) await sendOrderQuotePriceConfirm(interaction.channel, order);
+  } else if (autoQuote.ok) {
     await sendManualQuoteDispatchPrompt(interaction.channel, order);
   } else {
     await sendStaffQuotePanel(order);
@@ -8286,7 +8290,7 @@ async function sendStaffQuotePanel(order, options = {}) {
       .setEmoji("💰")
       .setStyle(ButtonStyle.Primary),
   ];
-  if (isInChannelOrder(order) || (!isManualDispatchOrder(order) && !isManualQuoteSelfServiceOrder(order))) {
+  if (!isInChannelOrder(order) && !isManualDispatchOrder(order) && !isManualQuoteSelfServiceOrder(order)) {
     controls.push(
       new ButtonBuilder()
         .setCustomId(`dispatch_assign_players_${order.id}`)
@@ -8294,7 +8298,7 @@ async function sendStaffQuotePanel(order, options = {}) {
         .setEmoji("🌟")
         .setStyle(ButtonStyle.Secondary),
     );
-  } else {
+  } else if (!isInChannelOrder(order)) {
     controls.push(
       new ButtonBuilder()
         .setCustomId(`staff_ai_quote_${order.id}`)
@@ -8315,12 +8319,12 @@ async function sendStaffQuotePanel(order, options = {}) {
       .setLabel("取消這筆加單").setStyle(ButtonStyle.Danger),
   );
   const row = new ActionRowBuilder().addComponents(...controls);
-  await channel.send({
+  const payload = {
     ...(options.nonce?{nonce:options.nonce,enforceNonce:true}:{}),
     content:
       `<@&${process.env.STAFF_ROLE}> 有新的需求等待報價。\n` +
       (isInChannelOrder(order)
-        ? "請客服在本頻道選齊陪陪並確認金額，再由闆闆確認報價與付款；此房間會持續保留。"
+        ? "請客服確認金額，再由闆闆在本頻道確認報價與付款；此房間會持續保留。"
         : isManualDispatchOrder(order)
         ? `請客服只需確認金額；老闆確認報價後，系統會自動派單選人。`
         : `請客服確認陪陪與金額後，再讓闆闆選擇付款方式。`),
@@ -8378,7 +8382,14 @@ async function sendStaffQuotePanel(order, options = {}) {
         .setTimestamp(),
     ],
     components: [row],
-  });
+  };
+  if (isInChannelOrder(order)) {
+    const existing = await findMessageByButton(channel, `staff_quote_price_${order.id}`);
+    if (existing) return existing.edit(payload);
+    payload.nonce = require("node:crypto").createHash("sha256").update(`in-channel-quote:${order.id}`).digest("hex").slice(0, 24);
+    payload.enforceNonce = true;
+  }
+  return channel.send(payload);
 }
 async function handleStaffAiQuote(interaction) {
   await deferReplyOnce(interaction);
@@ -8496,7 +8507,7 @@ async function submitStaffQuotePrice(interaction) {
       quotedBy: interaction.user.id,
     });
     return interaction.editReply({
-      content: `✅ 已填寫報價 NT$${price.toLocaleString("zh-TW")}，等待老闆確認正式派單。`,
+      content: `✅ 已填寫報價 NT$${price.toLocaleString("zh-TW")}，${isInChannelOrder(order) ? "等待闆闆在本頻道確認報價與付款。" : "等待老闆確認正式派單。"}`,
     });
   }
 
@@ -8513,7 +8524,7 @@ async function sendOrderQuotePriceConfirm(channel, order) {
     content: `<@${order.customer_id}> 請確認這張訂單的報價金額。`,
     embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE)
       .setTitle("💰 請顧客確認報價")
-      .setDescription(`訂單編號：${order.order_no || order.id}\n金額：NT$${price.toLocaleString("zh-TW")}\n\n${isInChannelOrder(order) ? "確認後選擇優惠券與付款方式；付款完成後，選定的陪陪會在本頻道服務並收到報單。" : "確認後選擇優惠券與付款方式；付款完成後才會自動派單。"}`)
+      .setDescription(`訂單編號：${order.order_no || order.id}\n金額：NT$${price.toLocaleString("zh-TW")}\n\n${isInChannelOrder(order) ? "確認後選擇優惠券與付款方式；訂單會留在本頻道處理。" : "確認後選擇優惠券與付款方式；付款完成後才會自動派單。"}`)
       .setTimestamp()],
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`quote_confirm_price_${order.id}_${price}`).setLabel("確認報價金額").setStyle(ButtonStyle.Success),
@@ -9357,7 +9368,7 @@ async function sendCustomerFinalConfirm(channel, order) {
       const result = await deliverPaidOrder(dispatchOrder, channel?.isTextBased?.() ? channel : null);
       await channel?.send?.({
         content: isInChannelOrder(order)
-          ? `<@${order.customer_id}> ✅ 報價已確認、付款已完成，選定的陪陪會在本頻道服務，原房會持續保留。`
+          ? `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單會在本頻道處理，原房會持續保留。`
           : `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單${result.alreadyDispatched ? "已派單" : "已自動送往指定派單區"}。`,
       });
     } catch (error) {
