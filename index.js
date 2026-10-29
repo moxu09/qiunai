@@ -3442,6 +3442,7 @@ async function buildQiunaiWorkReportSalaryPayload({ row, meta, endedAt }) {
 }
 async function payTipWithWalletAtomic({
   operationKey,
+  notificationGroupId,
   guildId,
   tipperId,
   staffIds,
@@ -3488,6 +3489,13 @@ async function payTipWithWalletAtomic({
     p_staff: staff,
   });
   if (error) throw error;
+  const ids = (data?.orders || []).map(order => order.id).filter(Boolean);
+  if (ids.length) {
+    const groupId = notificationGroupId || `tip:wallet:${operationKey}`;
+    const grouped = await supabase.from("play_orders").update({ order_group_id: groupId })
+      .eq("guild_id", guildId).eq("customer_id", tipperId).eq("order_type", "打賞").in("id", ids);
+    if (grouped.error) throw grouped.error;
+  }
   return data;
 }
 async function payTipAllocationsWithWalletAtomic({
@@ -3517,6 +3525,7 @@ async function payTipAllocationsWithWalletAtomic({
   for (const group of groups.values()) {
     const payment = await payTipWithWalletAtomic({
       operationKey: `${operationKey}:${index}`,
+      notificationGroupId: `tip:wallet:${operationKey}`,
       guildId,
       tipperId,
       staffIds: group.staffIds,

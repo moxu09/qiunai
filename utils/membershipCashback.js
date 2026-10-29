@@ -1,4 +1,5 @@
 const { createHash } = require('node:crypto');
+const { createGroupedCashbackNotifier } = require('./groupedCashbackNotifier');
 const { createReceiptStore } = require('./receiptRecovery');
 const { formatTaipeiTime } = require('./taipeiTime');
 const { MEMBERSHIP_LEVELS, calculateMembershipCashback } = require('../config/qiunaiMembership20261016');
@@ -49,18 +50,25 @@ function completionMessage(order, award) {
 
 function createCashbackNotifier(db, client, logger = console, store = createReceiptStore(db, 'qiunai:cashback-notifications')) {
   let busy = false;
-  async function notify(orderId) {
+  const notifyGroup = createGroupedCashbackNotifier(db, client, logger);
+  async function notify(orderId, seenGroups = null) {
     // Always re-read settlement and refund state; an estimate or ATM account is not an award.
     const result = await db.from('qiunai_membership_cashbacks').select('*').eq('order_id', orderId).maybeSingle();
     if (result.error) throw result.error;
     const award = result.data;
     if (!award || award.reversed_at) return false;
-    const found = await db.from('play_orders').select('id,order_no,guild_id,customer_id,paid,status,is_deleted')
+    const found = await db.from('play_orders').select('id,order_no,guild_id,customer_id,paid,status,is_deleted,order_type,order_group_id')
       .eq('id',orderId).maybeSingle();
     if (found.error) throw found.error;
     const order = found.data;
     if (!order || order.guild_id !== GUILD_ID || order.customer_id !== award.user_id ||
         !order.paid || order.status !== 'completed' || order.is_deleted) return false;
+    if (order.order_type === '打賞' && order.order_group_id) {
+      const groupKey = JSON.stringify([order.guild_id, order.customer_id, order.order_group_id]);
+      if (seenGroups?.has(groupKey)) return false;
+      seenGroups?.add(groupKey);
+      return notifyGroup(order);
+    }
     const key = `cashback-completed:${order.id}`;
     const claim = await store.claim(key, {orderId:order.id});
     if (!claim) return false;
@@ -90,12 +98,13 @@ function createCashbackNotifier(db, client, logger = console, store = createRece
     if (busy) return;
     busy = true;
     try {
+      const seenGroups = new Set();
       // Scan the durable award ledger, not a timestamp watermark: late completion is not lost.
       for (let offset = 0;; offset += 100) {
         const rows = await db.from('qiunai_membership_cashbacks').select('order_id')
           .is('reversed_at',null).order('order_id').range(offset,offset+99);
         if (rows.error) throw rows.error;
-        for (const row of rows.data || []) await notify(row.order_id);
+        for (const row of rows.data || []) await notify(row.order_id, seenGroups);
         if ((rows.data || []).length < 100) break;
       }
     } catch (error) { logger.error('[消費回饋通知排程]', error.message); }
