@@ -8649,6 +8649,13 @@ function getCouponDiscount(itemName = "") {
     };
   }
 
+  if (name.includes("85折")) {
+    return {
+      rate: 0.85,
+      label: "85折券",
+    };
+  }
+
   if (name.includes("8折")) {
     return {
       rate: 0.8,
@@ -8684,6 +8691,10 @@ function getCouponMaxDiscountPrice(itemName = "") {
 
   if (name.includes("9折")) {
     return 800;
+  }
+
+  if (name.includes("85折")) {
+    return 1500;
   }
 
   if (name.includes("8折")) {

@@ -152,6 +152,7 @@ const BANK_TRANSFER_QR_CODE_PATH = path.join(
   "bank-transfer-line-bank.png",
 );
 const complaintConfig = require("./config/complaint");
+const { buildChatDropPayload, chatDropClaimText } = require("./utils/chatDropTheme");
 const {
   createEmploymentSystem,
 } = require("./events/employmentSystem");
@@ -7705,6 +7706,10 @@ const commands = sortCommandDefinitions([
             value: "9折券",
           },
           {
+            name: "85折券（限原價1500元內）",
+            value: "85折折價券",
+          },
+          {
             name: "8折折價券",
             value: "8折折價券",
           },
@@ -10491,7 +10496,10 @@ async function handleSlashCommand(interaction) {
     const target = interaction.options.getUser("玩家");
     const couponName = interaction.options.getString("優惠券");
     const count = interaction.options.getInteger("數量");
-    const note = interaction.options.getString("備註") || "客服發送優惠券";
+    const rawNote = interaction.options.getString("備註") || "客服發送優惠券";
+    const note = String(couponName || "").includes("85折")
+      ? `${rawNote}\n限訂單原價 1,500 元（含）以內使用，折後為原價的 85%。`
+      : rawNote;
     if (!target) {
       return interaction.editReply({
         content: "❌ 找不到玩家",
@@ -13016,7 +13024,7 @@ async function handleButtonInteraction(interaction) {
         .catch(() => {});
 
       return await interaction.editReply({
-        content: `☔ 成功領取 ${reward} 星雨幣`,
+        content: chatDropClaimText(interaction.message, reward),
       });
     }
 
@@ -14995,6 +15003,22 @@ async function handleStringSelectInteraction(interaction) {
 
           finalPrice = Math.floor(order.price * 0.9);
           discountAmount = order.price - finalPrice;
+        } else if (coupon.item_name.includes("85折")) {
+          const originalPrice = Number(
+            order.original_price || order.price || order.final_price || 0,
+          );
+          if (!Number.isFinite(originalPrice) || originalPrice <= 0) {
+            return await interaction.editReply({
+              content: "❌ 訂單金額錯誤，請聯繫客服重新報價",
+            });
+          }
+          if (originalPrice > 1500) {
+            return await interaction.editReply({
+              content: "❌ 這張85折券只能用於原價 1,500 元（含）以內的訂單",
+            });
+          }
+          finalPrice = Math.floor(originalPrice * 0.85);
+          discountAmount = originalPrice - finalPrice;
         } else if (
           coupon.item_name.includes("8折券∞") ||
           coupon.item_name.includes("8折券 ∞")
@@ -15350,22 +15374,10 @@ client.on("messageCreate", async (message) => {
   if (dropCooldown.has(channelId)) return;
   // 訊息少於 5 字不掉落
   if (message.content.replace(/\s/g, "").length < 5) return;
-  // 0.5% 掉落機率
+  // 原 0.5% 加上 2 個百分點：2.5% 掉落機率
   if (!shouldCreateChatDrop()) return;
   const reward = Math.floor(Math.random() * 20) + 1;
-  const button = new ButtonBuilder()
-    .setCustomId(`claim_${reward}`)
-    .setLabel("☔ 領取星雨幣")
-    .setStyle(ButtonStyle.Success);
-  const row = new ActionRowBuilder().addComponents(button);
-  const embed = new EmbedBuilder()
-    .setColor("#57F287")
-    .setTitle("☔ 星雨幣掉落")
-    .setDescription(`有人掉了 ${reward} 星雨幣！\n\n快點擊下方按鈕領取 ✨`);
-  await message.channel.send({
-    embeds: [embed],
-    components: [row],
-  });
+  await message.channel.send(buildChatDropPayload(reward));
   // ===== 開始冷卻 =====
   dropCooldown.set(channelId, true);
 
