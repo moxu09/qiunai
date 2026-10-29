@@ -2002,12 +2002,12 @@ test("exclusive membership cards follow the member's one-time variant", () => {
   assert.equal(resolveMembershipCardImage({}, tier), null);
 });
 
-test("chat drops use an exact 2.5% threshold and validate rewards", () => {
+test("chat drops use an exact 1% threshold and validate rewards", () => {
   assert.equal(shouldCreateChatDrop(0), true);
   assert.equal(shouldCreateChatDrop(0.004999), true);
   assert.equal(shouldCreateChatDrop(0.005), true);
-  assert.equal(shouldCreateChatDrop(0.024999), true);
-  assert.equal(shouldCreateChatDrop(0.025), false);
+  assert.equal(shouldCreateChatDrop(0.009999), true);
+  assert.equal(shouldCreateChatDrop(0.01), false);
   assert.equal(shouldCreateChatDrop(1), false);
   assert.equal(parseChatDropReward("claim_1"), 1);
   assert.equal(parseChatDropReward("claim_20"), 20);

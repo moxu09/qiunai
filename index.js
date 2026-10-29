@@ -15374,7 +15374,7 @@ client.on("messageCreate", async (message) => {
   if (dropCooldown.has(channelId)) return;
   // 訊息少於 5 字不掉落
   if (message.content.replace(/\s/g, "").length < 5) return;
-  // 原 0.5% 加上 2 個百分點：2.5% 掉落機率
+  // 聊天掉落機率：1%
   if (!shouldCreateChatDrop()) return;
   const reward = Math.floor(Math.random() * 20) + 1;
   await message.channel.send(buildChatDropPayload(reward));

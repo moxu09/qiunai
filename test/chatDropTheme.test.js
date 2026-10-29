@@ -3,10 +3,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const { buildChatDropPayload, chatDropClaimText } = require("../utils/chatDropTheme");
 const { shouldCreateChatDrop, CHAT_DROP_PROBABILITY } = require("../utils/randomEvents");
-test("聊天掉落從0.5%增加2個百分點，精確採用2.5%門檻", () => {
-  assert.equal(CHAT_DROP_PROBABILITY, 0.025);
-  for (const value of [0, 0.005, 0.024999]) assert.equal(shouldCreateChatDrop(value), true);
-  for (const value of [0.025, 1, -1, NaN, Infinity]) assert.equal(shouldCreateChatDrop(value), false);
+test("聊天掉落精確採用1%門檻", () => {
+  assert.equal(CHAT_DROP_PROBABILITY, 0.01);
+  for (const value of [0, 0.005, 0.009999]) assert.equal(shouldCreateChatDrop(value), true);
+  for (const value of [0.01, 0.025, 1, -1, NaN, Infinity]) assert.equal(shouldCreateChatDrop(value), false);
 });
 test("萬聖節卡片保留原領取協定，1至20 ASD皆可領取且圖片真實存在", () => {
   for (const reward of [1, 18, 20]) {
