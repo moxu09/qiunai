@@ -4,7 +4,7 @@ const { Routes } = require("discord.js");
 const { HALLOWEEN_END, isHalloweenActive } = require("./halloweenSeason");
 const ORGANIZATION = "qiunai:seasonal-theme", KEY = "halloween-2026";
 const NICKNAME = "🎃 小奈｜萬聖節";
-function createHalloweenLifecycle({ client, db, guildIds, refreshPanels, now = Date.now, logger = console }) {
+function createHalloweenLifecycle({ client, db, guildIds, refreshPanels, now = Date.now, logger = console, fetchAvatar = fetch }) {
   let busy = false, timer, deadlineTimer;
   const table = () => db.from("bot_service_order_flows");
   const scoped = query => query.eq("organization_code", ORGANIZATION).eq("flow_id", KEY);
@@ -24,10 +24,10 @@ function createHalloweenLifecycle({ client, db, guildIds, refreshPanels, now = D
       let state = await load();
       if (isHalloweenActive(now())) {
         if (!state) {
-          const response = await fetch(client.user.displayAvatarURL({ extension: "png", size: 512 }), { signal: AbortSignal.timeout(15000) });
+          const response = await fetchAvatar(client.user.displayAvatarURL({ extension: "png", size: 512 }), { signal: AbortSignal.timeout(15000) });
           if (!response.ok) throw new Error("無法保存小奈原始頭像");
           const nicknames = {};
-          for (const guild of guildIds) nicknames[guild] = (await client.rest.get(Routes.guildMember(guild, "@me"))).nick ?? null;
+          for (const guild of guildIds) nicknames[guild] = (await client.rest.get(Routes.guildMember(guild, client.user.id))).nick ?? null;
           state = { botId: client.user.id, avatar: `data:image/png;base64,${Buffer.from(await response.arrayBuffer()).toString("base64")}`, nicknames, applied: false, restored: false };
           const { error } = await table().insert({ organization_code: ORGANIZATION, flow_id: KEY, payload: state, expires_at: "2099-01-01T00:00:00Z" });
           if (error?.code === "23505") state = await load();

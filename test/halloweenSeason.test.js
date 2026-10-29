@@ -81,3 +81,19 @@ test("暱稱變更暫時失敗時不會重複更換頭像，保留各步驟進�
   await service.tick(); assert.equal(f.state.applied, true);
   assert.equal(f.calls.filter(c => c[0] === "avatar").length, 1);
 });
+test("首次啟用先用實際bot ID讀取暱稱並保存原始資料，才修改頭像", async () => {
+  let state = null;
+  const db = { from: () => ({ select() { return this; }, eq() { return this; },
+    async maybeSingle() { return { data: state ? { payload: structuredClone(state) } : null }; },
+    async insert(row) { state = structuredClone(row.payload); return {}; },
+    update(row) { state = structuredClone(row.payload); return this; }, then(resolve) { resolve({}); },
+  }) };
+  const gets = [];
+  const client = { user: { id: "1502587084563812453", displayAvatarURL: () => "https://example.com/avatar.png",
+    setAvatar: async () => { assert(state?.avatar); assert.deepEqual(state.nicknames, { shop: null, staff: "原始小奈" }); },
+  }, rest: { get: async route => { gets.push(route); assert(route.endsWith("/members/1502587084563812453")); return { nick: route.includes("/shop/") ? null : "原始小奈" }; }, patch: async () => {} } };
+  const lifecycle = createHalloweenLifecycle({ client, db, guildIds: ["shop", "staff"], refreshPanels: async () => {}, now: () => ACTIVE,
+    fetchAvatar: async () => ({ ok: true, arrayBuffer: async () => new Uint8Array([1,2,3]).buffer }),
+  });
+  await lifecycle.tick(); assert.equal(state.applied, true); assert.equal(gets.length, 2);
+});
