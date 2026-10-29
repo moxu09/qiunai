@@ -6,7 +6,7 @@ const root = path.join(__dirname, "..");
 const font = { fontFiles: [path.join(root, "assets/fonts/NotoSansCJKtc-Regular.otf"), path.join(root, "assets/fonts/NotoSans-Regular.ttf"), path.join(root, "assets/fonts/NotoEmoji.ttf")], loadSystemFonts: false };
 const banner = new Resvg(fs.readFileSync(path.join(root, "assets/halloween-chat-drop.svg")), { font }).render().asPng();
 fs.writeFileSync(path.join(root, "assets/halloween-chat-drop.png"), banner);
-const payload = buildChatDropPayload(18), embed = payload.embeds[0].toJSON();
+const payload = buildChatDropPayload(18, { now: Date.parse("2026-10-30T12:00:00+08:00") }), embed = payload.embeds[0].toJSON();
 const esc = text => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const lines = embed.description.replace(/\*\*/g, "").split("\n");
 const preview = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="650"><rect width="800" height="650" rx="20" fill="#313338"/>

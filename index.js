@@ -153,6 +153,8 @@ const BANK_TRANSFER_QR_CODE_PATH = path.join(
 );
 const complaintConfig = require("./config/complaint");
 const { buildChatDropPayload, chatDropClaimText } = require("./utils/chatDropTheme");
+const { installSeasonalMessages } = require("./utils/halloweenSeason");
+const { createHalloweenLifecycle } = require("./utils/halloweenLifecycle");
 const {
   createEmploymentSystem,
 } = require("./events/employmentSystem");
@@ -252,6 +254,7 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
+installSeasonalMessages(client.rest);
 const customerServiceTickets = createCustomerServiceTickets({
   client,
   isStaff: isAdminOrStaff,
@@ -8289,6 +8292,28 @@ async function reconcileExistingSignedEmploymentMembers() {
 }
 
 client.once(Events.ClientReady, async () => {
+  const halloween = createHalloweenLifecycle({ client, db: supabase,
+    guildIds: [...new Set([process.env.GUILD_ID, QIUNAI_STAFF_GUILD_ID].filter(Boolean))],
+    refreshPanels: async () => {
+      const tasks = [
+        () => dispatchSystem.sendGameOrderPanels(), () => dispatchSystem.sendSelfServiceOrderPanel(),
+        () => dispatchSystem.sendJkopayTopupPanel(), () => dispatchSystem.sendTipOrderPanel(),
+        () => dispatchSystem.sendWorkReportPanel(), () => refreshShop(client), () => sendTopupPanel(client),
+        () => ichiban.publishPanel(), () => sendJkopayRefundPanel(), () => sendAtmPanel(client),
+        () => sendCheckinPanel(client), () => sendGachaPanel(client), () => sendPrivateRoomPanel(client),
+        () => employmentSystem.sendPanel(), () => customerServiceTickets.ensurePanel(),
+        () => qiunaiReferrals.ensurePanel(), () => complaintSystem.sendPanel(),
+        async () => dispatchSystem.sendPlayerPanel(await client.channels.fetch(process.env.PLAYER_CONTROL_CHANNEL)),
+      ];
+      const failures = [];
+      for (const task of tasks) { try { await task(); } catch (error) { failures.push(error); } }
+      if (failures.length) throw new Error(`有 ${failures.length} 個面板待恢復`);
+    },
+  });
+  await halloween.start().catch(error => {
+    console.error("[萬聖節主題] 初始化失敗", { code: error?.code || "unknown" });
+    runtimeHealth.addFailure("萬聖節主題", error);
+  });
   websiteOrderBridge=require('./utils/websiteOrderBridge').createWebsiteOrderBridge({db:supabase,client,token:process.env.TOKEN,
     createOrder:payload=>dispatchSystem.createWebsiteOrder(payload)});
   websiteOrderBridge.start();
