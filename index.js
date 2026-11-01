@@ -184,6 +184,8 @@ const {
 } = require("./utils/reviews");
 const {
   buildTipBroadcastContent,
+  selectTipBroadcastChannel,
+  LARGE_TIP_BROADCAST_CHANNEL_ID,
   splitTipBroadcastAllocations,
 } = require("./utils/tipBroadcasts");
 const {
@@ -243,7 +245,6 @@ const QIUNAI_STAFF_MALE_ROLE_ID = "1513214182093488148";
 const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 const REVIEW_SHOWCASE_CHANNEL_ID = "1206157728532271185";
-const TIP_BROADCAST_CHANNEL_ID = "1210250269292761099";
 const JKOPAY_REFUND_CHANNEL_ID =
   process.env.JKOPAY_REFUND_CHANNEL_ID || "1545380103675052092";
 const client = new Client({
@@ -939,11 +940,12 @@ async function sendTipBroadcastSafely(tipData) {
   if (!tipData?.broadcastEnabled || tipData.crownOrder) return;
 
   try {
+    const broadcastChannelId = selectTipBroadcastChannel(allocations);
     const channel = await client.channels
-      .fetch(TIP_BROADCAST_CHANNEL_ID)
+      .fetch(broadcastChannelId)
       .catch(() => null);
     if (!channel?.isTextBased()) {
-      throw new Error(`找不到打賞播報頻道 ${TIP_BROADCAST_CHANNEL_ID}`);
+      throw new Error(`找不到打賞播報頻道 ${broadcastChannelId}`);
     }
     const failures = [];
     let sentCount = 0;
@@ -1119,7 +1121,9 @@ async function sendTipPaymentSelectPrompt(channel, tipId, selectedStaffText) {
   });
 }
 async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
+  const broadcastChannelId = selectTipBroadcastChannel(buildTipAllocations(tipData));
   if (
+    broadcastChannelId !== LARGE_TIP_BROADCAST_CHANNEL_ID &&
     !getTipGiftSelections(tipData).some((gift) =>
       getTipBroadcastEntry(gift.name),
     )
@@ -1137,7 +1141,7 @@ async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
   tipData.broadcastPreferenceShown = true;
   setPendingTip(tipId, tipData);
   await channel.send({
-    content: `<@${tipData.tipperId}> 是否需要將這次打賞播報到秋奈公開打賞頻道？`,
+    content: `<@${tipData.tipperId}> 是否需要將這次打賞播報到 <#${broadcastChannelId}>？\n本筆所有品項及受賞人合計滿 1,300 元，會自動改至「超頻的愛」播報。`,
     components: appendTipBackButton([
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
