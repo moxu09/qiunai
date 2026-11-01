@@ -15085,41 +15085,12 @@ async function handleStringSelectInteraction(interaction) {
           finalPrice = Math.floor(order.price * 0.8);
           discountAmount = order.price - finalPrice;
         }
-        const { error: updateError } = await supabase
-          .from("play_orders")
-          .update({
-            coupon_name: coupon.item_name,
-            discount_amount: discountAmount,
-            final_price: finalPrice,
-          })
-          .eq("id", order.id);
-        if (updateError) {
-          console.error("[優惠券更新訂單失敗]", updateError);
-          return await interaction.editReply({
-            content: `❌ 優惠券更新訂單失敗\n` + `錯誤：${updateError.message}`,
-          });
-        }
-        // ===== 嘗試寫入優惠券使用紀錄，但失敗不阻擋流程 =====
-        const { error: usedError } = await supabase
-          .from("used_coupons")
-          .insert({
-            user_id: interaction.user.id,
-            item_name: coupon.item_name,
-            item_id: coupon.id,
-            order_id: order.id,
-          });
-        if (usedError) {
-          console.error("[優惠券紀錄寫入失敗，但不阻擋使用]", usedError);
-        }
-        // ===== 只刪除一次優惠券 =====
-        try {
-          await removeUserItem(coupon.id);
-        } catch (deleteError) {
-          console.error("[優惠券刪除失敗]", deleteError);
-          return await interaction.editReply({
-            content: `❌ 優惠券折扣已套用，但刪除失敗\n` + `請通知客服手動處理`,
-          });
-        }
+        const { error: updateError } = await supabase.rpc("qiunai_apply_quote_coupon", {
+          p_user_id:interaction.user.id,p_order_id:order.id,p_item_id:coupon.id,
+          p_rate:finalPrice/Number(order.original_price || order.price || order.final_price),
+          p_discount:discountAmount,p_final:finalPrice,
+        });
+        if (updateError) return interaction.editReply({content:`❌ 優惠券套用失敗：${updateError.message}`});
         // ===== 公開通知 =====
         await interaction.channel.send({
           content:

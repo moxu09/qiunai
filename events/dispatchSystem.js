@@ -43,7 +43,7 @@ const {
   isOctoberValorantPricingActive,
 } = require("../config/selfServicePricing");
 const path = require("node:path");
-const { buildEcpayPaymentRows, handleEcpayDirect, sendPreferredEcpayDirect, assertBankTransferCanBeSelected } = require("../utils/ecpayDiscord");
+const { buildEcpayPaymentRows, handleEcpayUnsubmittedCancel, handleEcpayDirect, sendPreferredEcpayDirect, assertBankTransferCanBeSelected } = require("../utils/ecpayDiscord");
 const { formatWalletPaymentName } = require("../utils/paymentDisplay");
 const { isEcpayAtmAvailable } = require("../utils/ecpayAtmSchedule");
 const { createServiceFlowStore } = require("../utils/serviceFlowStore");
@@ -4252,6 +4252,7 @@ async function sendEcpayPaymentPrompt(channel, userId, amount, payment, label) {
           : `刷卡會在官網站內直接輸入卡號；${isEcpayAtmAvailable() ? "匯款虛擬帳號與" : "虛擬 ATM 於 9 月 28 日開放，"}超商繳費資訊會直接顯示在本頻道。實際付款成功後才會自動核帳。`;
   const paymentRows = buildEcpayPaymentRows(payment, Number(amount), {
     topup: label === "購買ASD",
+    allowCancel: ["訂單", "自助訂單"].includes(label),
     onlyMethod: payment.onlyMethod || payment.preferredMethod || null,
     selfService: label === "自助訂單" || payment.selfService === true,
     allowAtm: !["訂單", "加時", "購買ASD"].includes(label) || payment.selfService === true,
@@ -8872,42 +8873,11 @@ async function handleQuoteSelectCoupon(interaction) {
 
   const discountAmount = originalPrice - finalPrice;
 
-  const { data: updatedOrder, error: updateError } = await supabase
-    .from("play_orders")
-    .update({
-      discount_rate: discount.rate,
-      discount_amount: discountAmount,
-      final_price: finalPrice,
-      coupon_text: coupon.item_name,
-    })
-    .eq("id", order.id)
-    .select()
-    .single();
-
-  if (updateError || !updatedOrder) {
-    console.error("[報價優惠券] 更新訂單失敗", updateError);
-    return interaction.editReply({
-      content: "❌ 套用優惠券失敗",
-    });
-  }
-
-  // 刪除已使用優惠券
-  await supabase.from("user_items").delete().eq("id", coupon.id);
-
-  // 寫入 used_coupons，如果沒有這張表會失敗但不影響主流程
-  const { error: usedCouponError } = await supabase
-    .from("used_coupons")
-    .insert({
-      user_id: interaction.user.id,
-      item_id: coupon.id,
-      item_name: coupon.item_name,
-      order_id: order.id,
-      discount_rate: discount.rate,
-      discount_amount: discountAmount,
-    });
-  if (usedCouponError) {
-    console.log("[優惠券使用紀錄失敗]", usedCouponError.message);
-  }
+  const { data: updatedOrder, error: updateError } = await supabase.rpc("qiunai_apply_quote_coupon", {
+    p_user_id:interaction.user.id,p_order_id:order.id,p_item_id:coupon.id,
+    p_rate:discount.rate,p_discount:discountAmount,p_final:finalPrice,
+  });
+  if (updateError || !updatedOrder) return interaction.editReply({content:`❌ 套用優惠券失敗：${updateError?.message || "訂單已更新"}`});
   await interaction.channel.send({
     embeds: [
       new EmbedBuilder()
@@ -13405,6 +13375,7 @@ async function finishServiceNeed(interaction) {
     pending.discountRate = 1;
     pending.discountAmount = 0;
     pending.couponText = "未使用優惠券";
+    if (pending.usedCouponItemId) await releasePendingServiceCoupon(pending);
     pending.usedCouponItemId = null;
     pending.usedCouponName = null;
     pending.serviceCouponRecorded = false;
@@ -13644,6 +13615,7 @@ async function submitServiceQuotePrice(interaction) {
   pending.discountRate = 1;
   pending.discountAmount = 0;
   pending.couponText = "未使用優惠券";
+  if (pending.usedCouponItemId) await releasePendingServiceCoupon(pending);
   pending.usedCouponItemId = null;
   pending.usedCouponName = null;
   pending.serviceCouponRecorded = false;
@@ -13821,13 +13793,27 @@ async function sendServicePaymentMethodSelect(channel, flowId, pending) {
     components: rows,
   });
 }
-function resetServiceCouponSelection(pending) {
+async function releasePendingServiceCoupon(pending) {
+  if (!pending?.usedCouponItemId) return;
+  const key = pending.couponConsumptionKey || `qiunai:service:${pending.flowId}`;
+  if (!pending.couponConsumptionKey) {
+    const saved = await supabase.from("used_coupons").upsert({user_id:pending.customerId,item_id:pending.usedCouponItemId,
+      item_name:pending.usedCouponName || pending.couponText,coupon_snapshot:{item_name:pending.usedCouponName || pending.couponText,item_type:"coupon"},consumption_key:key},
+      {onConflict:"consumption_key",ignoreDuplicates:true});
+    if (saved.error) throw saved.error;
+  }
+  const released = await supabase.rpc("qiunai_release_unbound_coupon",{p_user_id:pending.customerId,p_key:key});
+  if (released.error) throw released.error;
+  pending.couponConsumptionKey = null;
+}
+async function resetServiceCouponSelection(pending) {
   const originalPrice = getServiceOriginalPrice(pending);
 
   pending.finalPrice = originalPrice;
   pending.discountRate = 1;
   pending.discountAmount = 0;
   pending.couponText = "未使用優惠券";
+  if (pending.usedCouponItemId) await releasePendingServiceCoupon(pending);
   pending.usedCouponItemId = null;
   pending.usedCouponName = null;
   pending.serviceCouponRecorded = false;
@@ -13859,7 +13845,7 @@ async function handleServiceNoCoupon(interaction) {
     return interaction.editReply({ content: "❌ 請先確認最新報價金額。" });
   }
 
-  resetServiceCouponSelection(pending);
+  await resetServiceCouponSelection(pending);
   await pendingServiceOrders.set(flowId, pending);
 
   await sendServicePaymentMethodSelect(interaction.channel, flowId, pending);
@@ -14012,18 +13998,12 @@ async function handleServiceSelectCoupon(interaction) {
     : Math.floor(originalPrice * discount.rate);
   const discountAmount = originalPrice - finalPrice;
 
-  const { error: deleteError } = await supabase
-    .from("user_items")
-    .delete()
-    .eq("id", coupon.id)
-    .eq("user_id", interaction.user.id);
-
-  if (deleteError) {
-    console.error("[新版下單優惠券] 刪除優惠券失敗", deleteError);
-    return interaction.editReply({
-      content: "❌ 套用優惠券失敗，無法從背包移除這張券。",
-    });
-  }
+  const couponConsumptionKey = `qiunai:service:${flowId}:coupon:${coupon.id}`;
+  const { error: deleteError } = await supabase.rpc("qiunai_consume_coupon_atomic", {
+    p_user_id:interaction.user.id,p_item_id:coupon.id,p_key:couponConsumptionKey,p_order_id:null,
+  });
+  if (deleteError) return interaction.editReply({content:`❌ 套用優惠券失敗：${deleteError.message}`});
+  pending.couponConsumptionKey = couponConsumptionKey;
 
   pending.finalPrice = finalPrice;
   pending.discountRate = discount.rate;
@@ -14488,20 +14468,21 @@ async function recordServiceUsedCoupon(pending, orderOrOrders) {
     : [orderOrOrders].filter(Boolean);
   const firstOrder = orders[0] || null;
 
-  const { error: usedCouponError } = await supabase
-    .from("used_coupons")
-    .insert({
-      user_id: pending.customerId,
-      item_id: pending.usedCouponItemId,
-      item_name: pending.usedCouponName || pending.couponText,
-      order_id: firstOrder?.id || null,
-      discount_rate: Number(pending.discountRate || 1),
-      discount_amount: Number(pending.discountAmount || 0),
-    });
-
-  if (usedCouponError) {
-    console.log("[新版下單優惠券紀錄失敗]", usedCouponError.message);
+  const key = pending.couponConsumptionKey || `qiunai:service:${pending.flowId}`;
+  if (!pending.couponConsumptionKey) {
+    // Preserve in-flight flows that consumed a coupon before atomic consumption was deployed.
+    const saved = await supabase.from("used_coupons").upsert({
+      user_id:pending.customerId,item_id:pending.usedCouponItemId,
+      item_name:pending.usedCouponName || pending.couponText,
+      coupon_snapshot:{item_name:pending.usedCouponName || pending.couponText,item_type:"coupon",guild_id:process.env.GUILD_ID},
+      consumption_key:key,
+    }, {onConflict:"consumption_key",ignoreDuplicates:true});
+    if (saved.error) throw new Error(`優惠券使用紀錄保存失敗：${saved.error.message}`);
   }
+  const { error: usedCouponError } = await supabase.rpc("qiunai_bind_consumed_coupon", {
+    p_user_id:pending.customerId,p_key:key,p_order_id:firstOrder?.id,
+  });
+  if (usedCouponError) throw new Error(`優惠券綁定失敗，尚未付款：${usedCouponError.message}`);
 
   pending.serviceCouponRecorded = true;
   await pendingServiceOrders.set(pending.flowId, pending);
@@ -15395,6 +15376,7 @@ async function handleServiceCancelOrder(interaction) {
 }
 async function handleDispatchInteraction(interaction) {
   const customId = interaction.customId || "";
+  if (customId.startsWith("ecpay_cancel_unsubmitted_")) return handleEcpayUnsubmittedCancel(interaction, supabase);
   if (/^(service|quote)_disable_points_/.test(customId)) return disableCheckoutPoints(interaction);
   const paymentSelection = [
     "quote_payment_method_",

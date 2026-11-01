@@ -31,7 +31,18 @@ function fixture(price, {originalPrice=price, customer='customer'} = {}) {
   const order = {id:'order',customer_id:customer,price,original_price:originalPrice,quote_status:'price_confirmed'};
   const coupon = {id:85,item_name:'85折折價券',item_type:'coupon',user_id:'customer'};
   const calls=[],replies=[];
-  const db = {from(table) {
+  const db = {async rpc(name,args) {
+    calls.push(['rpc',name,args]);
+    if (name === 'qiunai_apply_quote_coupon') {
+      const patch={discount_rate:args.p_rate,discount_amount:args.p_discount,final_price:args.p_final,coupon_text:coupon.item_name};
+      calls.push(['delete','user_items'],['update',patch]);
+      return {data:{...order,...patch},error:null};
+    }
+    if (name === 'qiunai_consume_coupon_atomic') {
+      calls.push(['delete','user_items']);return {data:{id:1,coupon_snapshot:coupon},error:null};
+    }
+    throw Error('unexpected RPC '+name);
+  },from(table) {
     let patch,removed=false;
     const result = () => ({data:table==='play_orders'?{...order,...patch}:coupon,error:null});
     const query = {select(){return this},eq(){return this},update(value){patch=value;calls.push(['update',value]);return this},
