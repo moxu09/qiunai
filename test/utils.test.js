@@ -1266,8 +1266,8 @@ test("打賞播報可依老闆選擇顯示帳號或匿名", () => {
 
 test("多人打賞播報拆成每位陪陪各自一筆", () => {
   const jobs = splitTipBroadcastAllocations([
-    { staffId: "staff-a", lines: [{ name: "煙火", quantity: 2 }] },
-    { staffId: "staff-b", lines: [{ name: "煙火", quantity: 1 }] },
+    { staffId: "staff-a", amount: 198, lines: [{ name: "煙火", quantity: 2 }] },
+    { staffId: "staff-b", amount: 99, lines: [{ name: "煙火", quantity: 1 }] },
   ]);
   assert.deepEqual(
     jobs.map((job) => [job.staffId, job.line.quantity]),

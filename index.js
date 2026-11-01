@@ -184,8 +184,7 @@ const {
 } = require("./utils/reviews");
 const {
   buildTipBroadcastContent,
-  selectTipBroadcastChannel,
-  LARGE_TIP_BROADCAST_CHANNEL_ID,
+  getTipBroadcastChannels,
   splitTipBroadcastAllocations,
 } = require("./utils/tipBroadcasts");
 const {
@@ -940,19 +939,18 @@ async function sendTipBroadcastSafely(tipData) {
   if (!tipData?.broadcastEnabled || tipData.crownOrder) return;
 
   try {
-    const broadcastChannelId = selectTipBroadcastChannel(allocations);
-    const channel = await client.channels
-      .fetch(broadcastChannelId)
-      .catch(() => null);
-    if (!channel?.isTextBased()) {
-      throw new Error(`找不到打賞播報頻道 ${broadcastChannelId}`);
-    }
     const failures = [];
-    let sentCount = 0;
+    const sentChannels = new Map();
+    const channels = new Map();
     const jobs = splitTipBroadcastAllocations(allocations);
-    for (const [index, { staffId, line }] of jobs.entries()) {
+    for (const [index, { staffId, line, channelId }] of jobs.entries()) {
       const entry = getTipBroadcastEntry(line.name, line.key);
       try {
+        if (!channels.has(channelId)) {
+          channels.set(channelId, await client.channels.fetch(channelId).catch(() => null));
+        }
+        const channel = channels.get(channelId);
+        if (!channel?.isTextBased()) throw new Error(`找不到打賞播報頻道 ${channelId}`);
         const mentionIds = tipData.broadcastAnonymous
           ? [staffId]
           : [tipData.tipperId, staffId];
@@ -991,7 +989,7 @@ async function sendTipBroadcastSafely(tipData) {
           tipData,
           `${index}:${staffId}:${line.key || line.name}`,
         );
-        sentCount += 1;
+        sentChannels.set(channelId, channel);
       } catch (error) {
         failures.push(error);
         console.error(
@@ -1000,15 +998,15 @@ async function sendTipBroadcastSafely(tipData) {
         );
       }
     }
-    if (sentCount) {
+    for (const [channelId, channel] of sentChannels) {
       const thanksPayload = {
         content: "**感謝老闆對秋奈陪玩及陪陪的喜愛 <:I_cn_b02:1221687963621265451>**",
         allowedMentions: { parse: [] },
       };
       try {
-        await sendTipBroadcastMessage(channel, thanksPayload, tipData, "thanks");
+        await sendTipBroadcastMessage(channel, thanksPayload, tipData, `thanks:${channelId}`);
       } catch (error) {
-        throw error;
+        failures.push(error);
       }
     }
     if (failures.length) {
@@ -1121,13 +1119,8 @@ async function sendTipPaymentSelectPrompt(channel, tipId, selectedStaffText) {
   });
 }
 async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
-  const broadcastChannelId = selectTipBroadcastChannel(buildTipAllocations(tipData));
-  if (
-    broadcastChannelId !== LARGE_TIP_BROADCAST_CHANNEL_ID &&
-    !getTipGiftSelections(tipData).some((gift) =>
-      getTipBroadcastEntry(gift.name),
-    )
-  ) {
+  const broadcastChannelIds = [...new Set(getTipBroadcastChannels(buildTipAllocations(tipData)).values())];
+  if (!broadcastChannelIds.length) {
     tipData.broadcastEnabled = false;
     tipData.broadcastPreferenceCompleted = true;
     setPendingTip(tipId, tipData);
@@ -1141,7 +1134,7 @@ async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
   tipData.broadcastPreferenceShown = true;
   setPendingTip(tipId, tipData);
   await channel.send({
-    content: `<@${tipData.tipperId}> 是否需要將這次打賞播報到 <#${broadcastChannelId}>？\n本筆所有品項及受賞人合計滿 1,300 元，會自動改至「超頻的愛」播報。`,
+    content: `<@${tipData.tipperId}> 是否需要將這次打賞播報到 ${broadcastChannelIds.map((id) => `<#${id}>`).join("、")}？\n本筆打賞依每位陪陪收到的所有品項合計金額判定：單一陪陪滿 1,300 元，該位陪陪播報至「超頻的愛」；未滿的陪陪仍在原頻道播報，不合併不同陪陪的金額。`,
     components: appendTipBackButton([
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
