@@ -175,6 +175,7 @@ const {
 const { appendTipBackButton, rewindTipFlow } = require("./utils/tipNavigation");
 const {
   buildCrownOrderItem,
+  describeCrownPackage,
   getCrownPackageByKey,
 } = require("./utils/crownOrders");
 const {
@@ -1536,9 +1537,7 @@ async function startCrownFlowInChannel(channel, user) {
         label: item.custom
           ? `${item.name}｜價格需議`
           : `${item.name}｜${item.price} 元`,
-        description: item.custom
-          ? "價格、存單時數及後綴時長由客服議定"
-          : `存單 ${item.giftedHours} 小時｜後綴 ${item.durationHours} 小時`,
+        description: describeCrownPackage(item),
         value: item.key,
       })),
     );
@@ -1600,6 +1599,7 @@ async function handleCrownPackageSelect(interaction) {
   }
   Object.assign(tipData, {
     crownName: crownPackage.name,
+    suffixOnly: crownPackage.suffixOnly,
     giftedHours: crownPackage.giftedHours,
     durationHours: crownPackage.durationHours,
     amount: crownPackage.price,
@@ -1650,7 +1650,7 @@ async function handleCrownPackageSelect(interaction) {
     `✅ 已選擇：${crownPackage.name}\n` +
       (crownPackage.custom
         ? "價格、存單時數與後綴時長需由客服議定。"
-        : `價格：${crownPackage.price} 元｜存單：${crownPackage.giftedHours} 小時｜後綴：${crownPackage.durationHours} 小時`) +
+        : `價格：${crownPackage.price} 元｜${describeCrownPackage(crownPackage)}`) +
       "\n\n請選擇一位冠名陪陪：",
     rows,
   );
@@ -2348,6 +2348,9 @@ async function handleCrownSuffixChoice(interaction) {
     );
     return interaction.showModal(modal);
   }
+  if (tipData.suffixOnly) {
+    return interaction.reply({ content: "❌ 純後綴方案請先填寫陪陪尾綴。", flags: 64 });
+  }
   tipData.changeSuffixes = false;
   tipData.staffSuffix = null;
   setPendingTip(tipId, tipData);
@@ -2365,8 +2368,10 @@ async function handleCrownSuffixModal(interaction) {
   if (!tipData?.crownOrder || !canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({ content: "❌ 冠名單已失效或你沒有操作權限。" });
   }
+  const staffSuffix = interaction.fields.getTextInputValue("staff_suffix").trim();
+  if (!staffSuffix) return interaction.editReply({ content: "❌ 請填寫陪陪尾綴，不能只輸入空白。" });
   tipData.changeSuffixes = true;
-  tipData.staffSuffix = interaction.fields.getTextInputValue("staff_suffix").trim();
+  tipData.staffSuffix = staffSuffix;
   setPendingTip(tipId, tipData);
   if (tipData.suffixMessageId) {
     const suffixMessage = await interaction.channel.messages
@@ -2586,6 +2591,8 @@ async function handleTipStaffDone(interaction) {
         .setCustomId(`crown_suffix_yes_${tipId}`)
         .setLabel("修改陪陪尾綴")
         .setStyle(ButtonStyle.Primary),
+    );
+    if (!tipData.suffixOnly) suffixRow.addComponents(
       new ButtonBuilder()
         .setCustomId(`crown_suffix_no_${tipId}`)
         .setLabel("不修改尾綴")
@@ -2593,7 +2600,7 @@ async function handleTipStaffDone(interaction) {
     );
     const suffixMessage = await interaction.channel.send({
       content:
-        "是否要修改陪陪的暱稱尾綴？\n" +
+        (tipData.suffixOnly ? "純後綴方案：請填寫陪陪的暱稱尾綴。\n" : "是否要修改陪陪的暱稱尾綴？\n") +
         "此處會記錄在冠名單內，付款後由客服依冠名時長執行。",
       components: [suffixRow],
     });
