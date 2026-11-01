@@ -1,7 +1,7 @@
 const {createHash} = require('node:crypto');
 const {EmbedBuilder} = require('discord.js');
 const RED_PACKET_LIFETIME_MS = 24 * 60 * 60 * 1000;
-const PERMANENT_DISCORD_ERRORS = new Set([10003,10008,10013,50001,50007,50013]);
+const PERMANENT_DISCORD_ERRORS = new Set([10003,10008,10013,50001,50007,50013,50278]);
 function createRedPacketExpiry({supabase,client,guildId,logger=console,intervalMs=60_000}) {
   let running=false,timer=null,lastAdoption=0;
   async function adoptLegacy() {

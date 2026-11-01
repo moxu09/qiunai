@@ -27,7 +27,7 @@ test('重啟補發到期狀態與私訊，不會再次退款',async()=>{
  const h=harness({packets:[{...expired(),status:'cancelled',expired_at:new Date().toISOString(),refunded_amount:30,refund_balance:130}]});await h.make().run();assert.equal(h.calls.rpcs,0);assert.equal(h.calls.refunds,0);assert.equal(h.calls.dm.length,1);
 });
 test('私訊被關閉仍完成退款與公開狀態，不會重複加錢',async()=>{
- const h=harness({packets:[expired()],dmError:50007});await h.service.run();await h.make().run();assert.equal(h.calls.refunds,1);assert.equal(h.calls.dm.length,1);assert.ok(h.state[0].expiry_notified_at);
+ for(const dmError of [50007,50278]){const h=harness({packets:[expired()],dmError});await h.service.run();await h.make().run();assert.equal(h.calls.refunds,1);assert.equal(h.calls.dm.length,1);assert.ok(h.state[0].expiry_notified_at);}
 });
 test('暫時性通知失敗可重試，沿用固定 nonce 且不再退錢',async()=>{
  const h=harness({packets:[expired()],dmError:503,failOnce:true});await h.service.run();assert.equal(h.state[0].expiry_notified_at,null);await h.make().run();assert.equal(h.calls.refunds,1);assert.equal(h.calls.dm.length,2);assert.equal(h.calls.dm[0].nonce,h.calls.dm[1].nonce);assert.ok(h.state[0].expiry_notified_at);
