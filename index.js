@@ -1533,23 +1533,28 @@ async function startCrownFlowInChannel(channel, user) {
     crownOrder: true,
   });
 
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`crown_package_${tipId}`)
-    .setPlaceholder("請選擇冠名方案")
-    .addOptions(
-      CROWN_PACKAGES.map((item) => ({
-        label: item.custom
-          ? `${item.name}｜價格需議`
-          : `${item.name}｜${item.price} 元`,
-        description: describeCrownPackage(item),
-        value: item.key,
-      })),
-    );
+  const menus = [
+    { key: "regular", placeholder: "一般冠名｜請選擇冠名方案", suffixOnly: false },
+    { key: "suffix", placeholder: "純後綴｜請選擇後綴期限", suffixOnly: true },
+  ].map((group) => {
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`crown_package_${group.key}_${tipId}`)
+      .setPlaceholder(group.placeholder)
+      .addOptions(
+        CROWN_PACKAGES.filter((item) => Boolean(item.suffixOnly) === group.suffixOnly)
+          .map((item) => ({
+            label: item.custom ? `${item.name}｜價格需議` : `${item.name}｜${item.price} 元`,
+            description: describeCrownPackage(item),
+            value: item.key,
+          })),
+      );
+    return new ActionRowBuilder().addComponents(menu);
+  });
   await channel.send({
     content:
       "👑 請選擇冠名方案\n" +
       "存單時數與後綴期限分開計算，請以各方案說明為準。",
-    components: [new ActionRowBuilder().addComponents(menu)],
+    components: menus,
   });
   return tipId;
 }
@@ -1586,7 +1591,7 @@ async function handleCrownPackageSelect(interaction) {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({ flags: 64 });
   }
-  const tipId = interaction.customId.replace("crown_package_", "");
+  const tipId = interaction.customId.replace(/^crown_package_(?:regular_|suffix_)?/, "");
   const tipData = pendingTips.get(tipId);
   if (!tipData || !tipData.crownOrder) {
     return interaction.editReply({ content: "❌ 冠名單流程已過期，請重新建立。" });
