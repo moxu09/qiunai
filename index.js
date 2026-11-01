@@ -134,6 +134,7 @@ const {
   getRedPacketModeLabel,
   normalizeRedPacketMode,
 } = require("./utils/redPackets");
+const {createRedPacketExpiry} = require("./utils/redPacketExpiry");
 const TIP_GIFTS = require("./config/tipGifts");
 const TIP_BROADCASTS = require("./config/tipBroadcasts");
 const CROWN_PACKAGES = require("./config/crownPackages");
@@ -276,6 +277,7 @@ const deviceAuditReviewerSync = createDeviceAuditReviewerSync({
   roleId:
     process.env.DEVICE_AUDIT_REVIEWER_ROLE_ID || "1513626379437211900",
 });
+const redPacketExpiry = createRedPacketExpiry({supabase,client,guildId:process.env.GUILD_ID});
 const employmentSystem = createEmploymentSystem(client, employmentConfig, supabase);
 const complaintSystem = createComplaintSystem(client, complaintConfig, supabase);
 const runtimeHealth = createHealthState("rainbot-qiunai");
@@ -8310,6 +8312,7 @@ async function reconcileExistingSignedEmploymentMembers() {
 }
 
 client.once(Events.ClientReady, async () => {
+  redPacketExpiry.start();
   const halloween = createHalloweenLifecycle({ client, db: supabase,
     guildIds: [...new Set([process.env.GUILD_ID, QIUNAI_STAFF_GUILD_ID].filter(Boolean))],
     refreshPanels: async () => {
@@ -11626,7 +11629,7 @@ async function createRedPacketShares(packetId, shares) {
 
 async function claimPreparedRedPacket(packetId, userId) {
   const { data, error } = await supabase.rpc(
-    "claim_prepared_red_packet_atomic",
+    "qiunai_claim_red_packet",
     { p_packet_id: packetId, p_user_id: userId },
   );
 
@@ -11668,6 +11671,8 @@ async function createRedPacket(
     });
   }
 
+  const policy = await supabase.rpc("qiunai_red_packet_expiry_ready");
+  if (policy.error || policy.data !== true) return interaction.editReply({content:"❌ 紅包自動退回服務尚未準備好，請稍後再試；尚未扣款。"});
   const senderData = await getUser(interaction.user.id);
 
   if ((senderData.coins || 0) < totalAmount) {
@@ -11702,6 +11707,7 @@ async function createRedPacket(
     .from("red_packets")
     .insert({
       packet_no: packetNo,
+      organization_code: "qiunai",
       sender_id: interaction.user.id,
       total_amount: totalAmount,
       remaining_amount: totalAmount,
@@ -11751,7 +11757,8 @@ async function createRedPacket(
         `💰 總金額：${totalAmount} 星雨幣\n` +
         `👥 數量：${totalCount} 份\n\n` +
         `🎲 分配：${getRedPacketModeLabel(distributionMode)}\n\n` +
-        `快點下方按鈕搶紅包！`,
+        `快點下方按鈕搶紅包！\n` +
+        `⏰ 截止：<t:${Math.floor(Date.parse(packet.expires_at) / 1000)}:F>\n發出24小時後，未領取的剩餘金額會自動退回發送人。`,
     )
     .setFooter({
       text: `紅包編號：${packetNo}`,
@@ -11810,24 +11817,6 @@ async function claimRedPacket(interaction) {
     });
   }
 
-  if (!result) {
-    const { data, error } = await supabase.rpc("claim_red_packet_safe", {
-      p_packet_id: Number(packetId),
-      p_user_id: interaction.user.id,
-    });
-
-    if (error) {
-      console.error("[安全搶紅包失敗]", error);
-
-      return interaction.editReply({
-        content:
-          "❌ 搶紅包失敗，請稍後再試。\n" +
-          `錯誤：${error.message || "未知錯誤"}`,
-      });
-    }
-
-    result = Array.isArray(data) ? data[0] : data;
-  }
 
   if (!result || !result.success) {
     return interaction.editReply({
