@@ -1651,15 +1651,15 @@ test("crown packages keep gifted hours separate from crown duration", () => {
       durationHours,
     ]),
     [
-      ["半日冠", 1899, 6, 12],
-      ["一日冠", 3999, 12, 24],
-      ["三日冠", 12888, 36, 72],
-      ["周冠名", 26666, 84, 168],
-      ["月冠名", 188888, 336, 720],
+      ["半日冠", 1920, 6, 12],
+      ["一日冠", 3720, 12, 24],
+      ["三日冠", 10920, 36, 72],
+      ["週冠", 24920, 84, 168],
+      ["月冠", 94520, 336, 720],
       ["自定冠", null, null, null],
     ],
   );
-  assert.equal(getCrownPackageByKey(crownPackages, "crown_week").name, "周冠名");
+  assert.equal(getCrownPackageByKey(crownPackages, "crown_week").name, "週冠");
   assert.equal(
     buildCrownOrderItem({
       crownName: "半日冠",

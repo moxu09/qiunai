@@ -1537,15 +1537,15 @@ async function startCrownFlowInChannel(channel, user) {
           ? `${item.name}｜價格需議`
           : `${item.name}｜${item.price} 元`,
         description: item.custom
-          ? "價格、贈送還單時數及冠名時長由客服議定"
-          : `贈送還單 ${item.giftedHours}hrs｜冠名 ${item.durationHours}hrs`,
+          ? "價格、存單時數及後綴時長由客服議定"
+          : `存單 ${item.giftedHours} 小時｜後綴 ${item.durationHours} 小時`,
         value: item.key,
       })),
     );
   await channel.send({
     content:
       "👑 請選擇冠名方案\n" +
-      "品項標示的時數為贈送還單時數，冠名時長請以選單說明為準。",
+      "存單時數與後綴期限分開計算，請以各方案說明為準。",
     components: [new ActionRowBuilder().addComponents(menu)],
   });
   return tipId;
@@ -1649,8 +1649,8 @@ async function handleCrownPackageSelect(interaction) {
     interaction.channel,
     `✅ 已選擇：${crownPackage.name}\n` +
       (crownPackage.custom
-        ? "價格、贈送還單時數與冠名時長需由客服議定。"
-        : `價格：${crownPackage.price} 元｜贈送還單：${crownPackage.giftedHours}hrs｜冠名時長：${crownPackage.durationHours}hrs`) +
+        ? "價格、存單時數與後綴時長需由客服議定。"
+        : `價格：${crownPackage.price} 元｜存單：${crownPackage.giftedHours} 小時｜後綴：${crownPackage.durationHours} 小時`) +
       "\n\n請選擇一位冠名陪陪：",
     rows,
   );
