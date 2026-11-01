@@ -8383,7 +8383,7 @@ client.once(Events.ClientReady, async () => {
       { name: "報單面板", run: () => dispatchSystem.sendWorkReportPanel() },
       { name: "商店面板", run: () => refreshShop(client) },
       { name: "儲值面板", run: () => sendTopupPanel(client) },
-      { name: "一番賞面板", run: () => ichiban.publishPanel() },
+      { name: "一番賞面板", run: () => { ichiban.startStockRefresh(); return ichiban.publishPanel(); } },
       { name: "街口退款面板", run: sendJkopayRefundPanel },
       { name: "ATM 面板", run: () => sendAtmPanel(client) },
       { name: "簽到面板", run: () => sendCheckinPanel(client) },

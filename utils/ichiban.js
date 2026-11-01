@@ -22,9 +22,9 @@ function buildPanel({ prizes, stock, enabled }) {
   const embed = new EmbedBuilder()
     .setColor(0xd4af37)
     .setTitle('✦ 秋奈一番賞｜星雨幸運籤')
-    .setDescription(`每抽 **300 ASD**｜共 500 張，剩餘 **${remaining} 張**\n最後一抽獲得全集賞 AirPods Pro。\n\n${formatStock(prizes, stock)}\n\n[網頁版獎品圖與互動預覽](${PAGE_URL})`)
+    .setDescription(`每抽 **300 ASD**｜共 500 張，剩餘 **${remaining} 張**\nB／A／S 賞每張相對權重為 0.5；C～F 賞為 1，機率依剩餘獎品計算。\n抽完後剩 50 份即補回完整新池，舊池剩餘獎品不再抽取，不發全集賞。\n\n${formatStock(prizes, stock)}\n\n[網頁版獎品圖與互動預覽](${PAGE_URL})`)
     .setImage('https://qiunai.gaming.wearestilllhere.com/ichiban/prizes.png')
-    .setFooter({ text: enabled ? '抽取後先顯示抽紙，再按揭曉；ASD 扣款只會執行一次。' : '正式抽獎尚未開放' });
+    .setFooter({ text: enabled ? '剩 50 份自動開新池；已中獎紀錄與領獎權益保留；扣款不重複。' : '正式抽獎尚未開放' });
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`${PREFIX}draw`).setLabel('🎟️ 抽一張・300 ASD').setStyle(ButtonStyle.Primary).setDisabled(!enabled || remaining === 0),
     new ButtonBuilder().setCustomId(`${PREFIX}stock`).setLabel('📦 查看剩餘獎品').setStyle(ButtonStyle.Secondary),
@@ -91,7 +91,7 @@ function createIchiban({ supabase, client, getPanelMessage, savePanelMessage, en
           new ButtonBuilder().setCustomId(`${PREFIX}confirm_ticket_${interaction.user.id}_${requestId}`).setLabel('使用一番賞券・不扣 ASD').setStyle(ButtonStyle.Success),
           new ButtonBuilder().setCustomId(`${PREFIX}confirm_${interaction.user.id}_${requestId}`).setLabel('不使用券・付 300 ASD').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId(`${PREFIX}cancel_${interaction.user.id}`).setLabel('取消').setStyle(ButtonStyle.Secondary));
-        await interaction.editReply({content:`🎟️ 你有 ${count} 張秋奈一番賞券，這次要使用 1 張嗎？\n使用券不扣 ASD；不使用則扣 300 ASD。`,components:[row]});return true;
+        await interaction.editReply({content:`🎟️ 你有 ${count} 張秋奈一番賞券，這次要使用 1 張嗎？\n使用券不扣 ASD；不使用則扣 300 ASD。\nB／A／S 相對權重 0.5；剩 50 份自動開新池，不發全集賞。`,components:[row]});return true;
       }
       return executeDraw(interaction,requestId,false);
     }
@@ -148,7 +148,21 @@ function createIchiban({ supabase, client, getPanelMessage, savePanelMessage, en
     await interaction.editReply({content:`🎟️ 秋奈一番賞｜抽紙 #${data.ticket_no}\n\n┏━━━━━━━━━━━━━━━┓\n┃　✨ 抓住紙角往右掀開　→　┃\n┗━━━━━━━━━━━━━━━┛\n\n${data.tickets_used?'已使用 1 張一番賞券，未扣 ASD':'已扣 300 ASD'}；按下方按鈕揭曉。`,components:[row]});
     void publishPanel().catch(error=>console.error('[一番賞] 更新面板失敗',error.message));return true;
   }
-  return { publishPanel, handle, loadStock };
+  let refreshTimer = null;
+  let refreshBusy = false;
+  function startStockRefresh() {
+    if (refreshTimer) return refreshTimer;
+    refreshTimer = setInterval(async () => {
+      if (refreshBusy) return;
+      refreshBusy = true;
+      try { await publishPanel(); }
+      catch (error) { console.error('[一番賞] 庫存面板同步失敗', error.message); }
+      finally { refreshBusy = false; }
+    }, 60000);
+    refreshTimer.unref?.();
+    return refreshTimer;
+  }
+  return { publishPanel, handle, loadStock, startStockRefresh };
 }
 
 module.exports = { CHANNEL_ID, buildPanel, createIchiban, requestIdForInteraction };
