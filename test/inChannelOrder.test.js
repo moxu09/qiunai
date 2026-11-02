@@ -78,7 +78,7 @@ test("已指定陪陪的原房單保留原房通知，不重複公開接單", as
   assert.deepEqual(destinations, ["vip", "vip"]); assert.equal(sent.length, 1);
   assert.equal(sent[0].components[0].components[0].data.disabled, true);
 });
-test("未指定陪陪的原房加單付款後送接單專區，附可用接單按鈕，恢復查找使用同一目的地", async () => {
+test("未指定陪陪的原房加單付款後不送接單專區，原房接單及恢復查找照常", async () => {
   const destinations = [], sent = [], searched = [];
   const order = { ...privateOrder, paid: true, preferred_player: null };
   const globals = {
@@ -90,13 +90,13 @@ test("未指定陪陪的原房加單付款後送接單專區，附可用接單�
   };
   await fn("sendOrderToStaffChannel", globals)(order);
   await fn("findExistingStaffOrderMessage", globals)(order);
-  assert.deepEqual(destinations, ["acceptance", "acceptance"]);
+  assert.deepEqual(destinations, ["vip", "vip"]);
   assert.equal(sent[0].components[0].components[0].data.custom_id, "accept_play_order_order");
   assert.notEqual(sent[0].components[0].components[0].data.disabled, true);
   assert.deepEqual(searched, ["accept_play_order_order"]); assert.match(sent[0].content, /接單/);
   assert.equal(order.channel_id, "vip");
-  assert.equal(policy.staffOrderChannelId(order, "game-dispatch", "acceptance"), "acceptance");
-  assert.throws(() => policy.staffOrderChannelId(order, "game-dispatch", null), /未設定接單專區/);
+  assert.equal(policy.staffOrderChannelId(order, "game-dispatch", "acceptance"), "vip");
+  assert.equal(policy.staffOrderChannelId(order, "game-dispatch", null), "vip");
 });
 test("原房加單接單限已付款本店訂單，同時接單只允許一個成功並發送一份報單", async () => {
   async function runCase({ paid = true, guild = "shop", concurrent = false } = {}) {

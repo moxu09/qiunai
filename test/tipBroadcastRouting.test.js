@@ -15,8 +15,8 @@ test('每位陪陪滿1300才轉超頻的愛，不合併其他陪陪或跨單累�
  assert.equal(getTipBroadcastChannels([{staffId:'a',amount:500}]).get('a'),normal);
  assert.throws(()=>route(NaN),/金額無效/);
 });
-test('同一陪陪不同品項含客製打賞合計，其他陪陪不跟著升頻',()=>{
- const flow={selectedStaffIds:['a','b','c'],gifts:[{key:'gift',name:'A',price:100},{key:'custom',name:'客製打賞',price:650,customPrice:true}],quantitiesByStaff:{a:[0,2],b:[6,1],c:[0,0]}};
+test('同一陪陪一般品項合計達標，混合單只播一般禮物，其他陪陪不跟著升頻',()=>{
+ const flow={selectedStaffIds:['a','b','c'],gifts:[{key:'gift',name:'A',price:100},{key:'gift2',name:'B',price:600},{key:'custom',name:'客製打賞',price:650,customPrice:true}],quantitiesByStaff:{a:[1,2,0],b:[6,0,1],c:[0,0,0]}};
  const allocations=buildTipAllocations(flow),channels=getTipBroadcastChannels(allocations);
  assert.equal(channels.get('a'),large);assert.equal(channels.get('b'),normal);assert.equal(channels.has('c'),false);
  const jobs=splitTipBroadcastAllocations(allocations);
@@ -61,16 +61,25 @@ test('匿名、拒絕播報與冠名排除維持原選擇，收據仍是一筆',
 });
 test('付款前提示說明逐人判斷，混合訂單會列出兩個目的頻道',()=>{
  const prompt=source.slice(source.indexOf('async function sendTipBroadcastPreferencePrompt'),source.indexOf('async function handleTipBroadcastChoice'));
- assert.match(prompt,/getTipBroadcastChannels\(buildTipAllocations\(tipData\)\)/);
+ assert.match(prompt,/splitTipBroadcastAllocations\(buildTipAllocations\(tipData\)\)/);
  assert.match(prompt,/單一陪陪滿 1,300 元/);assert.match(prompt,/不合併不同陪陪的金額/);
  assert.doesNotMatch(prompt,/所有品項及受賞人合計/);
 });
-test('多人客製打賞合計1300但各人未滿，仍可選擇原頻道播報',async()=>{
+test('純客製打賞跳過播報選擇，直接進付款流程',async()=>{
  const {ActionRowBuilder,ButtonBuilder,ButtonStyle}=require('discord.js');
  const prompt=source.slice(source.indexOf('async function sendTipBroadcastPreferencePrompt'),source.indexOf('async function handleTipBroadcastChoice'));
- const messages=[],ctx={getTipBroadcastChannels,buildTipAllocations,ActionRowBuilder,ButtonBuilder,ButtonStyle,setPendingTip:()=>{},appendTipBackButton:rows=>rows};
+ const messages=[],payments=[],ctx={splitTipBroadcastAllocations,buildTipAllocations,ActionRowBuilder,ButtonBuilder,ButtonStyle,setPendingTip:()=>{},appendTipBackButton:rows=>rows,getTipStaffIds:()=>['a','b'],formatTipStaffMentions:()=>'<@a> <@b>',sendTipPaymentSelectPrompt:async(...args)=>payments.push(args)};
  vm.createContext(ctx);vm.runInContext(prompt+';this.prompt=sendTipBroadcastPreferencePrompt;',ctx);
- const tip={tipperId:'boss',allocations:[{staffId:'a',lines:[{key:'custom',name:'客製打賞',price:800,quantity:1}]},{staffId:'b',lines:[{key:'custom',name:'客製打賞',price:500,quantity:1}]}]};
+ const tip={tipperId:'boss',allocations:[{staffId:'a',lines:[{key:'tip_custom',name:'客製打賞',customPrice:true,price:8000,quantity:1}]},{staffId:'b',lines:[{key:'custom',name:'客製化打賞',price:500,quantity:1}]}]};
  await ctx.prompt({send:async m=>messages.push(m)},'flow',tip);
- assert.equal(messages.length,1);assert.match(messages[0].content,new RegExp(`<#${normal}>`));assert.doesNotMatch(messages[0].content,new RegExp(`<#${large}>`));assert.equal(tip.broadcastPreferenceShown,true);
+ assert.equal(messages.length,0);assert.equal(payments.length,1);assert.equal(tip.broadcastEnabled,false);assert.equal(tip.broadcastPreferenceCompleted,true);
+});
+test('客製品項辨認涵蓋旗標、品項代碼及舊明細名稱，不發圖片或感謝文',async()=>{
+ const h=makeSender();h.tip.allocations=[{staffId:'a',lines:[{key:'tip_custom',name:'客製打賞',price:5000,quantity:1},{key:'legacy',name:'客製化打賞',price:5000,quantity:1},{key:'special',name:'其他',customPrice:true,price:5000,quantity:1}]}];
+ await h.send(h.tip);assert.equal(h.sent.length,0);assert.equal(h.fetched.length,0);assert.equal(h.receipts.length,1);
+});
+test('混合單只發一般禮物，客製品項仍保留在原收據及打賞金額',async()=>{
+ const h=makeSender();h.tip.allocations=[{staffId:'a',lines:[{key:'tip_custom',name:'客製打賞',customPrice:true,price:2000,quantity:1},{key:'gift',name:'一般禮物',price:100,quantity:1}]},{staffId:'b',lines:[{key:'tip_custom',name:'客製打賞',customPrice:true,price:3000,quantity:1}]}];
+ await h.send(h.tip);const gifts=h.sent.filter(x=>!x.key.startsWith('thanks:'));assert.equal(gifts.length,1);assert.equal(gifts[0].channel,large);assert.match(gifts[0].payload.content,/<@a>/);assert.doesNotMatch(gifts[0].payload.content,/客製|<@b>/);
+ assert.equal(h.receipts[0][1][0].amount,2100);assert.equal(h.receipts[0][1][1].amount,3000);assert.equal(h.tip.allocations[0].lines.length,2);
 });

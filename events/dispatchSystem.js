@@ -5514,7 +5514,7 @@ async function sendOrderToStaffChannel(order) {
     content:
       isInChannelOrder(order)
         ? requiresInChannelAcceptance(order)
-          ? `${playerRoleMention} 📢 原頻道加單已付款，請陪陪按「接單」；接單後到原訂單頻道服務。`
+          ? `📢 原頻道加單已付款，請在本頻道繼續接單及服務。`
           : `✅ <@${order.customer_id}> 原頻道加單已完成付款，請在本頻道繼續處理。`
         : isManualDispatchOrder(order)
         ? `${preferredText} ✅ 老闆已選定陪陪並完成付款，不再開放其他人接單。`
@@ -9351,7 +9351,7 @@ async function sendCustomerFinalConfirm(channel, order) {
       const result = await deliverPaidOrder(dispatchOrder, channel?.isTextBased?.() ? channel : null);
       await channel?.send?.({
         content: isInChannelOrder(order)
-          ? `<@${order.customer_id}> ✅ 報價已確認、付款已完成，${requiresInChannelAcceptance(order) ? "接單通知已送往接單專區；陪陪接單後會加入原房服務。" : "訂單會在本頻道處理。"}原房會持續保留。`
+          ? `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單會在本頻道處理。原房會持續保留。`
           : `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單${result.alreadyDispatched ? "已派單" : "已自動送往指定派單區"}。`,
       });
     } catch (error) {

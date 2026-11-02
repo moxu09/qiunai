@@ -44,10 +44,14 @@ function buildTipBroadcastContent({
   );
 }
 
+function isCustomTipLine(line = {}) {
+  return Boolean(line.customPrice) || ["tip_custom", "custom"].includes(String(line.key || "")) || /^客製(?:化)?打賞/.test(String(line.name || ""));
+}
+
 function splitTipBroadcastAllocations(allocations = []) {
   const channels = getTipBroadcastChannels(allocations);
   return allocations.flatMap((allocation) =>
-    (allocation.lines || []).map((line) => ({
+    (allocation.lines || []).filter((line) => !isCustomTipLine(line)).map((line) => ({
       staffId: allocation.staffId,
       channelId: channels.get(String(allocation.staffId).trim()),
       line,
@@ -57,6 +61,7 @@ function splitTipBroadcastAllocations(allocations = []) {
 
 module.exports = {
   TIP_BROADCAST_CHANNEL_ID, LARGE_TIP_BROADCAST_CHANNEL_ID, LARGE_TIP_THRESHOLD, selectTipBroadcastChannel, getTipBroadcastChannels,
+  isCustomTipLine,
   buildTipBroadcastContent,
   splitTipBroadcastAllocations,
 };

@@ -185,7 +185,6 @@ const {
 } = require("./utils/reviews");
 const {
   buildTipBroadcastContent,
-  getTipBroadcastChannels,
   splitTipBroadcastAllocations,
 } = require("./utils/tipBroadcasts");
 const {
@@ -1121,7 +1120,7 @@ async function sendTipPaymentSelectPrompt(channel, tipId, selectedStaffText) {
   });
 }
 async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
-  const broadcastChannelIds = [...new Set(getTipBroadcastChannels(buildTipAllocations(tipData)).values())];
+  const broadcastChannelIds = [...new Set(splitTipBroadcastAllocations(buildTipAllocations(tipData)).map((job) => job.channelId))];
   if (!broadcastChannelIds.length) {
     tipData.broadcastEnabled = false;
     tipData.broadcastPreferenceCompleted = true;
@@ -1136,7 +1135,7 @@ async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
   tipData.broadcastPreferenceShown = true;
   setPendingTip(tipId, tipData);
   await channel.send({
-    content: `<@${tipData.tipperId}> 是否需要將這次打賞播報到 ${broadcastChannelIds.map((id) => `<#${id}>`).join("、")}？\n本筆打賞依每位陪陪收到的所有品項合計金額判定：單一陪陪滿 1,300 元，該位陪陪播報至「超頻的愛」；未滿的陪陪仍在原頻道播報，不合併不同陪陪的金額。`,
+    content: `<@${tipData.tipperId}> 是否需要將這次打賞播報到 ${broadcastChannelIds.map((id) => `<#${id}>`).join("、")}？\n本筆打賞依每位陪陪收到的所有品項合計金額判定：單一陪陪滿 1,300 元，該位陪陪播報至「超頻的愛」；未滿的陪陪仍在原頻道播報，不合併不同陪陪的金額。客製化打賞品項不播報。`,
     components: appendTipBackButton([
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
