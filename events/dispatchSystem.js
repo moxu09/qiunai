@@ -64,6 +64,16 @@ const {
 const guardOrderOperation = createOperationGuard();
 
 let supabase;
+const { createAcceptanceMessageSync } = require("../utils/orderAcceptanceMessage");
+const syncAcceptanceMessage = createAcceptanceMessageSync({
+  loadOrder: async (orderId) => {
+    const { data, error } = await supabase.from("play_orders")
+      .select("id,paid,status,assigned_player,player_count")
+      .eq("id", orderId).eq("guild_id", process.env.GUILD_ID).maybeSingle();
+    if (error) throw error;
+    return data;
+  },
+});
 const { isVipPointsActive } = require("../config/qiunaiVipPoints");
 const { createVipPointsCheckout } = require("../utils/vipPointsCheckout");
 const vipPoints = () => createVipPointsCheckout(supabase);
@@ -12277,6 +12287,11 @@ async function acceptPlayOrder(interaction) {
         content: "❌ 這張訂單目前無法接單，可能已被接滿或狀態已變更",
       });
     }
+
+    // Update the clicked staff card before reports/room permissions, which can fail independently.
+    await syncAcceptanceMessage(interaction.message, orderId).catch((error) => {
+      console.error(`[接單按鈕同步] ${orderId}`, error);
+    });
 
     if (isFull) {
       try {

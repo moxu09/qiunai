@@ -104,7 +104,7 @@ test("未指定陪陪的原房加單付款後送員工接單專區，恢復查�
 test("原房加單接單限已付款本店訂單，同時接單只允許一個成功並發送一份報單", async () => {
   async function runCase({ paid = true, guild = "shop", concurrent = false } = {}) {
     const order = { ...privateOrder, preferred_player: null, assigned_player: null, player_count: 1, paid, guild_id: guild, status: "pending" };
-    let assignments = 0, reports = 0, permissionEdits = 0;
+    let assignments = 0, reports = 0, permissionEdits = 0, buttonSyncs = 0;
     const db = { from(table) {
       if (table === "qiunai_staff") {
         const q = { select() { return this; }, eq() { return this; }, async limit() { return { data: [{ discord_id: "a", status: "available" }] }; } }; return q;
@@ -122,18 +122,19 @@ test("原房加單接單限已付款本店訂單，同時接單只允許一個�
       }; return query;
     } };
     const channel = { id: "vip", send: async () => {}, permissionOverwrites: { edit: async () => permissionEdits++ } };
-    const accept = fn("acceptPlayOrder", { supabase: db, process: { env: { GUILD_ID: "shop" } }, applyStaffGuildFilter: x => x,
+    const accept = fn("acceptPlayOrder", { supabase: db, syncAcceptanceMessage: async () => { buttonSyncs++; }, process: { env: { GUILD_ID: "shop" } }, applyStaffGuildFilter: x => x,
       workReportSystem: { sendForAcceptedOrder: async () => reports++ }, client: { channels: { fetch: async id => { assert.equal(id, "vip"); return channel; } } }, sendPlayLog: async () => {},
     });
     const replies = [];
     const interaction = id => ({ customId: "accept_play_order_order", user: { id }, editReply: async value => replies.push(value) });
     if (concurrent) await Promise.all([accept(interaction("a")), accept(interaction("b"))]); else await accept(interaction("a"));
-    return { order, assignments, reports, permissionEdits, replies };
+    return { order, assignments, reports, permissionEdits, replies, buttonSyncs };
   }
   for (const opts of [{ paid: false }, { guild: "other-shop" }]) {
     const r = await runCase(opts); assert.equal(r.assignments, 0); assert.equal(r.reports, 0); assert.match(r.replies[0].content, /無法接單/);
   }
   const r = await runCase({ concurrent: true }); assert.equal(r.assignments, 1); assert.equal(r.reports, 1); assert.equal(r.permissionEdits, 1);
+  assert.equal(r.buttonSyncs, 1);
   assert.equal(r.order.status, "accepted"); assert.equal(r.order.channel_id, "vip");
 });
 test("客服選齊後本地確認報價；付款中、錯誤頻道與無效人選不更新", async () => {
