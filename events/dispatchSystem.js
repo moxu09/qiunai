@@ -56,7 +56,7 @@ const {
 } = require("../utils/paymentMethodEmojis");
 const { getOrCreateServiceOrder, transitionUnpaidOrders, createOperationGuard, isUnpaidWaitingOrder } = require("../utils/serviceOrderSafety");
 const { createPaidOrderDispatcher } = require("../utils/orderDispatchRecovery");
-const { isInChannelOrder, assertInChannelSelection, staffOrderChannelId, requiresInChannelAcceptance } = require("../utils/inChannelOrder");
+const { isInChannelOrder, isDirectAcceptanceOrder, assertInChannelSelection, staffOrderChannelId, requiresInChannelAcceptance } = require("../utils/inChannelOrder");
 const {
   getGeneralOrderAutoQuote,
   getValorantMappedCompanionRank,
@@ -1850,7 +1850,7 @@ function getSelfServiceRankFieldLabel(order) {
 }
 
 async function sendSelfServiceDispatch(order) {
-  if (isInChannelOrder(order)) throw new Error("原頻道加單不可送到外部派單區。");
+  if (isDirectAcceptanceOrder(order)) throw new Error("人工報價訂單不可送到外部派單區，請確認報價與付款後等待接單。");
   const dispatchChannel = await client.channels
     .fetch(getClaimDispatchChannelId(order))
     .catch(() => null);
@@ -5526,6 +5526,8 @@ async function sendOrderToStaffChannel(order) {
         ? requiresInChannelAcceptance(order)
           ? `${playerRoleMention} 📢 原頻道加單已付款，請按「接單」承接，並回原 VIP 房提供服務。\n原訂單頻道：https://discord.com/channels/${order.guild_id}/${order.channel_id}`
           : `✅ <@${order.customer_id}> 原頻道加單已完成付款，請在本頻道繼續處理。`
+        : requiresInChannelAcceptance(order)
+        ? `${playerRoleMention} 📢 訂單已付款，請按「接單」承接並前往原訂單頻道提供服務。\n原訂單頻道：https://discord.com/channels/${order.guild_id}/${order.channel_id}`
         : isManualDispatchOrder(order)
         ? `${preferredText} ✅ 老闆已選定陪陪並完成付款，不再開放其他人接單。`
         : order.dispatch_type === "reserve"
@@ -5542,7 +5544,7 @@ async function sendStaffOrderControlPanel(channel, order) {
     throw new Error(`訂單 ${order.order_no || order.id} 的客戶頻道不存在，無法發送客服面板`);
   }
   assertInChannelSelection(order, channel.id);
-  if (isManualDispatchOrder(order) && order.paid && (!isInChannelOrder(order) || order.preferred_player)) {
+  if (isManualDispatchOrder(order) && order.paid && !requiresInChannelAcceptance(order)) {
     const selectedIds = String(order.preferred_player || "")
       .split(",")
       .map((id) => id.trim())
@@ -7904,104 +7906,26 @@ async function submitNewOrderNote(interaction) {
   return await createWaitingQuoteOrder(interaction, flowId, pending);
 }
 
-function buildManualQuoteDispatchComponents(orderId) {
-  return [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`manual_quote_dispatch_${orderId}`)
-        .setLabel("確認報價並正式派單")
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId(`manual_quote_cancel_${orderId}`)
-        .setLabel("取消訂單")
-        .setStyle(ButtonStyle.Danger),
-    ),
-  ];
+async function sendManualQuoteDispatchPrompt(channel, order) {
+  if (order.quote_status === "quoted") return sendOrderQuotePriceConfirm(channel, order);
 }
 
-async function sendManualQuoteDispatchPrompt(channel, order, { quotedBy = null } = {}) {
-  if (isInChannelOrder(order)) {
-    if (order.quote_status === "quoted") await sendOrderQuotePriceConfirm(channel, order);
-    return;
-  }
-  const price = Number(order.final_price || order.price || 0);
-  return channel.send({
-    content: `<@${order.customer_id}> 報價已完成，請確認後正式派單。`,
-    embeds: [
-      new EmbedBuilder()
-        .setColor(QIUNAI_WATER_BLUE)
-        .setTitle("💰 報價完成｜等待正式派單")
-        .setDescription(
-          `訂單編號：${order.order_no || order.id}\n` +
-          `報價金額：NT$${price.toLocaleString("zh-TW")}\n` +
-          (quotedBy ? `報價客服：<@${quotedBy}>\n` : "系統已依現行價目表自動報價。\n") +
-          `\n按下「確認報價並正式派單」後，系統會依遊戲送到對應派單區並建立討論串。\n` +
-          `選定接單陪陪後，才會進入優惠券與付款流程。`,
-        )
-        .setTimestamp(),
-    ],
-    components: buildManualQuoteDispatchComponents(order.id),
-  });
-}
-
+// Compatibility for already-posted legacy buttons: never recreate a claim thread.
 async function confirmManualQuoteAndDispatch(interaction) {
   await deferReplyOnce(interaction);
   const orderId = interaction.customId.replace("manual_quote_dispatch_", "");
-  const { data: order, error } = await supabase
-    .from("play_orders")
-    .select("*")
-    .eq("id", orderId)
-    .maybeSingle();
-  if (error || !order || !isManualDispatchOrder(order)) {
-    return interaction.editReply({ content: "❌ 找不到這張人工下單需求。" });
+  const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+  if (error || !order || !isManualDispatchOrder(order)) return interaction.editReply({ content: "❌ 找不到這張人工下單需求。" });
+  if (!canCustomerOrStaffSubmit(interaction, order.customer_id)) return interaction.editReply({ content: "❌ 只有下單者、客服或管理員可以確認報價。" });
+  if (order.paid) return interaction.editReply({ content: "✅ 此單已付款，請使用原本的接單訊息。" });
+  try { assertInChannelSelection(order, interaction.channelId || interaction.channel?.id); }
+  catch (error) { return interaction.editReply({ content: `❌ ${error.message}` }); }
+  if (order.quote_status !== "quoted" || order.status !== "quoted" || Number(order.original_price || order.price || 0) <= 0) {
+    return interaction.editReply({ content: "這張訂單已進入其他步驟，請客服確認目前的報價與付款狀態。" });
   }
-  if (isInChannelOrder(order)) {
-    return interaction.editReply({ content: "這張訂單在原頻道內選人及付款，請使用客服選擇陪陪與確認報價按鈕。" });
-  }
-  if (!canCustomerOrStaffSubmit(interaction, order.customer_id)) {
-    return interaction.editReply({ content: "❌ 只有下單者、客服或管理員可以確認正式派單。" });
-  }
-  if (order.paid) {
-    return interaction.editReply({ content: "❌ 這張訂單已經付款，不能重新派單。" });
-  }
-  if (getClaimDispatchStatuses(order).includes(order.quote_status) || order.preferred_player) {
-    return interaction.editReply({ content: "⚠️ 這張訂單已正式派出，請使用原本的討論串。" });
-  }
-  if (order.quote_status !== "quoted" || Number(order.final_price || order.price || 0) <= 0) {
-    return interaction.editReply({ content: "❌ 這張訂單尚未完成報價。" });
-  }
-  const dispatchAtIso = new Date().toISOString();
-  const dispatchNote = `${String(order.note || "").replace(/\[DISPATCH_AT:[^\]]+\]/g, "").trim()} [DISPATCH_AT:${dispatchAtIso}]`;
-  const { data: dispatchOrder, error: updateError } = await supabase
-    .from("play_orders")
-    .update({
-      status: "pending",
-      quote_status: "manual_dispatching",
-      confirmed_by_customer: true,
-      preferred_player: null,
-      note: dispatchNote,
-      updated_at: dispatchAtIso,
-    })
-    .eq("id", order.id)
-    .eq("quote_status", "quoted")
-    .eq("paid", false)
-    .select()
-    .maybeSingle();
-  if (updateError || !dispatchOrder) {
-    return interaction.editReply({ content: "⚠️ 訂單狀態已更新，請勿重複操作。" });
-  }
-  try {
-    await sendSelfServiceDispatch(dispatchOrder);
-    await interaction.message?.edit({ components: [] }).catch(() => null);
-    return interaction.editReply({ content: "✅ 已正式派單，等待陪陪登記接單。" });
-  } catch (dispatchError) {
-    await supabase
-      .from("play_orders")
-      .update({ quote_status: "quoted", status: "quoted", updated_at: new Date().toISOString() })
-      .eq("id", order.id)
-      .eq("quote_status", "manual_dispatching");
-    return interaction.editReply({ content: `❌ 正式派單失敗：${dispatchError.message || dispatchError}` });
-  }
+  await sendOrderQuotePriceConfirm(interaction.channel, order);
+  await interaction.message?.edit({ components: [] }).catch(() => null);
+  return interaction.editReply({ content: "✅ 請按「確認報價金額」繼續選擇優惠券與付款方式，付款後送至員工群接單專區。" });
 }
 
 async function cancelManualQuotedOrder(interaction) {
@@ -8177,7 +8101,7 @@ async function createWaitingQuoteOrder(interaction, flowId, pending) {
       }
     )
     .setDescription(autoQuote.ok
-      ? `系統已依現行價目表自動報價 NT$${autoPrice.toLocaleString("zh-TW")}。\n${isInChannelOrder(order) ? "請闆闆在本頻道確認報價並付款。" : "請確認報價後正式派單；選定陪陪後才會進入付款。"}`
+      ? `系統已依現行價目表自動報價 NT$${autoPrice.toLocaleString("zh-TW")}。\n${isInChannelOrder(order) ? "請闆闆在本頻道確認報價並付款。" : "請確認報價與付款；付款後送至員工群接單專區。"}`
       : `系統無法自動計算：${autoQuote.reason}\n已轉交客服報價；客服填寫金額後，系統會讓你選擇優惠券與付款方式。`)
     .setTimestamp();
 
@@ -8339,7 +8263,7 @@ async function sendStaffQuotePanel(order, options = {}) {
       (isInChannelOrder(order)
         ? "請客服確認金額，再由闆闆在本頻道確認報價與付款；此房間會持續保留。"
         : isManualDispatchOrder(order)
-        ? `請客服只需確認金額；老闆確認報價後，系統會自動派單選人。`
+        ? `請客服確認金額，再由闆闆確認報價與付款，付款後送至員工群接單專區。`
         : `請客服確認陪陪與金額後，再讓闆闆選擇付款方式。`),
     embeds: [
       new EmbedBuilder()
@@ -8390,7 +8314,7 @@ async function sendStaffQuotePanel(order, options = {}) {
           }
         )
         .setDescription(
-          `這則訊息是客服操作用。\n` + `目前客人尚未付款，也尚未正式派單。`
+          `這則訊息是客服操作用。\n` + `目前客人尚未付款，付款後送至員工群接單專區。`
         )
         .setTimestamp(),
     ],
@@ -8520,7 +8444,7 @@ async function submitStaffQuotePrice(interaction) {
       quotedBy: interaction.user.id,
     });
     return interaction.editReply({
-      content: `✅ 已填寫報價 NT$${price.toLocaleString("zh-TW")}，${isInChannelOrder(order) ? "等待闆闆在本頻道確認報價與付款。" : "等待老闆確認正式派單。"}`,
+      content: `✅ 已填寫報價 NT$${price.toLocaleString("zh-TW")}，等待闆闆在本頻道確認報價與付款。`,
     });
   }
 
@@ -8537,7 +8461,7 @@ async function sendOrderQuotePriceConfirm(channel, order) {
     content: `<@${order.customer_id}> 請確認這張訂單的報價金額。`,
     embeds: [new EmbedBuilder().setColor(QIUNAI_WATER_BLUE)
       .setTitle("💰 請顧客確認報價")
-      .setDescription(`訂單編號：${order.order_no || order.id}\n金額：NT$${price.toLocaleString("zh-TW")}\n\n${isInChannelOrder(order) ? "確認後選擇優惠券與付款方式；訂單會留在本頻道處理。" : "確認後選擇優惠券與付款方式；付款完成後才會自動派單。"}`)
+      .setDescription(`訂單編號：${order.order_no || order.id}\n金額：NT$${price.toLocaleString("zh-TW")}\n\n${isInChannelOrder(order) ? "確認後選擇優惠券與付款方式；訂單會留在本頻道處理。" : "確認後選擇優惠券與付款方式；付款完成後送至員工群接單專區。"}`)
       .setTimestamp()],
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`quote_confirm_price_${order.id}_${price}`).setLabel("確認報價金額").setStyle(ButtonStyle.Success),
@@ -9362,6 +9286,8 @@ async function sendCustomerFinalConfirm(channel, order) {
       await channel?.send?.({
         content: isInChannelOrder(order)
           ? `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單會在本頻道處理。原房會持續保留。`
+          : isDirectAcceptanceOrder(order)
+          ? `<@${order.customer_id}> ✅ 報價已確認、付款已完成，請等待員工接單專區的陪陪接單。`
           : `<@${order.customer_id}> ✅ 報價已確認、付款已完成，訂單${result.alreadyDispatched ? "已派單" : "已自動送往指定派單區"}。`,
       });
     } catch (error) {
