@@ -23,9 +23,13 @@ function requiresInChannelAcceptance(order) {
   return isInChannelOrder(order) && !String(order.preferred_player || "").trim();
 }
 
-function staffOrderChannelId(order, fallback) {
+function staffOrderChannelId(order, fallback, acceptanceChannelId) {
   if (!isInChannelOrder(order)) return fallback;
   if (!order.channel_id) throw new Error("原頻道資料遺失，已停止送出訂單。");
+  if (requiresInChannelAcceptance(order)) {
+    if (!acceptanceChannelId) throw new Error("員工接單專區尚未設定，已停止送出訂單。");
+    return acceptanceChannelId;
+  }
   return order.channel_id;
 }
 

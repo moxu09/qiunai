@@ -5514,7 +5514,7 @@ async function sendOrderToStaffChannel(order) {
     content:
       isInChannelOrder(order)
         ? requiresInChannelAcceptance(order)
-          ? `📢 原頻道加單已付款，請在本頻道繼續接單及服務。`
+          ? `${playerRoleMention} 📢 原頻道加單已付款，請按「接單」承接，並回原 VIP 房提供服務。\n原訂單頻道：https://discord.com/channels/${order.guild_id}/${order.channel_id}`
           : `✅ <@${order.customer_id}> 原頻道加單已完成付款，請在本頻道繼續處理。`
         : isManualDispatchOrder(order)
         ? `${preferredText} ✅ 老闆已選定陪陪並完成付款，不再開放其他人接單。`
