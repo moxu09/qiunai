@@ -36,8 +36,7 @@ test("原房付款要求同頻道，不強制選人，遺失目的地不可退�
   for (const preferred_player of ["a", "a,a"]) assert.throws(() => policy.assertInChannelSelection({ ...privateOrder, preferred_player }), /選齊/);
   assert.equal(policy.staffOrderChannelId(privateOrder, "public"), "vip");
   assert.throws(() => policy.staffOrderChannelId({ ...privateOrder, channel_id: null }, "public"), /停止/);
-  assert.equal(policy.staffOrderChannelId({ note: "[MANUAL_DISPATCH]", channel_id: "ticket" }, "game", "staff"), "staff");
-  assert.equal(policy.isInChannelOrder({ note: "[MANUAL_DISPATCH]" }), false);
+  assert.equal(policy.staffOrderChannelId({ note: "[MANUAL_DISPATCH]" }, "public"), "public");
 });
 test("新增訂單草稿保留原房模式，其他下單入口維持原流程", async () => {
   for (const inChannelOnly of [true, false]) {
@@ -176,15 +175,13 @@ test("無指定陪陪的原房訂單保留客服面板，尚未接單不捏造�
   await send({ id: "vip", isTextBased: () => true, send: async value => messages.push(value) }, { ...privateOrder, preferred_player: null, paid: true });
   assert.equal(messages.length, 1); assert.equal(messages[0].components[1].components[0].data.custom_id, "complete_order_order");
 });
-test("舊正式派單按鈕改為確認報價，不建立討論串或更動付款", async () => {
-  let reply, confirms=0, edits=0; const database=db({ ...privateOrder });
-  await fn("confirmManualQuoteAndDispatch", { supabase: database, deferReplyOnce: async () => {}, isManualDispatchOrder: () => true,
-    canCustomerOrStaffSubmit: () => true, sendOrderQuotePriceConfirm: async () => confirms++,
-  })({ customId: "manual_quote_dispatch_order", channelId:"vip", channel:{id:"vip"}, message:{edit:async()=>edits++}, editReply:async value=>{reply=value;} });
-  assert.equal(confirms,1); assert.equal(edits,1); assert.match(reply.content,/付款後送至員工群接單專區/);
-  assert.equal(database.calls.filter(c=>c[0]==="update").length,0);
+test("舊正式派單按鈕無法把原房單送出去", async () => {
+  let reply;
+  await fn("confirmManualQuoteAndDispatch", { supabase: db({ ...privateOrder }), deferReplyOnce: async () => {}, isManualDispatchOrder: () => true })({
+    customId: "manual_quote_dispatch_order", editReply: async value => { reply = value; },
+  });
+  assert.match(reply.content, /原頻道內選人/);
 });
-
 test("已付款原房單加入選定陪陪、發報單及管理面板，其他頻道不可接手", async () => {
   const database = db({ ...privateOrder, paid: true }); const permissions = []; const reports = []; const messages = [];
   const send = fn("sendStaffOrderControlPanel", { supabase: database, isManualDispatchOrder: () => true,
@@ -215,13 +212,26 @@ test("舊關閉與存檔刪除按鈕遇原房訂單停止，查詢失敗亦不�
   assert.match(index, /if \(isInChannelOrder\(order\)\) \{\s*await interaction.channel.send\([\s\S]*?原房會持續保留/);
 });
 
-test("自助轉人工報價直接確認金額，付款後出現在員工接單專區",async()=>{
- const order={...privateOrder,note:"[SELF_SERVICE_MANUAL] [MANUAL_DISPATCH]",preferred_player:null,paid:false};
- let confirms=0; await fn("sendManualQuoteDispatchPrompt",{sendOrderQuotePriceConfirm:async()=>confirms++})({},order);assert.equal(confirms,1);
- const destinations=[],sent=[];await fn("sendOrderToStaffChannel",{process:{env:{PLAYER_ORDER_CHANNEL:"acceptance"}},client:{channels:{fetch:async id=>{destinations.push(id);return{send:async m=>sent.push(m)};}}},
- isManualDispatchOrder:()=>true,getManualDispatchChannelId:()=>"game-dispatch",buildPreferredPlayerText:()=>"不指定",isManualQuoteSelfServiceOrder:()=>true,getSelfServiceRankFieldLabel:()=>"段位",getPublicOrderNote:()=>"需求"})({...order,paid:true});
- assert.deepEqual(destinations,["acceptance"]);assert.equal(sent[0].components[0].components[0].data.custom_id,"accept_play_order_order");
- assert(!/討論串|PM|正式派單/.test(sent[0].content));assert.equal(policy.isInChannelOrder(order),false);
- const panels=[];await fn("sendStaffOrderControlPanel",{isManualDispatchOrder:()=>true})({id:"vip",isTextBased:()=>true,send:async m=>panels.push(m)}, {...order,paid:true});assert.equal(panels.length,1);
- const forbidden=fn("sendSelfServiceDispatch",{client:{channels:{fetch:()=>{throw Error("不應送出");}}}});await assert.rejects(forbidden(order),/不可送到外部/);
+test("自助下單及轉人工報價維持原流程，只有指令原房單送直接接單",async()=>{
+ const order={...privateOrder,note:"[SELF_SERVICE_MANUAL] [MANUAL_DISPATCH]",preferred_player:null};
+ assert.equal(policy.isInChannelOrder(order),false);
+ assert.equal(policy.requiresInChannelAcceptance(order),false);
+ assert.equal(policy.staffOrderChannelId(order,"game-dispatch","acceptance"),"game-dispatch");
+ const messages=[];let directConfirms=0;
+ await fn("sendManualQuoteDispatchPrompt",{sendOrderQuotePriceConfirm:async()=>directConfirms++,
+  buildManualQuoteDispatchComponents:id=>{assert.equal(id,order.id);return [];},
+ })({send:async m=>messages.push(m)},order);
+ assert.equal(directConfirms,0);assert.match(messages[0].embeds[0].data.title,/等待正式派單/);
+ assert.match(messages[0].embeds[0].data.description,/選定接單陪陪後/);
+ const database=db({...order});let dispatches=0;let reply;
+ await fn("confirmManualQuoteAndDispatch",{supabase:database,deferReplyOnce:async()=>{},isManualDispatchOrder:()=>true,
+  canCustomerOrStaffSubmit:()=>true,getClaimDispatchStatuses:()=>['manual_dispatching','manual_choosing_open'],
+  sendSelfServiceDispatch:async()=>dispatches++,
+ })({customId:"manual_quote_dispatch_order",user:{id:"customer"},message:{edit:async()=>{}},editReply:async m=>{reply=m;}});
+ assert.equal(dispatches,1);assert.match(reply.content,/已正式派單/);
+ assert.equal(database.calls.find(c=>c[0]==="update")[1].quote_status,"manual_dispatching");
+ const native={note:"[SELF_SERVICE]",channel_id:"self-room"};
+ assert.equal(policy.requiresInChannelAcceptance(native),false);
+ assert.equal(policy.staffOrderChannelId(native,"self-service","acceptance"),"self-service");
+ assert.equal(policy.requiresInChannelAcceptance({...privateOrder,preferred_player:null}),true);
 });

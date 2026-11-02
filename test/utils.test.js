@@ -785,6 +785,9 @@ test("人工下單依遊戲分流，先報價與派單選人後才付款", () =>
     path.join(__dirname, "..", "events", "dispatchSystem.js"),
     "utf8",
   );
+  assert.match(source, /setCustomId\(`manual_quote_dispatch_\$\{orderId\}`\)/);
+  assert.match(source, /setLabel\("確認報價並正式派單"\)/);
+  assert.match(source, /選定接單陪陪後，才會進入優惠券與付款流程/);
   assert.match(source, /已將接單方式由/);
   assert.match(source, /確認選擇 PM 陪陪/);
   assert.match(source, /files: \[\{ attachment: SELF_SERVICE_FAILED_IMAGE, name: "dispatch-failed\.png" \}\]/);
