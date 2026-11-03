@@ -9,9 +9,12 @@ test('收據顯示預計點數，舊格式不受影響',()=>{
   assert.match(receiptSvg({...data,estimatedPoints:0}),/預計獲得消費點數：0 點/);
 });
 test('實際通知使用入帳紀錄並明示欠點抵扣，不當作錢包',()=>{
-  const msg=completionMessage({id:'order',order_no:'Q123'},{points:10,debt_repaid:3});
+  const msg=completionMessage({id:'order',order_no:'Q123',paid_at:'2026-11-03T07:09:48.469701'},{points:10,debt_repaid:3});
   assert.match(msg,/本筆實際入帳 7 點/);assert.match(msg,/抵扣先前退單欠點 3/);
+  assert.match(msg,/消費時間：2026\/11\/03 15:09:48（台北時間）/);
   assert.match(msg,/<#1513531969315537096>/);assert.ok(msg.endsWith('回饋編號：order'));
+  assert.doesNotMatch(completionMessage({id:'legacy'},{points:1,created_at:'2026-11-04T00:00:00Z'}),/消費時間：/);
+  assert.doesNotMatch(completionMessage({id:'invalid',paid_at:'invalid'},{points:1}),/消費時間：/);
 });
 function dbFor(tables, seen=[]){return{from(table){const filters=[];const q={};let limit=Infinity;
   for(const name of ['select','order'])q[name]=()=>q;

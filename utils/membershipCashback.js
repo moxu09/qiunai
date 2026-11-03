@@ -1,6 +1,6 @@
 const { createHash } = require('node:crypto');
 const { createReceiptStore } = require('./receiptRecovery');
-const { formatTaipeiTime } = require('./taipeiTime');
+const { formatTaipeiTime, parseDatabaseTime } = require('./taipeiTime');
 const { MEMBERSHIP_LEVELS, calculateMembershipCashback } = require('../config/qiunaiMembership20261016');
 const GUILD_ID = '1206138511535898654';
 const BANK_CHANNEL_ID = '1513531969315537096';
@@ -39,7 +39,10 @@ async function getPointSummary(db, userId) {
 function completionMessage(order, award) {
   const points = Number(award.points);
   const net = Math.round((points - Number(award.debt_repaid || 0)) * 100) / 100;
+  // Backfilled cashback rows may be created long after payment; only use the order's paid_at.
+  const paidAt = parseDatabaseTime(order.paid_at);
   return `🌧️ 小奈｜訂單消費回饋\n訂單：${order.order_no || order.id}\n` +
+    (paidAt ? `消費時間：${formatTaipeiTime(paidAt)}\n` : '') +
     `訂單已結束，消費回饋 ${points} 點` +
     (award.debt_repaid ? `（抵扣先前退單欠點 ${award.debt_repaid} 點）` : '') +
     `，本筆實際入帳 ${net} 點。\n` +
@@ -55,7 +58,7 @@ function createCashbackNotifier(db, client, logger = console, store = createRece
     if (result.error) throw result.error;
     const award = result.data;
     if (!award || award.reversed_at) return false;
-    const found = await db.from('play_orders').select('id,order_no,guild_id,customer_id,paid,status,is_deleted')
+    const found = await db.from('play_orders').select('id,order_no,guild_id,customer_id,paid,paid_at,status,is_deleted')
       .eq('id',orderId).maybeSingle();
     if (found.error) throw found.error;
     const order = found.data;
