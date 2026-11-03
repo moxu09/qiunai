@@ -28,7 +28,7 @@ function cancelFixture(extra = {}, authorized = true) {
   const pendingTips = new Map([['buyer_1000',tip]]),sent=[];
   const fn=source.slice(source.indexOf('async function cancelTipPaymentChoice('),
     source.indexOf('async function getPanelMessage('));
-  const ctx={structuredClone,pendingTips,canAdvanceTipFlow:()=>authorized,
+  const ctx={structuredClone,getPendingTip:id=>pendingTips.get(id),closePendingTip:id=>pendingTips.delete(id),canAdvanceTipFlow:()=>authorized,
     setPendingTip:(id,data)=>pendingTips.set(id,data),formatTipStaffMentions:()=>'<@staff>',
     getTipStaffIds:()=>['staff'],sendTipPaymentSelectPrompt:async(channel,id)=>sent.push(id)};
   vm.createContext(ctx);vm.runInContext(fn,ctx);
@@ -72,7 +72,7 @@ test('兩次同時點付款只執行一次銀行前置檢查，第二次不可�
   const pending = new Promise(resolve=>{release=resolve});
   let preflightCount=0;
   const tip = {tipperId:'buyer',item:'煙花',amount:99,selectedStaffIds:['staff']};
-  const ctx = { pendingTips:new Map([['tip',tip]]),
+  const ctx = { getPendingTip:id=>id==='tip'?tip:undefined,
     getPaymentMethodSelection:()=>({entityId:'tip',paymentMethod:'匯款'}),
     canAdvanceTipFlow:()=>true,getTipStaffIds:()=>['staff'],hasSelfTip:()=>false,
     formatTipStaffMentions:()=>'<@staff>',refreshTipTotals:()=>[{amount:99}],

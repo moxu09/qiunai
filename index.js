@@ -75,6 +75,7 @@ const {
 } = require("./utils/employmentReportChannels");
 const { parseAllowedServices } = require("./utils/services");
 const { ORDER_FLOW_TTL_MS } = require("./utils/orderFlow");
+const { createServiceFlowStore } = require("./utils/serviceFlowStore");
 const { scheduleChannelDeletion } = require("./utils/channelCleanup");
 const { createCustomerServiceTickets } = require("./events/customerServiceTickets");
 const { createQiunaiReferrals } = require("./events/qiunaiReferrals");
@@ -532,6 +533,7 @@ const STAFF_ROLE = process.env.STAFF_ROLE;
 const claimedDrops = createTtlSet(24 * 60 * 60 * 1000, 100000);
 const dropCooldown = new Map();
 const pendingTips = new Map();
+const tipFlows = createServiceFlowStore(supabase, { organization: "qiunai_tip_orders" });
 const manualTipConfirmations = new Set();
 const pendingChannelDeletes = new Map();
 const pendingManualReviewSurveys = new Map();
@@ -590,8 +592,27 @@ function getPendingManualReviewSurvey(surveyId, customerId, message, staffId) {
   });
 }
 
-function setPendingTip(tipId, tipData) {
+// 手動輸入的舊表單使用獨立 ID，保留原有處理方式。
+function isStoredTipFlow(tipId) {
+  return /^\d{17,20}_\d{13}$/.test(String(tipId));
+}
+
+async function getPendingTip(tipId) {
+  return isStoredTipFlow(tipId) ? tipFlows.get(tipId) : pendingTips.get(tipId);
+}
+
+async function closePendingTip(tipId, tipData) {
+  if (isStoredTipFlow(tipId)) await tipFlows.delete(tipId, tipData);
+  else pendingTips.delete(tipId);
+}
+
+async function setPendingTip(tipId, tipData) {
   if (tipData && !tipData.flowId) tipData.flowId = String(tipId);
+  if (isStoredTipFlow(tipId)) {
+    const ttl = tipData.keepForPayment || tipData.crownOrder ? TIP_HARD_TTL_MS : ORDER_FLOW_TTL_MS;
+    const startedAt = Number(String(tipId).split("_")[1]);
+    return tipFlows.set(tipId, tipData, { expiresAt: startedAt + ttl });
+  }
   const shouldScheduleExpiry = !pendingTips.has(tipId);
   pendingTips.set(tipId, tipData);
   if (shouldScheduleExpiry) {
@@ -613,6 +634,8 @@ function getTipGiftByKey(key) {
   return findTipGiftByKey(TIP_GIFTS, key);
 }
 function canAdvanceTipFlow(interaction, tipData) {
+  if (tipData?.channelId && tipData.channelId !== interaction.channelId) return false;
+  if (tipData?.guildId && tipData.guildId !== interaction.guildId) return false;
   // 已開啟的舊表單也必須遵守付款鎖，不能在付款後改禮物、數量或播報。
   const paymentAction = /^(confirm_tip_|cancel_tip_|tip_payment_)/.test(interaction.customId || "");
   if ((tipData?.checkoutStarted || tipData?.paymentMethod || tipData?.paid || tipData?.walletPaid) && !paymentAction) {
@@ -1062,7 +1085,7 @@ async function sendTipStaffSelectionStatus(channel, tipId, tipData) {
   });
 
   tipData.staffSelectionMessageId = message.id;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
 }
 async function sendTipStaffSelectionMenus(channel, content, rows) {
   for (const [index, row] of rows.entries()) {
@@ -1102,7 +1125,7 @@ function buildTipPaymentMenu(tipId, salaryDeductionEnabled = false) {
   );
 }
 async function sendTipPaymentSelectPrompt(channel, tipId, selectedStaffText) {
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   const salaryEligible = await dispatchSystem.isActivePaymentStaff(
     tipData?.tipperId || tipData?.createdBy,
   );
@@ -1122,7 +1145,7 @@ async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
   ) {
     tipData.broadcastEnabled = false;
     tipData.broadcastPreferenceCompleted = true;
-    setPendingTip(tipId, tipData);
+    await setPendingTip(tipId, tipData);
     return sendTipPaymentSelectPrompt(
       channel,
       tipId,
@@ -1131,7 +1154,7 @@ async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
   }
 
   tipData.broadcastPreferenceShown = true;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
   await channel.send({
     content: `<@${tipData.tipperId}> 是否需要將這次打賞播報到秋奈公開打賞頻道？`,
     components: appendTipBackButton([
@@ -1155,7 +1178,7 @@ async function handleTipBroadcastChoice(interaction) {
     wantsBroadcast ? "tip_broadcast_yes_" : "tip_broadcast_no_",
     "",
   );
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData) {
     return interaction.editReply({
       content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
@@ -1180,7 +1203,7 @@ async function handleTipBroadcastChoice(interaction) {
     tipData.broadcastEnabled = false;
     tipData.broadcastAnonymous = false;
     tipData.broadcastPreferenceCompleted = true;
-    setPendingTip(tipId, tipData);
+    await setPendingTip(tipId, tipData);
     await sendTipPaymentSelectPrompt(
       interaction.channel,
       tipId,
@@ -1219,7 +1242,7 @@ async function handleTipBroadcastPrivacy(interaction) {
     anonymous ? "tip_broadcast_anonymous_" : "tip_broadcast_public_",
     "",
   );
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData) {
     return interaction.editReply({
       content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
@@ -1234,7 +1257,7 @@ async function handleTipBroadcastPrivacy(interaction) {
   tipData.broadcastEnabled = true;
   tipData.broadcastAnonymous = anonymous;
   tipData.broadcastPreferenceCompleted = true;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
   await interaction.message
     .edit({
       content: anonymous
@@ -1494,22 +1517,14 @@ async function sendTipGiftSelect(channel, tipId) {
 async function startTipFlowInChannel(channel, user) {
   const tipId = `${user.id}_${Date.now()}`;
 
-  setPendingTip(tipId, {
+  await setPendingTip(tipId, {
     flowId: tipId,
     createdBy: user.id,
     tipperId: user.id,
     channelId: channel.id,
+    guildId: channel.guildId,
   });
 
-  setTimeout(
-    () => {
-      const currentTip = pendingTips.get(tipId);
-      if (currentTip?.keepForPayment) return;
-
-      pendingTips.delete(tipId);
-    },
-    ORDER_FLOW_TTL_MS,
-  );
 
   await sendTipGiftSelect(channel, tipId);
 
@@ -1517,11 +1532,12 @@ async function startTipFlowInChannel(channel, user) {
 }
 async function startCrownFlowInChannel(channel, user) {
   const tipId = `${user.id}_${Date.now()}`;
-  setPendingTip(tipId, {
+  await setPendingTip(tipId, {
     flowId: tipId,
     createdBy: user.id,
     tipperId: user.id,
     channelId: channel.id,
+    guildId: channel.guildId,
     crownOrder: true,
   });
 
@@ -1581,7 +1597,7 @@ async function handleCrownPackageSelect(interaction) {
     await interaction.deferReply({ flags: 64 });
   }
   const tipId = interaction.customId.replace("crown_package_", "");
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData || !tipData.crownOrder) {
     return interaction.editReply({ content: "❌ 冠名單流程已過期，請重新建立。" });
   }
@@ -1603,7 +1619,7 @@ async function handleCrownPackageSelect(interaction) {
     customPriceRequired: crownPackage.custom,
     item: `冠名單｜${crownPackage.name}`,
   });
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
 
   const players = await listActiveStaff();
   const seen = new Set();
@@ -1693,7 +1709,7 @@ async function handleTipStaffPage(interaction) {
     return interaction.editReply({ content: "❌ 陪陪分頁資料不正確，請重新建立打賞流程。" });
   }
   const [, tipId, rawPage] = match;
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData || !Array.isArray(tipData.staffOptions) || !tipData.staffOptions.length) {
     return interaction.editReply({ content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。" });
   }
@@ -1703,7 +1719,7 @@ async function handleTipStaffPage(interaction) {
 
   const pageData = buildTipStaffPage(tipId, tipData.staffOptions, Number(rawPage));
   tipData.staffPage = pageData.page;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
   await interaction.message.edit({
     content:
       `✅ 已選擇 ${getTipGiftSelections(tipData).length} 項禮物：\n${getTipGiftListText(tipData)}\n\n` +
@@ -1724,7 +1740,7 @@ async function handleTipGiftSelect(interaction) {
 
   const tipId = interaction.customId.replace("tip_gift_", "");
 
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
 
   if (!tipData) {
     return interaction.editReply({
@@ -1759,7 +1775,7 @@ async function handleTipGiftSelect(interaction) {
   tipData.customPriceRequired = gifts.some((gift) => gift.customPrice);
   tipData.sharedQuantities = gifts.map(() => 1);
   tipData.quantitiesByStaff = {};
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
 
   const players = await listActiveStaff();
 
@@ -1802,7 +1818,7 @@ async function handleTipGiftSelect(interaction) {
   }
   tipData.staffOptions = playerOptions;
   tipData.staffPage = 0;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
   const pageData = buildTipStaffPage(tipId, playerOptions, 0);
   await interaction.channel.send({
     content:
@@ -1832,7 +1848,7 @@ async function handleTipStaffSelect(interaction) {
     !isSearchResult && rawTipId.includes("_page_")
       ? rawTipId.split("_page_")[0]
       : rawTipId;
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
 
   if (!tipData) {
     return interaction.editReply({
@@ -1871,7 +1887,7 @@ async function handleTipStaffSelect(interaction) {
 
   tipData.selectedStaffId = selectedStaffIds[0];
   tipData.selectedStaffIds = selectedStaffIds;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
 
   await updateTipStaffSelectionStatus(interaction.channel, tipId, tipData);
 
@@ -1884,7 +1900,7 @@ async function handleTipStaffSelect(interaction) {
 
 async function openTipStaffSearchModal(interaction) {
   const tipId = interaction.customId.replace("tip_staff_search_", "");
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
 
   if (!tipData) {
     return interaction.reply({
@@ -1924,7 +1940,7 @@ async function openTipStaffSearchModal(interaction) {
 async function handleTipStaffSearchModal(interaction) {
   await interaction.deferReply({ flags: 64 });
   const tipId = interaction.customId.replace("tip_staff_search_modal_", "");
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
 
   if (!tipData) {
     return interaction.editReply({
@@ -1973,7 +1989,7 @@ async function handleTipStaffSearchModal(interaction) {
         ];
     tipData.selectedStaffId = selectedStaffIds[0];
     tipData.selectedStaffIds = selectedStaffIds;
-    setPendingTip(tipId, tipData);
+    await setPendingTip(tipId, tipData);
     await updateTipStaffSelectionStatus(interaction.channel, tipId, tipData);
   }
 
@@ -2029,7 +2045,7 @@ async function handleTipStaffSearchModal(interaction) {
 
 async function openTipStaffRemoveMenu(interaction) {
   const tipId = interaction.customId.replace("tip_staff_remove_", "");
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData) {
     return interaction.reply({
       content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
@@ -2077,7 +2093,7 @@ async function openTipStaffRemoveMenu(interaction) {
 async function handleTipStaffRemoveSelect(interaction) {
   await interaction.deferUpdate();
   const tipId = interaction.customId.replace("tip_staff_remove_select_", "");
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData || !canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({
       content: "❌ 這筆打賞流程已過期，或你沒有操作權限。",
@@ -2093,7 +2109,7 @@ async function handleTipStaffRemoveSelect(interaction) {
   if (tipData.quantitiesByStaff) {
     for (const staffId of removedIds) delete tipData.quantitiesByStaff[staffId];
   }
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
   await updateTipStaffSelectionStatus(interaction.channel, tipId, tipData);
   return interaction.editReply({
     content: `✅ 已移除：${formatTipStaffMentions([...removedIds])}`,
@@ -2122,7 +2138,7 @@ async function requestCustomTipPrice(channel, tipId, tipData) {
     components: priceRows,
   });
   tipData.customPriceMessageId = priceMessage.id;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
 }
 
 async function continueCrownOrder(channel, tipId, tipData) {
@@ -2131,7 +2147,7 @@ async function continueCrownOrder(channel, tipId, tipData) {
     return "✅ 尾綴設定已完成，請等待客服議定自定冠內容。";
   }
   updateCrownOrderItem(tipData);
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
   await sendTipPaymentSelectPrompt(
     channel,
     tipId,
@@ -2170,7 +2186,7 @@ async function handleTipBack(interaction) {
   await interaction.deferReply({ flags: 64 });
   const match = interaction.customId.match(/^tip_back_(gift|staff|quantity|broadcast)_(.+)$/);
   const tipId = match?.[2];
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData || !canAdvanceTipFlow(interaction, tipData) ||
       (tipData.channelId && tipData.channelId !== interaction.channel.id)) {
     return interaction.editReply({ content: "此步驟已失效，或你沒有操作權限，請使用最新的打賞訊息。" });
@@ -2179,8 +2195,8 @@ async function handleTipBack(interaction) {
   try { next = rewindTipFlow(tipData, match[1]); }
   catch (error) { return interaction.editReply({ content: error.message }); }
   // 換流程ID令所有舊按鈕與已開啟的舊表單立即失效，避免舊金額覆蓋新設定。
-  pendingTips.delete(tipId);
-  setPendingTip(next.flowId, next);
+  await closePendingTip(tipId, tipData);
+  await setPendingTip(next.flowId, next);
   await interaction.message.edit({ components: [] }).catch(() => {});
   if (match[1] === "gift") await sendTipGiftSelect(interaction.channel, next.flowId);
   else if (match[1] === "staff") {
@@ -2198,7 +2214,7 @@ async function openTipQuantityModal(interaction) {
     separate ? "tip_quantity_separate_" : "tip_quantity_same_",
     "",
   );
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData || !canAdvanceTipFlow(interaction, tipData)) {
     return interaction.reply({
       content: "❌ 打賞流程已失效，或你沒有操作權限。",
@@ -2246,7 +2262,7 @@ async function handleTipQuantityModal(interaction) {
     separate ? "tip_quantity_modal_separate_" : "tip_quantity_modal_same_",
     "",
   );
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData || !canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({
       content: "❌ 打賞流程已失效，或你沒有操作權限。",
@@ -2293,7 +2309,7 @@ async function handleTipQuantityModal(interaction) {
   const allocations = refreshTipTotals(tipData);
   // 全部禮物都填 0 的陪陪不列入收款、播報及薪資受賞名單。
   tipData.selectedStaffIds = allocations.map((allocation) => allocation.staffId);
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
   if (interaction.message) {
     await interaction.message.edit({ components: [] }).catch(() => {});
   }
@@ -2324,7 +2340,7 @@ async function handleCrownSuffixChoice(interaction) {
     wantsSuffix ? "crown_suffix_yes_" : "crown_suffix_no_",
     "",
   );
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData?.crownOrder || !canAdvanceTipFlow(interaction, tipData)) {
     return interaction.reply({ content: "❌ 冠名單已失效或你沒有操作權限。", flags: 64 });
   }
@@ -2347,7 +2363,7 @@ async function handleCrownSuffixChoice(interaction) {
   }
   tipData.changeSuffixes = false;
   tipData.staffSuffix = null;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
   await interaction.update({ content: "✅ 已選擇不修改陪陪尾綴", components: [] });
   return interaction.followUp({
     content: await continueCrownOrder(interaction.channel, tipId, tipData),
@@ -2358,13 +2374,13 @@ async function handleCrownSuffixChoice(interaction) {
 async function handleCrownSuffixModal(interaction) {
   await interaction.deferReply({ flags: 64 });
   const tipId = interaction.customId.replace("crown_suffix_modal_", "");
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
   if (!tipData?.crownOrder || !canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({ content: "❌ 冠名單已失效或你沒有操作權限。" });
   }
   tipData.changeSuffixes = true;
   tipData.staffSuffix = interaction.fields.getTextInputValue("staff_suffix").trim();
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
   if (tipData.suffixMessageId) {
     const suffixMessage = await interaction.channel.messages
       .fetch(tipData.suffixMessageId)
@@ -2382,7 +2398,7 @@ async function handleCrownSuffixModal(interaction) {
 
 async function openTipCustomPriceModal(interaction) {
   const tipId = interaction.customId.replace("tip_custom_price_", "");
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
 
   if (!isAdminOrStaff(interaction)) {
     return interaction.reply({
@@ -2439,7 +2455,7 @@ async function handleTipCustomPriceModal(interaction) {
     "tip_custom_price_modal_",
     "",
   );
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
 
   if (!isAdminOrStaff(interaction)) {
     return interaction.editReply({
@@ -2495,7 +2511,7 @@ async function handleTipCustomPriceModal(interaction) {
   tipData.customPriceSet = true;
   if (tipData.crownOrder) updateCrownOrderItem(tipData);
   else refreshTipTotals(tipData);
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
 
   if (tipData.customPriceMessageId) {
     const message = await interaction.channel.messages
@@ -2537,7 +2553,7 @@ async function handleTipCustomPriceModal(interaction) {
 
 async function handleTipStaffDone(interaction) {
   const tipId = interaction.customId.replace("tip_staff_done_", "");
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
 
   if (!tipData) {
     return interaction.editReply({
@@ -2568,7 +2584,7 @@ async function handleTipStaffDone(interaction) {
   const selectedStaffText = formatTipStaffMentions(selectedStaffIds);
 
   tipData.staffSelectionCompleted = true;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
 
   await interaction.message
     .edit({
@@ -2595,7 +2611,7 @@ async function handleTipStaffDone(interaction) {
       components: [suffixRow],
     });
     tipData.suffixMessageId = suffixMessage.id;
-    setPendingTip(tipId, tipData);
+    await setPendingTip(tipId, tipData);
     return interaction.editReply({ content: "✅ 已選擇冠名陪陪，請設定陪陪尾綴。" });
   }
 
@@ -2608,7 +2624,7 @@ async function handleTipStaffDone(interaction) {
 
 async function handleTipStaffClear(interaction) {
   const tipId = interaction.customId.replace("tip_staff_clear_", "");
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
 
   if (!tipData) {
     return interaction.editReply({
@@ -2630,7 +2646,7 @@ async function handleTipStaffClear(interaction) {
 
   tipData.selectedStaffId = null;
   tipData.selectedStaffIds = [];
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
 
   await updateTipStaffSelectionStatus(interaction.channel, tipId, tipData);
 
@@ -2649,7 +2665,7 @@ async function handleTipPaymentSelect(interaction) {
   const selection = getPaymentMethodSelection(interaction, "tip_payment_");
   const tipId = selection?.entityId;
 
-  const tipData = pendingTips.get(tipId);
+  const tipData = await getPendingTip(tipId);
 
   if (!tipData) {
     return interaction.editReply({
@@ -2695,19 +2711,20 @@ async function handleTipPaymentSelect(interaction) {
     return interaction.editReply({ content: "❌ 此筆打賞已進入付款流程，請使用已建立的付款訊息；請勿重複選擇付款方式。" });
   }
   tipData.checkoutStarted = true;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
   if (isBankTransfer(paymentMethod)) {
     try {
       await assertBankTransferCanBeSelected(supabase, "tip", tipId);
     } catch (error) {
       tipData.checkoutStarted = false;
+      await setPendingTip(tipId, tipData);
       return interaction.editReply({ content: `❌ ${error.message}` });
     }
   }
 
   tipData.paymentMethod = paymentMethod;
   tipData.requestedMethod = selection?.requestedMethod || null;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
 
   const walletPayment =
     paymentMethod.includes("儲值卡") ||
@@ -2719,7 +2736,7 @@ async function handleTipPaymentSelect(interaction) {
   const ecpayPayment = paymentMethod === "綠界支付";
 
   tipData.keepForPayment = !walletPayment;
-  setPendingTip(tipId, tipData);
+  await setPendingTip(tipId, tipData);
 
   if (jkopayPayment) {
     if (!jkopayService.config.available) {
@@ -2899,7 +2916,7 @@ async function handleTipPaymentSelect(interaction) {
 }
 // ===== Panel Message =====
 async function cancelTipPaymentChoice(interaction, tipId, kind) {
-  const data = pendingTips.get(tipId);
+  const data = await getPendingTip(tipId);
   const method = String(data?.paymentMethod || "");
   const matches = kind === "salary" ? method.includes("扣薪")
     : /儲值|錢包|餘額/.test(method);
@@ -2917,8 +2934,8 @@ async function cancelTipPaymentChoice(interaction, tipId, kind) {
   next.keepForPayment = false;
   delete next.paymentMethod;
   delete next.requestedMethod;
-  pendingTips.delete(tipId);
-  setPendingTip(next.flowId, next);
+  await closePendingTip(tipId, data);
+  await setPendingTip(next.flowId, next);
   await interaction.message.edit({ components: [] }).catch(() => {});
   await sendTipPaymentSelectPrompt(interaction.channel, next.flowId,
     formatTipStaffMentions(getTipStaffIds(next)));
@@ -4603,7 +4620,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
   };
   await sendTipWorkReportsSafely(tipOrders, { tipperId });
   await sendTipBroadcastSafely(tipData);
-  pendingTips.delete(String(metadata.tipId || payment.entity_key));
+  await closePendingTip(String(metadata.tipId || payment.entity_key));
   if (channel?.isTextBased()) {
     await channel.send({
       embeds: [
@@ -9592,7 +9609,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         const tipDraftId = `manual_${interaction.user.id}_${Date.now()}`;
 
-        setPendingTip(tipDraftId, {
+        await setPendingTip(tipDraftId, {
           channelId: interaction.channel.id,
           guildId: interaction.guild.id,
           selectedStaffId: selectedStaffIds[0],
@@ -13065,7 +13082,7 @@ async function handleButtonInteraction(interaction) {
     // ===== 客人確認送出打賞 =====
     if (customId.startsWith("confirm_tip_submit_")) {
       const tipConfirmId = customId.replace("confirm_tip_submit_", "");
-      const tipData = pendingTips.get(tipConfirmId);
+      const tipData = await getPendingTip(tipConfirmId);
       if (!tipData) {
         return await interaction.editReply({
           content: "❌ 這筆打賞確認已失效，請重新填寫",
@@ -13276,7 +13293,7 @@ async function handleButtonInteraction(interaction) {
         await sendCardPaymentInfo(interaction.channel);
       }
       if (isWalletPayment) {
-        pendingTips.delete(tipConfirmId);
+        await closePendingTip(tipConfirmId);
       }
       if (isWalletPayment) {
         try {
@@ -13325,7 +13342,7 @@ async function handleButtonInteraction(interaction) {
     // ===== 客人取消送出打賞 =====
     if (customId.startsWith("cancel_tip_submit_")) {
       const tipConfirmId = customId.replace("cancel_tip_submit_", "");
-      const tipData = pendingTips.get(tipConfirmId);
+      const tipData = await getPendingTip(tipConfirmId);
       if (!tipData) {
         return await interaction.editReply({
           content: "❌ 這筆打賞確認已失效",
@@ -13337,7 +13354,7 @@ async function handleButtonInteraction(interaction) {
           content: "❌ 只有打賞人、客服或管理員可以取消",
         });
       }
-      pendingTips.delete(tipConfirmId);
+      await closePendingTip(tipConfirmId);
       return await interaction.editReply({
         content: "❌ 已取消送出打賞",
         components: [],
@@ -13350,7 +13367,7 @@ async function handleButtonInteraction(interaction) {
         });
       }
       const tipId = customId.replace("confirm_tip_salary_", "");
-      const tipData = pendingTips.get(tipId);
+      const tipData = await getPendingTip(tipId);
       if (!tipData || !String(tipData.paymentMethod || "").includes("扣薪")) {
         return await interaction.editReply({
           content: "❌ 這筆打賞扣薪已過期或已處理，請重新操作。",
@@ -13383,6 +13400,7 @@ async function handleButtonInteraction(interaction) {
 
       try {
         tipData.paymentAttempted = true;
+        await setPendingTip(tipId, tipData);
         const payment = await dispatchSystem.applySalaryDeductionPayment({
           customerId: tipperId,
           amount: totalAmount,
@@ -13399,7 +13417,7 @@ async function handleButtonInteraction(interaction) {
         const tipOrders = payment.result || [];
         await sendTipWorkReportsSafely(tipOrders, { tipperId });
         await sendTipBroadcastSafely(tipData);
-        pendingTips.delete(tipId);
+        await closePendingTip(tipId);
         await interaction.message.edit({ components: [] }).catch(() => {});
         await interaction.channel.send({
           embeds: [
@@ -13438,7 +13456,7 @@ async function handleButtonInteraction(interaction) {
     }
     if (customId.startsWith("confirm_tip_wallet_")) {
       const tipId = customId.replace("confirm_tip_wallet_", "");
-      const tipData = pendingTips.get(tipId);
+      const tipData = await getPendingTip(tipId);
       if (!tipData) {
         return await interaction.editReply({
           content: "❌ 這筆打賞流程已過期，請重新建立打賞頻道。",
@@ -13469,6 +13487,7 @@ async function handleButtonInteraction(interaction) {
 
       return await runTipWalletConfirmation(`${getGuildId(interaction)}:${tipId}`, async () => {
       tipData.paymentAttempted = true;
+      await setPendingTip(tipId, tipData);
       let payment;
       try {
         payment = await payTipAllocationsWithWalletAtomic({
@@ -13536,7 +13555,7 @@ async function handleButtonInteraction(interaction) {
       }, tipData, "wallet-completed");
       await sendTipBroadcastSafely(tipData);
       await sendTipCloseButtons(interaction.channel, tipData);
-      pendingTips.delete(tipId);
+      await closePendingTip(tipId);
       return await interaction.editReply({
         content: "✅ 已確認使用錢包完成打賞付款",
       });
@@ -13562,15 +13581,14 @@ async function handleButtonInteraction(interaction) {
       const flowTipId = customId.startsWith("confirm_tip_paid_flow_")
         ? customId.replace("confirm_tip_paid_flow_", "")
         : null;
-      let flowTipData = flowTipId ? pendingTips.get(flowTipId) : null;
-      if (flowTipId && !flowTipData) {
+      let flowTipData = flowTipId ? await getPendingTip(flowTipId) : null;
+      if (flowTipId && !flowTipData && !(isStoredTipFlow(flowTipId) && await tipFlows.isClosed(flowTipId))) {
         const { recoverManualTip } = require("./utils/manualTipConfirmation");
         const history = await interaction.channel.messages.fetch({ limit: 100, before: currentMessage.id });
         flowTipData = recoverManualTip(currentMessage, flowTipId, client.user.id, TIP_GIFTS, [...history.values()]);
-        if (flowTipData) setPendingTip(flowTipId, flowTipData);
       }
 
-      if (flowTipId && !flowTipData) {
+      if (flowTipId && (!flowTipData || flowTipData.channelId !== interaction.channelId)) {
         return await interaction.editReply({
           content: "❌ 這筆打賞資料已失效，請重新建立打賞流程。",
         });
@@ -13694,7 +13712,7 @@ async function handleButtonInteraction(interaction) {
         await sendTipBroadcastSafely(flowTipData);
       }
       if (flowTipId) {
-        pendingTips.delete(flowTipId);
+        await closePendingTip(flowTipId);
       }
       // ===== 送出關閉頻道 / 儲存紀錄按鈕 =====
       await sendTipCloseButtons(interaction.channel);
@@ -13742,7 +13760,7 @@ async function handleButtonInteraction(interaction) {
       });
 
       if (flowTipId) {
-        pendingTips.delete(flowTipId);
+        await closePendingTip(flowTipId);
       }
 
       return await interaction.editReply({
@@ -14691,22 +14709,7 @@ async function handleStringSelectInteraction(interaction) {
           });
         }
         if (value === "tip") {
-          const tipId = `${interaction.user.id}_${Date.now()}`;
-          setPendingTip(tipId, {
-            createdBy: interaction.user.id,
-            tipperId: interaction.user.id,
-            channelId: orderChannel.id,
-          });
-          setTimeout(
-            () => {
-              const currentTip = pendingTips.get(tipId);
-              if (currentTip?.keepForPayment) return;
-
-              pendingTips.delete(tipId);
-            },
-            ORDER_FLOW_TTL_MS,
-          );
-          await sendTipGiftSelect(orderChannel, tipId);
+          await startTipFlowInChannel(orderChannel, interaction.user);
           return await interaction.editReply({
             content:
               `✅ 已建立打賞臨時頻道：<#${orderChannel.id}>\n` +
@@ -15065,7 +15068,7 @@ async function handleModalSubmit(interaction) {
   try {
     if (interaction.customId.startsWith("tip_modal_")) {
       const tipDraftId = interaction.customId.replace("tip_modal_", "");
-      const tipDraftData = pendingTips.get(tipDraftId);
+      const tipDraftData = await getPendingTip(tipDraftId);
       const selectedStaffIds = tipDraftData
         ? getTipStaffIds(tipDraftData)
         : [tipDraftId].filter(Boolean);
@@ -15111,7 +15114,7 @@ async function handleModalSubmit(interaction) {
         });
       }
       const tipConfirmId = `${Date.now()}_${interaction.user.id}`;
-      setPendingTip(tipConfirmId, {
+      await setPendingTip(tipConfirmId, {
         channelId: interaction.channel.id,
         guildId: interaction.guild.id,
         tipperId,
@@ -15124,7 +15127,7 @@ async function handleModalSubmit(interaction) {
         createdAt: Date.now(),
       });
       if (tipDraftData) {
-        pendingTips.delete(tipDraftId);
+        await closePendingTip(tipDraftId);
       }
       const confirmButton = new ButtonBuilder()
         .setCustomId(`confirm_tip_submit_${tipConfirmId}`)

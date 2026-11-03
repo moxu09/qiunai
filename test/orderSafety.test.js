@@ -155,3 +155,33 @@ test("實際客服回呼在重按時不再派單，已付款取消亦不改狀�
   await api.transitionServicePayment(interaction(),"confirm_",false,"cancel");
   assert.equal(row.status,"cancelled");assert.equal(effects.dispatches,1);
 });
+
+test("打賞頻道在機器人重啟後仍能讀取原選單草稿", async () => {
+  const { readFileSync } = require("node:fs");
+  const { runInNewContext } = require("node:vm");
+  const { ORDER_FLOW_TTL_MS } = require("../utils/orderFlow");
+  const db = database();
+  const source = readFileSync(require.resolve("../index"), "utf8");
+  const storage = source.slice(source.indexOf("function isStoredTipFlow"), source.indexOf("function escapeHtml"));
+  const opener = source.slice(source.indexOf("async function startTipFlowInChannel"), source.indexOf("async function startCrownFlowInChannel"));
+  const store = source.match(/^const tipFlows = createServiceFlowStore\(.+\);$/m)[0];
+  let published;
+  const startProcess = () => runInNewContext(
+    store + "\n" + storage + "\n" + opener + "\n({ startTipFlowInChannel, getPendingTip })",
+    {
+      createServiceFlowStore, supabase: db, pendingTips: new Map(),
+      ORDER_FLOW_TTL_MS, TIP_HARD_TTL_MS: 7 * ORDER_FLOW_TTL_MS,
+      async sendTipGiftSelect(channel, tipId) { published = [channel.id, tipId]; },
+    },
+  );
+  const channel = { id: "100000000000000001", guildId: "1206138511535898654" };
+  const user = { id: "100000000000000002" };
+  const tipId = await startProcess().startTipFlowInChannel(channel, user);
+  assert.deepEqual(published, [channel.id, tipId]);
+  const draft = await startProcess().getPendingTip(tipId);
+  assert.equal(draft.tipperId, user.id);
+  assert.equal(draft.channelId, channel.id);
+  assert.equal(draft.guildId, channel.guildId);
+  const [stored] = db.tables.get("bot_service_order_flows");
+  assert.equal(Date.parse(stored.expires_at), Number(tipId.split("_")[1]) + ORDER_FLOW_TTL_MS);
+});

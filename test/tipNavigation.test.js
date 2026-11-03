@@ -42,7 +42,7 @@ function fixture({authorized=true,locked=false,exists=true}={}){
  const pendingTips=new Map(exists?[[old.flowId,old]]:[]),sent=[];
  const source=fs.readFileSync(require.resolve('../index.js'),'utf8');
  const fn=source.slice(source.indexOf('async function handleTipBack('),source.indexOf('async function openTipQuantityModal('));
- const context={pendingTips,rewindTipFlow,canAdvanceTipFlow:()=>authorized,
+ const context={getPendingTip:id=>pendingTips.get(id),closePendingTip:id=>pendingTips.delete(id),rewindTipFlow,canAdvanceTipFlow:()=>authorized,
  setPendingTip(id,data){pendingTips.set(id,data);},
  sendTipQuantityModePrompt:async(channel,id,data)=>sent.push({id,data}),
  sendTipGiftSelect:async()=>{},sendTipBroadcastPreferencePrompt:async()=>{},buildTipStaffPage:()=>({components:[]}),sendTipStaffSelectionStatus:async()=>{}};

@@ -39,7 +39,7 @@ function modalFixture(raw) {
   const tip=flow();let advanced=false;
   const source=fs.readFileSync(require.resolve('../index.js'),'utf8');
   const fn=source.slice(source.indexOf('async function handleTipQuantityModal('),source.indexOf('async function handleCrownSuffixChoice('));
-  const ctx={pendingTips:new Map([['tip',tip]]),canAdvanceTipFlow:()=>true,
+  const ctx={getPendingTip:id=>id==='tip'?tip:undefined,canAdvanceTipFlow:()=>true,
     getTipGiftSelections,getTipStaffIds,parseTipQuantityList,validateTipQuantityMatrix,
     refreshTipTotals(t){const allocations=buildTipAllocations(t);t.allocations=allocations;t.totalAmount=getTipAllocationTotal(t);return allocations;},
     setPendingTip(){},sendTipBroadcastPreferencePrompt:async()=>{advanced=true;},
