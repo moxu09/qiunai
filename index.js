@@ -5,6 +5,7 @@ require("dotenv").config();
 const fs = require("node:fs/promises");
 const { formatWalletPaymentName } = require("./utils/paymentDisplay");
 const { createTipWalletConfirmationRunner } = require("./utils/tipWalletConfirmation");
+const { canStaffAcceptOrder } = require("./utils/staffAcceptanceEligibility");
 const runTipWalletConfirmation = createTipWalletConfirmationRunner();
 const { getActiveVipLevels, isVipPointsActive } = require("./config/qiunaiVipPoints");
 const { usesMembershipPolicy, shouldIssueMembershipReward } = require("./config/qiunaiMembership20261016");
@@ -8895,12 +8896,7 @@ async function getAvailablePlayerOptions(
 
   return (players || [])
     .filter((player) => {
-      if (!player.discord_id) return false;
-
-      const isAvailable =
-        player.status === "available" || player.is_online === true;
-
-      if (!isAvailable) return false;
+      if (!canStaffAcceptOrder(player, guildId)) return false;
 
       const allowedServices = Array.isArray(player.allowed_services)
         ? player.allowed_services

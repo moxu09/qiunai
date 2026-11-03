@@ -56,6 +56,7 @@ const {
 } = require("../utils/paymentMethodEmojis");
 const { getOrCreateServiceOrder, transitionUnpaidOrders, createOperationGuard, isUnpaidWaitingOrder } = require("../utils/serviceOrderSafety");
 const { createPaidOrderDispatcher } = require("../utils/orderDispatchRecovery");
+const { canStaffAcceptOrder } = require("../utils/staffAcceptanceEligibility");
 const {
   getGeneralOrderAutoQuote,
   getValorantMappedCompanionRank,
@@ -4774,7 +4775,6 @@ async function getAvailablePlayerOptions(service) {
   let playerQuery = supabase
     .from("qiunai_staff")
     .select("*")
-    .eq("status", "available")
     .not("discord_id", "is", null);
 
   playerQuery = applyStaffGuildFilter(playerQuery);
@@ -4794,7 +4794,7 @@ async function getAvailablePlayerOptions(service) {
     .filter((player) => {
       const id = String(player.discord_id || "").trim();
 
-      if (!id) return false;
+      if (!id || !canStaffAcceptOrder(player, process.env.GUILD_ID)) return false;
 
       if (seenPlayerIds.has(id)) {
         return false;
@@ -12073,15 +12073,14 @@ async function acceptPlayOrder(interaction) {
     let playerQuery = supabase
       .from("qiunai_staff")
       .select("*")
-      .eq("discord_id", interaction.user.id)
-      .eq("status", "available")
-      .limit(1);
+      .eq("discord_id", interaction.user.id);
 
     playerQuery = applyStaffGuildFilter(playerQuery);
 
     const { data: playerRows, error: playerError } = await playerQuery;
 
-    const player = playerRows?.[0];
+    const player = playerRows?.find((row) =>
+      canStaffAcceptOrder(row, process.env.GUILD_ID));
 
     if (playerError) {
       console.log("[接單錯誤 players]", playerError);
@@ -12089,7 +12088,7 @@ async function acceptPlayOrder(interaction) {
 
     if (!player) {
       return interaction.editReply({
-        content: "❌ 你目前不是可接單狀態，請先按「開始接單」",
+        content: "❌ 你目前沒有這家店的在職接單資格，請聯繫主管確認。",
       });
     }
 
@@ -12097,13 +12096,14 @@ async function acceptPlayOrder(interaction) {
       .from("play_orders")
       .select("*")
       .eq("id", orderId)
+      .eq("guild_id", process.env.GUILD_ID)
       .maybeSingle();
 
     if (orderError) {
       console.log("[接單錯誤 play_orders]", orderError);
     }
 
-    if (!order || !["pending", "accepted"].includes(order.status)) {
+    if (!order || !order.paid || order.is_deleted || !["pending", "accepted"].includes(order.status)) {
       return interaction.editReply({
         content: "❌ 這張訂單已經被接走了，或目前不能接單",
       });
@@ -12209,13 +12209,17 @@ async function acceptPlayOrder(interaction) {
       updatePayload.accepted_at = new Date().toISOString();
     }
 
-    const { data: updated, error: updateError } = await supabase
+    let updateQuery = supabase
       .from("play_orders")
       .update(updatePayload)
       .eq("id", orderId)
-      .in("status", ["pending", "accepted"])
-      .select()
-      .maybeSingle();
+      .eq("guild_id", process.env.GUILD_ID)
+      .eq("paid", true)
+      .in("status", ["pending", "accepted"]);
+    updateQuery = order.assigned_player == null
+      ? updateQuery.is("assigned_player", null)
+      : updateQuery.eq("assigned_player", order.assigned_player);
+    const { data: updated, error: updateError } = await updateQuery.select().maybeSingle();
 
     if (updateError) {
       console.log("[接單更新錯誤]", updateError);
