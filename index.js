@@ -469,6 +469,7 @@ async function listStaffByService(serviceKey) {
 }
 // ===== 陪玩排單系統 =====
 const dispatchSystem = require("./events/dispatchSystem");
+const { createServiceProxyQueue } = require("./utils/serviceProxyQueue");
 const { applyTemporaryLegacyVipCredit } = require("./utils/temporaryQualificationCap");
 
 dispatchSystem.setup(supabase, client, {
@@ -2655,9 +2656,9 @@ async function handleTipPaymentSelect(interaction) {
     });
   }
 
-  if (!canAdvanceTipFlow(interaction, tipData)) {
+  if (interaction.user.id !== String(tipData.tipperId)) {
     return interaction.editReply({
-      content: "❌ 只有打賞人、客服或管理員可以操作。",
+      content: "❌ 只有打賞人本人可以選擇付款方式。",
     });
   }
 
@@ -2901,7 +2902,7 @@ async function cancelTipPaymentChoice(interaction, tipId, kind) {
   const method = String(data?.paymentMethod || "");
   const matches = kind === "salary" ? method.includes("扣薪")
     : /儲值|錢包|餘額/.test(method);
-  if (!data || !matches || !canAdvanceTipFlow(interaction, data) ||
+  if (!data || !matches || interaction.user.id !== String(data.tipperId) ||
       (data.channelId && data.channelId !== interaction.channel.id)) {
     return interaction.editReply({ content: "❌ 此付款訊息已失效或你沒有操作權限。", components: [] });
   }
@@ -7463,29 +7464,6 @@ const commands = sortCommandDefinitions([
         .setRequired(false),
     ),
   new SlashCommandBuilder()
-    .setName("新增訂單")
-    .setDescription("客服替指定老闆在目前頻道新增訂單")
-    .addUserOption((option) =>
-      option
-        .setName("老闆")
-        .setDescription("選擇這筆訂單的老闆")
-        .setRequired(true),
-    )
-    .addStringOption((option) =>
-      option
-        .setName("項目")
-        .setDescription("選擇要新增的遊戲或服務")
-        .setRequired(true)
-        .addChoices(
-          { name: "特戰英豪", value: "特戰英豪" },
-          { name: "三角洲行動", value: "三角洲行動" },
-          { name: "Apex", value: "Apex" },
-          { name: "英雄聯盟", value: "英雄聯盟" },
-          { name: "Steam", value: "STEAM" },
-          { name: "其他", value: "其他" },
-        ),
-    ),
-  new SlashCommandBuilder()
     .setName("客服接待單數新增")
     .setDescription("新增客服接待件數，每件增加 NT$10 薪資")
     .addIntegerOption((option) =>
@@ -8286,6 +8264,8 @@ client.once(Events.ClientReady, async () => {
   websiteOrderBridge=require('./utils/websiteOrderBridge').createWebsiteOrderBridge({db:supabase,client,token:process.env.TOKEN,
     createOrder:payload=>dispatchSystem.createWebsiteOrder(payload)});
   websiteOrderBridge.start();
+  createServiceProxyQueue({ db: supabase, client, organization: "qiunai", guildId: "1206138511535898654",
+    createTicket: payload => dispatchSystem.createServiceProxyTicket(payload) }).start();
   startReceiptRecovery({ supabase, guildId: process.env.GUILD_ID, sendOrderReceipt: sendOrderReceiptSafely, sendReceipt });
   console.log("🚀 星雨系統啟動中...");
 
@@ -9868,46 +9848,6 @@ async function handleSlashCommand(interaction) {
     } catch (error) {
       return interaction.editReply({
         content: "❌ " + (error.message || "公司 AI 暫時無法回覆"),
-      });
-    }
-  }
-  if (interaction.commandName === "新增訂單") {
-    if (!isAdminOrStaff(interaction)) {
-      return interaction.editReply({
-        content: "❌ 只有客服或管理員可以使用新增訂單指令。",
-      });
-    }
-    if (
-      !interaction.channel?.isTextBased?.() ||
-      typeof interaction.channel.send !== "function"
-    ) {
-      return interaction.editReply({
-        content: "❌ 這個頻道無法建立下單流程。",
-      });
-    }
-
-    const customer = interaction.options.getUser("老闆", true);
-    if (customer.bot) {
-      return interaction.editReply({
-        content: "❌ 老闆不能選擇機器人帳號。",
-      });
-    }
-    const game = interaction.options.getString("項目", true);
-    try {
-      await dispatchSystem.startNewOrderFlow(
-        interaction.channel,
-        customer,
-        game,
-      );
-      return interaction.editReply({
-        content:
-          `✅ 已替 <@${customer.id}> 在目前頻道開啟` +
-          `「${game === "STEAM" ? "Steam" : game}」下單流程。`,
-      });
-    } catch (error) {
-      console.error("[新增訂單指令] 建立流程失敗", error);
-      return interaction.editReply({
-        content: `❌ 建立下單流程失敗：${error.message || error}`,
       });
     }
   }

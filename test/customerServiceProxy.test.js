@@ -56,15 +56,16 @@ test("所有一般填單步驟與客服指定派單套用一致權限", () => {
   assert.ok(extract("createWaitingQuoteOrder").includes("customer_id: pending.userId"));
   assert.ok(extract("handleNewOrderGameSelect").includes("users.fetch(pending.userId)"));
 });
-test("代客選人不放寬錢包扣款與退款", () => {
+test("客服可處理付款後確認與退款，付款方式仍由老闆本人選", () => {
   for (const name of ["confirmWalletPayment", "confirmExtensionWalletPayment"]) {
     if (source.includes("async function " + name + "(")) {
-      assert.match(extract(name), /order.customer_id !== interaction.user.id|interaction.user.id !== order.customer_id/);
+      assert.ok(extract(name).includes("canCustomerOrStaffSubmit"));
     }
   }
   if (source.includes("async function confirmSelfServicePlayers(")) {
     assert.ok(extract("selectSelfServicePlayerNumbers").includes("canCustomerOrStaffSubmit(interaction, order.customer_id)"));
     assert.ok(extract("confirmSelfServicePlayers").includes("selection?.customerId === order.customer_id"));
-    assert.ok(extract("cancelAndRefundSelfServiceOrder").includes("interaction.user.id !== order.customer_id"));
+    assert.ok(extract("cancelAndRefundSelfServiceOrder").includes("canCustomerOrStaffSubmit(interaction, order.customer_id)"));
   }
+  assert.ok(extract("prepareSelfServicePayment").includes("order.customer_id !== interaction.user.id"));
 });

@@ -32,7 +32,7 @@ function cancelFixture(extra = {}, authorized = true) {
     setPendingTip:(id,data)=>pendingTips.set(id,data),formatTipStaffMentions:()=>'<@staff>',
     getTipStaffIds:()=>['staff'],sendTipPaymentSelectPrompt:async(channel,id)=>sent.push(id)};
   vm.createContext(ctx);vm.runInContext(fn,ctx);
-  const interaction={channel:{id:'channel'},message:{edit:async()=>{}},
+  const interaction={user:{id:authorized?'buyer':'other'},channel:{id:'channel'},message:{edit:async()=>{}},
     async editReply(p){this.content=p.content;}};
   return {pendingTips,sent,interaction,run:()=>ctx.cancelTipPaymentChoice(interaction,'buyer_1000',
     String(tip.paymentMethod).includes('扣薪')?'salary':'wallet')};
@@ -80,7 +80,7 @@ test('兩次同時點付款只執行一次銀行前置檢查，第二次不可�
     assertBankTransferCanBeSelected:async()=>{preflightCount++;entered();await pending;throw Error('暫停測試');},
   };
   vm.createContext(ctx);vm.runInContext(fn,ctx);
-  const interaction=()=>({deferred:false,replied:false,deferReply:async()=>{},
+  const interaction=()=>({user:{id:'buyer'},deferred:false,replied:false,deferReply:async()=>{},
     async editReply(p){this.content=p.content;}});
   const first=interaction(),second=interaction();
   const task=ctx.handleTipPaymentSelect(first);

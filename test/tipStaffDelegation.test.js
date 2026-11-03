@@ -11,9 +11,8 @@ test("打賞人及客服可代為操作，其他人仍不能操作", () => {
   assert.equal(canOperateTipFlow({ actorId: "", creatorId: "customer", isCustomerService: true }), false);
 });
 
-test("現行打賞全流程不再保留只能由建立者或打賞人操作的判斷", () => {
+test("打賞內容客服可代操作，付款方式仍由打賞人選擇", () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../index.js"), "utf8");
-  assert.doesNotMatch(source, /interaction\.user\.id !== tipData\.(?:createdBy|tipperId)/);
   for (const handler of [
     "handleTipBroadcastChoice",
     "handleTipBroadcastPrivacy",
@@ -27,7 +26,6 @@ test("現行打賞全流程不再保留只能由建立者或打賞人操作的�
     "handleCrownSuffixModal",
     "handleTipStaffDone",
     "handleTipStaffClear",
-    "handleTipPaymentSelect",
   ]) {
     const start = source.indexOf(`function ${handler}`);
     assert.notEqual(start, -1, `缺少 ${handler}`);
@@ -35,6 +33,9 @@ test("現行打賞全流程不再保留只能由建立者或打賞人操作的�
     const block = source.slice(start, next === -1 ? source.length : next);
     assert.match(block, /canAdvanceTipFlow\(interaction, tipData\)/, `${handler} 未開放客服代操作`);
   }
+  const paymentStart = source.indexOf("async function handleTipPaymentSelect(");
+  const paymentEnd = source.indexOf("\nasync function ", paymentStart + 20);
+  assert.match(source.slice(paymentStart, paymentEnd), /interaction\.user\.id !== String\(tipData\.tipperId\)/);
 });
 
 test("舊版打賞由頻道客人判斷自打賞，不會把代操作客服當成打賞人", () => {
