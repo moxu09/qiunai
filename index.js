@@ -692,7 +692,7 @@ function getTipGiftListText(tipData) {
         `${index + 1}. ${gift.name}｜${
           gift.customPrice && !gift.price
             ? "價格由客服填寫"
-            : `${Number(gift.price).toLocaleString("zh-TW")} ASD`
+            : `${Number(gift.price).toLocaleString("zh-TW")} ${tipData.heartTip ? "T" : "ASD"}`
         }`,
     )
     .join("\n");
@@ -701,7 +701,7 @@ function getTipAllocationText(tipData) {
   return buildTipAllocations(tipData)
     .map(
       (allocation) =>
-        `<@${allocation.staffId}>：${allocation.item}｜${allocation.amount.toLocaleString("zh-TW")} ASD`,
+        `<@${allocation.staffId}>：${allocation.item}｜${allocation.amount.toLocaleString("zh-TW")} ${tipData.heartTip ? "T" : "ASD"}`,
     )
     .join("\n")
     .slice(0, 1700);
@@ -1541,7 +1541,7 @@ async function handleBulkDeleteCancel(interaction) {
 }
 async function sendTipGiftSelect(channel, tipId) {
   const heartCatalog = (await getPendingTip(tipId))?.heartGifts;
-  const gifts = heartCatalog || TIP_GIFTS;
+  const gifts = heartCatalog ? [...heartCatalog.slice(0, 24), heartGiftConfig.CUSTOM_HEART_GIFT] : TIP_GIFTS;
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`tip_gift_${tipId}`)
     .setPlaceholder("請選擇要打賞的禮物，可複選")
@@ -1554,7 +1554,9 @@ async function sendTipGiftSelect(channel, tipId) {
             ? `${gift.name}｜價格由客服填寫`
             : `${gift.name}｜${gift.price} ${heartCatalog ? "T" : "ASD"}`
         ).slice(0, 100),
-        description: (heartCatalog ? `增加 ${gift.price} 心動值` : gift.description).slice(0, 100),
+        description: (heartCatalog
+          ? (gift.customPrice ? "由客服填寫，可輸入多種心動金額" : `增加 ${gift.price} 心動值`)
+          : gift.description).slice(0, 100),
         value: gift.key,
       })),
     );
@@ -1573,7 +1575,10 @@ async function startTipFlowInChannel(channel, user, { heart = false } = {}) {
       throw new Error("此頻道無法建立心動值打賞");
     }
     heartCatalog = await serviceGiftCatalog.heart();
-    if (!heartCatalog.length || heartCatalog.length > 25) throw new Error("心動禮物價目暫時無法使用");
+    if (!heartCatalog.length || heartCatalog.length > 24 ||
+        heartCatalog.some(gift => gift.key === heartGiftConfig.CUSTOM_HEART_GIFT.key)) {
+      throw new Error("心動禮物價目暫時無法使用");
+    }
   }
   const tipId = `${user.id}_${Date.now()}`;
 
@@ -1819,7 +1824,11 @@ async function handleTipGiftSelect(interaction) {
   }
 
   const gifts = interaction.values
-    .map((key) => tipData.heartTip ? findTipGiftByKey(tipData.heartGifts, key) : getTipGiftByKey(key))
+    .map((key) => {
+      if (!tipData.heartTip) return getTipGiftByKey(key);
+      return key === heartGiftConfig.CUSTOM_HEART_GIFT.key
+        ? heartGiftConfig.CUSTOM_HEART_GIFT : findTipGiftByKey(tipData.heartGifts, key);
+    })
     .filter(Boolean);
 
   if (!gifts.length || gifts.length !== interaction.values.length) {
@@ -1837,7 +1846,7 @@ async function handleTipGiftSelect(interaction) {
   tipData.item = gifts.map((gift) => gift.name).join("、");
   tipData.amount = null;
   tipData.customPriceRequired = gifts.some((gift) => gift.customPrice);
-  tipData.customPriceBeforeStaff = tipData.customPriceRequired && !tipData.heartTip;
+  tipData.customPriceBeforeStaff = tipData.customPriceRequired;
   tipData.sharedQuantities = gifts.map(() => 1);
   tipData.quantitiesByStaff = {};
   await setPendingTip(tipId, tipData);
@@ -2588,12 +2597,13 @@ async function handleTipCustomPriceModal(interaction) {
   } else {
     let gifts;
     try {
-      gifts = priceCustomTipGifts(getTipGiftSelections(tipData), amountText);
+      gifts = priceCustomTipGifts(getTipGiftSelections(tipData), amountText, tipData.heartTip ? "T" : "ASD");
     } catch (error) {
       return interaction.editReply({ content: `❌ ${error.message}` });
     }
     const prices = gifts.filter((gift) => gift.customPrice);
-    priceSummary = prices.map((gift) => `${gift.price.toLocaleString("zh-TW")} ASD`).join("、");
+    const unit = tipData.heartTip ? "T" : "ASD";
+    priceSummary = prices.map((gift) => `${gift.price.toLocaleString("zh-TW")} ${unit}`).join("、");
     chooseStaff = tipData.customPriceBeforeStaff || prices.length > 1;
     tipData.gifts = gifts;
     if (chooseStaff) {

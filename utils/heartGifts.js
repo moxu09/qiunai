@@ -7,6 +7,13 @@ const UPGRADE_ART_CHANNEL_ID = "1529591891329286246";
 const UPGRADE_ART_GUILD_ID = "1513174069087047731";
 const HEART = "<:I_cn_b02:1221687963621265451>";
 const ENABLED = process.env.QIUNAI_HEART_GIFTS_ENABLED === "1";
+const CUSTOM_HEART_GIFT = Object.freeze({
+  key: "heart:custom",
+  name: "自訂心動禮物",
+  emoji: "💗",
+  customPrice: true,
+});
+const MAX_HEART_ALLOCATION = 2_147_483_647;
 const TIERS = [
   [520, "1226143428002316389", "1529591998548545536"],
   [1314, "1226143498164633662", "1529592089447370803"],
@@ -41,6 +48,15 @@ function createHeartGifts({ client, supabase, fetchImage = fetch }) {
   async function prepareCheckout(flowId, tip, allocations, paymentMethod) {
     if (tip.guildId !== GUILD_ID || allocations.length === 0) throw new Error("心動值打賞資料不完整");
     const giftByKey = new Map(tip.heartGifts.map(gift => [gift.key, gift]));
+    if (tip.customPriceSet && !tip.customPriceRequired) {
+      for (const gift of tip.gifts || []) {
+        if (gift.customPrice && Number.isSafeInteger(gift.price) && gift.price > 0 &&
+            gift.price <= 999_999_999 && !giftByKey.has(gift.key) &&
+            (gift.key === CUSTOM_HEART_GIFT.key || gift.key === `${CUSTOM_HEART_GIFT.key}:${gift.price}`)) {
+          giftByKey.set(gift.key, { ...gift, emoji: CUSTOM_HEART_GIFT.emoji });
+        }
+      }
+    }
     const validated = allocations.map(allocation => {
       const lines = allocation.lines.map(line => {
         const gift = giftByKey.get(line.key);
@@ -50,7 +66,9 @@ function createHeartGifts({ client, supabase, fetchImage = fetch }) {
         }
         return { key: gift.key, name: gift.name, emoji: gift.emoji, quantity: line.quantity, points: line.subtotal };
       });
-      if (!lines.length || lines.reduce((sum, line) => sum + line.points, 0) !== allocation.amount) {
+      if (!lines.length || !Number.isSafeInteger(allocation.amount) || allocation.amount <= 0 ||
+          allocation.amount > MAX_HEART_ALLOCATION ||
+          lines.reduce((sum, line) => sum + line.points, 0) !== allocation.amount) {
         throw new Error("心動值打賞的金額不正確");
       }
       return { staffId: allocation.staffId, item: allocation.item, amount: allocation.amount, lines };
@@ -162,4 +180,4 @@ function createHeartGifts({ client, supabase, fetchImage = fetch }) {
   return { checkout, prepareCheckout, deliver };
 }
 
-module.exports = { ENABLED, GUILD_ID, BROADCAST_CHANNEL_ID, createHeartGifts, crossedTiers };
+module.exports = { ENABLED, GUILD_ID, BROADCAST_CHANNEL_ID, CUSTOM_HEART_GIFT, createHeartGifts, crossedTiers };

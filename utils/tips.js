@@ -68,7 +68,7 @@ function validateTipQuantityMatrix(quantitiesByStaff) {
   }
 }
 
-function priceCustomTipGifts(gifts, value) {
+function priceCustomTipGifts(gifts, value, unit = "ASD") {
   const customGift = gifts.find((gift) => gift.customPrice);
   if (!customGift || gifts.filter((gift) => gift.customPrice).length !== 1) {
     throw new Error("找不到待定價的客製禮物，請重新選擇禮物");
@@ -89,7 +89,7 @@ function priceCustomTipGifts(gifts, value) {
   const priced = prices.map((price) => prices.length === 1 ? { ...customGift, price } : {
     ...customGift,
     key: `${customGift.key}:${price}`,
-    name: `${customGift.name}（${price.toLocaleString("zh-TW")} ASD）`,
+    name: `${customGift.name}（${price.toLocaleString("zh-TW")} ${unit}）`,
     price,
   });
   return gifts.flatMap((gift) => gift === customGift ? priced : [gift]);
