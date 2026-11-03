@@ -68,6 +68,33 @@ function validateTipQuantityMatrix(quantitiesByStaff) {
   }
 }
 
+function priceCustomTipGifts(gifts, value) {
+  const customGift = gifts.find((gift) => gift.customPrice);
+  if (!customGift || gifts.filter((gift) => gift.customPrice).length !== 1) {
+    throw new Error("找不到待定價的客製禮物，請重新選擇禮物");
+  }
+  const amounts = String(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const maxPrices = 26 - gifts.length;
+  if (!amounts.length || amounts.length > maxPrices) {
+    throw new Error(`請每行輸入一個客製金額，本單最多可輸入 ${maxPrices} 筆`);
+  }
+  if (amounts.some((line) => !/^(?:\d{1,9}|\d{1,3}(?:,\d{3}){1,2})$/.test(line) ||
+    Number(line.replaceAll(",", "")) <= 0)) {
+    throw new Error("每筆客製金額須為 1～999,999,999 的整數");
+  }
+  const prices = amounts.map((line) => Number(line.replaceAll(",", "")));
+  if (new Set(prices).size !== prices.length) {
+    throw new Error("同一金額請輸入一次，可在分配時送給多位陪陪");
+  }
+  const priced = prices.map((price) => prices.length === 1 ? { ...customGift, price } : {
+    ...customGift,
+    key: `${customGift.key}:${price}`,
+    name: `${customGift.name}（${price.toLocaleString("zh-TW")} ASD）`,
+    price,
+  });
+  return gifts.flatMap((gift) => gift === customGift ? priced : [gift]);
+}
+
 function getTipGiftSelections(tipData = {}) {
   if (Array.isArray(tipData.gifts) && tipData.gifts.length) {
     return tipData.gifts.map((gift) => ({
@@ -170,5 +197,6 @@ module.exports = {
   getTipTotalAmount,
   hasSelfTip,
   parseTipQuantityList,
+  priceCustomTipGifts,
   validateTipQuantityMatrix,
 };

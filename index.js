@@ -168,6 +168,7 @@ const {
   getTipTotalAmount,
   hasSelfTip,
   parseTipQuantityList,
+  priceCustomTipGifts,
   validateTipQuantityMatrix,
 } = require("./utils/tips");
 const { appendTipBackButton, rewindTipFlow } = require("./utils/tipNavigation");
@@ -641,9 +642,14 @@ function getTipGiftByKey(key) {
   return findTipGiftByKey(TIP_GIFTS, key);
 }
 function canAdvanceTipFlow(interaction, tipData) {
+  // 已開啟的舊表單也必須遵守付款鎖，不能在付款後改禮物、數量或播報。
   if (tipData?.channelId && tipData.channelId !== interaction.channelId) return false;
   if (tipData?.guildId && tipData.guildId !== interaction.guildId) return false;
-  // 已開啟的舊表單也必須遵守付款鎖，不能在付款後改禮物、數量或播報。
+  if (tipData?.customPriceBeforeStaff &&
+      !/^(tip_custom_price_|tip_back_gift_)/.test(interaction.customId || "") &&
+      !(!tipData.customPriceMessageId && interaction.customId?.startsWith("tip_gift_"))) {
+    return false;
+  }
   const paymentAction = /^(confirm_tip_|cancel_tip_|tip_payment_)/.test(interaction.customId || "");
   if ((tipData?.checkoutStarted || tipData?.paymentMethod || tipData?.paid || tipData?.walletPaid) && !paymentAction) {
     return false;
@@ -1795,10 +1801,22 @@ async function handleTipGiftSelect(interaction) {
   tipData.item = gifts.map((gift) => gift.name).join("、");
   tipData.amount = null;
   tipData.customPriceRequired = gifts.some((gift) => gift.customPrice);
+  tipData.customPriceBeforeStaff = tipData.customPriceRequired && !tipData.heartTip;
   tipData.sharedQuantities = gifts.map(() => 1);
   tipData.quantitiesByStaff = {};
   await setPendingTip(tipId, tipData);
 
+  if (tipData.customPriceBeforeStaff) {
+    await requestCustomTipPrice(interaction.channel, tipId, tipData);
+    return interaction.editReply({ content: "✅ 已選擇客製打賞，請等待客服輸入金額，再選擇受賞陪陪。" });
+  }
+  const pickerSent = await sendTipStaffPicker(interaction.channel, tipId, tipData);
+  return interaction.editReply({
+    content: pickerSent ? `✅ 已選擇 ${gifts.length} 項打賞禮物` : "❌ 目前沒有可選擇的陪陪資料。",
+  });
+}
+
+async function sendTipStaffPicker(channel, tipId, tipData) {
   const players = await listActiveStaff();
 
   const seenPlayerIds = new Set();
@@ -1833,25 +1851,19 @@ async function handleTipGiftSelect(interaction) {
         value: String(player.discord_id),
       };
     });
-  if (!playerOptions.length) {
-    return interaction.editReply({
-      content: "❌ 目前沒有可選擇的陪陪資料。",
-    });
-  }
+  if (!playerOptions.length) return false;
   tipData.staffOptions = playerOptions;
   tipData.staffPage = 0;
   await setPendingTip(tipId, tipData);
   const pageData = buildTipStaffPage(tipId, playerOptions, 0);
-  await interaction.channel.send({
+  await channel.send({
     content:
-      `✅ 已選擇 ${gifts.length} 項禮物：\n${getTipGiftListText(tipData)}\n\n` +
+      `✅ 已選擇的禮物：\n${getTipGiftListText(tipData)}\n\n` +
       `請選擇要打賞的陪陪｜第 1/${pageData.pageCount} 頁：`,
     components: pageData.components,
   });
-  await sendTipStaffSelectionStatus(interaction.channel, tipId, tipData);
-  return interaction.editReply({
-    content: `✅ 已選擇 ${gifts.length} 項打賞禮物`,
-  });
+  await sendTipStaffSelectionStatus(channel, tipId, tipData);
+  return true;
 }
 async function handleTipStaffSelect(interaction) {
   if (!interaction.deferred && !interaction.replied) {
@@ -2150,12 +2162,14 @@ async function requestCustomTipPrice(channel, tipId, tipData) {
       .setLabel(tipData.crownOrder ? "客服填寫自定冠內容" : "客服填寫客製金額")
       .setEmoji("💰").setStyle(ButtonStyle.Primary),
   )];
-  if (!tipData.crownOrder) appendTipBackButton(priceRows, tipId, "quantity");
+  if (!tipData.crownOrder) {
+    appendTipBackButton(priceRows, tipId, tipData.customPriceBeforeStaff ? "gift" : "quantity");
+  }
   const priceMessage = await channel.send({
     content: `<@&${process.env.STAFF_ROLE}> ${
       tipData.crownOrder
         ? "請與客人議定自定冠內容，再填寫價格與時數。"
-        : "請填寫這筆客製禮物的單價。"
+        : "請輸入客製金額，每行一筆。定價後可為每個金額分配不同陪陪。"
     }`,
     components: priceRows,
   });
@@ -2180,6 +2194,7 @@ async function continueCrownOrder(channel, tipId, tipData) {
 
 async function sendTipQuantityModePrompt(channel, tipId, tipData) {
   const staffIds = getTipStaffIds(tipData);
+  const splitCustomAmounts = getTipGiftSelections(tipData).filter((gift) => gift.customPrice).length > 1;
   const components = [
     new ButtonBuilder()
       .setCustomId(`tip_quantity_same_${tipId}`)
@@ -2190,18 +2205,29 @@ async function sendTipQuantityModePrompt(channel, tipId, tipData) {
     components.push(
       new ButtonBuilder()
         .setCustomId(`tip_quantity_separate_${tipId}`)
-        .setLabel("每位陪陪分開輸入")
+        .setLabel(splitCustomAmounts ? "分配各陪陪的客製金額" : "每位陪陪分開輸入")
         .setStyle(ButtonStyle.Primary),
     );
   }
-  await channel.send({
-    content:
-      `請設定打賞數量（0～999，0 代表不送該項禮物；不可全部為 0）。\n\n禮物順序：\n${getTipGiftListText(tipData)}\n\n` +
-      `受賞陪陪順序：\n${staffIds
-        .map((staffId, index) => `${index + 1}. <@${staffId}>`)
-        .join("\n")}`,
-    components: appendTipBackButton([new ActionRowBuilder().addComponents(components)], tipId, "staff"),
-  });
+  const instructions = "請設定打賞數量（0～999，0 代表不送該項禮物；不可全部為 0）。\n" +
+    (splitCustomAmounts && staffIds.length > 1
+      ? "不同金額送給不同陪陪時，請選「分配各陪陪的客製金額」。例如兩個金額分開送，第一位填 1,0，第二位填 0,1。\n"
+      : "") +
+    `\n禮物順序：\n${getTipGiftListText(tipData)}\n\n`;
+  const staffLines = staffIds.map((staffId, index) => `${index + 1}. <@${staffId}>`);
+  const staffTitle = "受賞陪陪順序：\n";
+  const rows = appendTipBackButton([new ActionRowBuilder().addComponents(components)], tipId, "staff");
+  const content = instructions + staffTitle + staffLines.join("\n");
+  if (content.length <= 2000) return channel.send({ content, components: rows });
+
+  await channel.send({ content: instructions });
+  for (let start = 0; start < staffLines.length; start += 50) {
+    const lastPage = start + 50 >= staffLines.length;
+    await channel.send({
+      content: staffTitle + staffLines.slice(start, start + 50).join("\n"),
+      components: lastPage ? rows : [],
+    });
+  }
 }
 
 async function handleTipBack(interaction) {
@@ -2440,11 +2466,11 @@ async function openTipCustomPriceModal(interaction) {
     .setTitle(tipData.crownOrder ? "填寫自定冠內容" : "填寫客製打賞金額");
   const amountInput = new TextInputBuilder()
     .setCustomId("amount")
-    .setLabel(tipData.crownOrder ? "冠名單議定金額" : "客製禮物單價")
-    .setPlaceholder("請輸入整數，例如：999")
-    .setStyle(TextInputStyle.Short)
+    .setLabel(tipData.crownOrder ? "冠名單議定金額" : "客製金額（每行一筆）")
+    .setPlaceholder(tipData.crownOrder ? "請輸入整數，例如：999" : "例如第一行 500，第二行 1200")
+    .setStyle(tipData.crownOrder ? TextInputStyle.Short : TextInputStyle.Paragraph)
     .setMinLength(1)
-    .setMaxLength(9)
+    .setMaxLength(tipData.crownOrder ? 9 : 300)
     .setRequired(true);
   modal.addComponents(new ActionRowBuilder().addComponents(amountInput));
   if (tipData.crownOrder) {
@@ -2491,18 +2517,13 @@ async function handleTipCustomPriceModal(interaction) {
   }
 
   const amountText = interaction.fields.getTextInputValue("amount");
-  if (!/^\d+$/.test(amountText.trim())) {
-    return interaction.editReply({
-      content: "❌ 金額格式錯誤，請輸入大於 0 的整數。",
-    });
-  }
-  const amount = Number(amountText);
-  if (!Number.isSafeInteger(amount) || amount <= 0) {
-    return interaction.editReply({
-      content: "❌ 金額格式錯誤，請輸入大於 0 的整數。",
-    });
-  }
+  let priceSummary;
+  let chooseStaff = false;
   if (tipData.crownOrder) {
+    const amount = Number(amountText);
+    if (!/^\d+$/.test(amountText.trim()) || !Number.isSafeInteger(amount) || amount <= 0) {
+      return interaction.editReply({ content: "❌ 金額格式錯誤，請輸入大於 0 的整數。" });
+    }
     const giftedHours = Number(
       interaction.fields.getTextInputValue("gifted_hours").trim(),
     );
@@ -2519,22 +2540,43 @@ async function handleTipCustomPriceModal(interaction) {
         content: "❌ 贈送還單時數與冠名時長都必須是大於 0 的整數。",
       });
     }
+    tipData.amount = amount;
     tipData.giftedHours = giftedHours;
     tipData.durationHours = durationHours;
+    priceSummary = `${amount.toLocaleString("zh-TW")} ASD`;
+  } else {
+    let gifts;
+    try {
+      gifts = priceCustomTipGifts(getTipGiftSelections(tipData), amountText);
+    } catch (error) {
+      return interaction.editReply({ content: `❌ ${error.message}` });
+    }
+    const prices = gifts.filter((gift) => gift.customPrice);
+    priceSummary = prices.map((gift) => `${gift.price.toLocaleString("zh-TW")} ASD`).join("、");
+    chooseStaff = tipData.customPriceBeforeStaff || prices.length > 1;
+    tipData.gifts = gifts;
+    if (chooseStaff) {
+      if (tipData.quantitySelectionStaffIds) {
+        tipData.selectedStaffIds = [...tipData.quantitySelectionStaffIds];
+      }
+      for (const field of ["staffSelectionCompleted", "quantityCompleted", "quantitySelectionStaffIds",
+        "quantityMode", "sharedQuantities", "quantitiesByStaff", "allocations", "totalAmount", "amount"]) {
+        delete tipData[field];
+      }
+      tipData.item = gifts.map((gift) => gift.name).join("、");
+    }
   }
 
-  tipData.amount = amount;
-  if (!tipData.crownOrder && Array.isArray(tipData.gifts)) {
-    tipData.gifts = tipData.gifts.map((gift) =>
-      gift.customPrice ? { ...gift, price: amount } : gift,
-    );
-  }
+  delete tipData.customPriceBeforeStaff;
   tipData.customPriceRequired = false;
   tipData.customPriceSet = true;
   if (tipData.crownOrder) updateCrownOrderItem(tipData);
-  else refreshTipTotals(tipData);
+  else if (!chooseStaff) refreshTipTotals(tipData);
   await setPendingTip(tipId, tipData);
 
+  if (chooseStaff && !(await sendTipStaffPicker(interaction.channel, tipId, tipData))) {
+    return interaction.editReply({ content: "❌ 已儲存金額，但目前沒有可選擇的陪陪。可按「上一步」重新操作。" });
+  }
   if (tipData.customPriceMessageId) {
     const message = await interaction.channel.messages
       .fetch(tipData.customPriceMessageId)
@@ -2543,7 +2585,7 @@ async function handleTipCustomPriceModal(interaction) {
       await message.edit({
         content:
           `✅ ${tipData.crownOrder ? "自定冠內容" : "客製打賞"}已由客服完成設定\n` +
-          `金額：${amount.toLocaleString("zh-TW")} ASD` +
+          `金額：${priceSummary}` +
           (tipData.crownOrder
             ? `｜贈送還單 ${tipData.giftedHours}hrs｜冠名 ${tipData.durationHours}hrs`
             : ""),
@@ -2559,7 +2601,7 @@ async function handleTipCustomPriceModal(interaction) {
       tipId,
       formatTipStaffMentions(getTipStaffIds(tipData)),
     );
-  } else {
+  } else if (!chooseStaff) {
     await sendTipBroadcastPreferencePrompt(
       interaction.channel,
       tipId,
@@ -2568,8 +2610,8 @@ async function handleTipCustomPriceModal(interaction) {
   }
   return interaction.editReply({
     content:
-      `✅ ${tipData.crownOrder ? "自定冠" : "客製打賞"}金額已設定為 ${amount.toLocaleString("zh-TW")} ASD\n` +
-      `已請客人繼續選擇付款方式。`,
+      `✅ ${tipData.crownOrder ? "自定冠" : "客製打賞"}金額已設定為 ${priceSummary}\n` +
+      (chooseStaff ? "請繼續選擇受賞陪陪，再分配各筆金額。" : "已請客人繼續選擇付款方式。"),
   });
 }
 
@@ -2699,6 +2741,10 @@ async function handleTipPaymentSelect(interaction) {
     return interaction.editReply({
       content: "❌ 只有打賞人本人可以選擇付款方式。",
     });
+  }
+
+  if (tipData.customPriceRequired || (!tipData.crownOrder && tipData.customPriceSet && !tipData.quantityCompleted)) {
+    return interaction.editReply({ content: "❌ 請先完成客製金額與受賞陪陪分配，再選擇付款方式。" });
   }
 
   const paymentMethod = selection?.paymentMethod;

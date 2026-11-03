@@ -28,7 +28,7 @@ function rewindTipFlow(data, target, now = Date.now()) {
   }
   if (['gift','staff'].includes(target)) delete next.staffSelectionCompleted;
   if (target === 'gift') {
-    for (const key of ['gifts','item','customPriceSet','customPriceRequired']) delete next[key];
+    for (const key of ['gifts','item','customPriceSet','customPriceRequired','customPriceBeforeStaff']) delete next[key];
   }
   return next;
 }
