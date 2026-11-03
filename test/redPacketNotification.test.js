@@ -78,11 +78,11 @@ test("領取成功只通知一次，使用 RPC 餘額且禁止重寫錢包明細
   assert.equal(message.enforceNonce, true);
   assert.equal(message.nonce.length, 24);
 });
-test("舊紅包 fallback 領取也通知", async () => {
+test("領取結果缺失時不得繞過到期檢查呼叫舊 RPC", async () => {
   const h = harness(success, { fallback: true });
   await h.run();
-  assert.equal(h.calls.fallback, 1);
-  assert.equal(h.calls.notifications.length, 1);
+  assert.equal(h.calls.fallback, 0);
+  assert.equal(h.calls.notifications.length, 0);
 });
 test("最後一份紅包更新搶完狀態並通知", async () => {
   const h = harness({ ...success, left_amount: 0, left_count: 0 });

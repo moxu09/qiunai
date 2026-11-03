@@ -1266,8 +1266,8 @@ test("打賞播報可依老闆選擇顯示帳號或匿名", () => {
 
 test("多人打賞播報拆成每位陪陪各自一筆", () => {
   const jobs = splitTipBroadcastAllocations([
-    { staffId: "staff-a", lines: [{ name: "煙火", quantity: 2 }] },
-    { staffId: "staff-b", lines: [{ name: "煙火", quantity: 1 }] },
+    { staffId: "staff-a", amount: 198, lines: [{ name: "煙火", quantity: 2 }] },
+    { staffId: "staff-b", amount: 99, lines: [{ name: "煙火", quantity: 1 }] },
   ]);
   assert.deepEqual(
     jobs.map((job) => [job.staffId, job.line.quantity]),
@@ -1379,7 +1379,6 @@ const {
   getApplicationFields,
   getConfiguredRoleNames,
   hasActiveCompanionAtStore,
-  hasPaidOrderAtStore,
   normalizeRoleName,
 } = require("../events/employmentSystem");
 const { formatComplaintSender } = require("../events/complaintSystem");
@@ -1398,7 +1397,7 @@ const {
 test("anonymous complaints never include the sender identity", () => {
   const user = { id: "123456789012345678", tag: "secret-user" };
   const anonymousText = formatComplaintSender(true, user);
-  assert.equal(anonymousText, "匿名（未紀錄發送者）");
+  assert.equal(anonymousText, "匿名（帳號由系統留存供回覆，不向執行長顯示）");
   assert.equal(anonymousText.includes(user.id), false);
   assert.equal(anonymousText.includes(user.tag), false);
   assert.match(formatComplaintSender(false, user), /123456789012345678/);
@@ -1651,15 +1650,19 @@ test("crown packages keep gifted hours separate from crown duration", () => {
       durationHours,
     ]),
     [
-      ["半日冠", 1899, 6, 12],
-      ["一日冠", 3999, 12, 24],
-      ["三日冠", 12888, 36, 72],
-      ["周冠名", 26666, 84, 168],
-      ["月冠名", 188888, 336, 720],
+      ["半日冠", 1920, 6, 12],
+      ["一日冠", 3720, 12, 24],
+      ["三日冠", 10920, 36, 72],
+      ["週冠", 24920, 84, 168],
+      ["月冠", 94520, 336, 720],
+      ["純後綴・一日", 820, 0, 24],
+      ["純後綴・三天", 2120, 0, 72],
+      ["純後綴・一週", 4520, 0, 168],
+      ["純後綴・一月", 15920, 0, 720],
       ["自定冠", null, null, null],
     ],
   );
-  assert.equal(getCrownPackageByKey(crownPackages, "crown_week").name, "周冠名");
+  assert.equal(getCrownPackageByKey(crownPackages, "crown_week").name, "週冠");
   assert.equal(
     buildCrownOrderItem({
       crownName: "半日冠",
@@ -2002,10 +2005,12 @@ test("exclusive membership cards follow the member's one-time variant", () => {
   assert.equal(resolveMembershipCardImage({}, tier), null);
 });
 
-test("chat drops use an exact 0.5% threshold and validate rewards", () => {
+test("chat drops use an exact 1% threshold and validate rewards", () => {
   assert.equal(shouldCreateChatDrop(0), true);
   assert.equal(shouldCreateChatDrop(0.004999), true);
-  assert.equal(shouldCreateChatDrop(0.005), false);
+  assert.equal(shouldCreateChatDrop(0.005), true);
+  assert.equal(shouldCreateChatDrop(0.009999), true);
+  assert.equal(shouldCreateChatDrop(0.01), false);
   assert.equal(shouldCreateChatDrop(1), false);
   assert.equal(parseChatDropReward("claim_1"), 1);
   assert.equal(parseChatDropReward("claim_20"), 20);
@@ -2170,33 +2175,6 @@ test("employment applications mention only the examiner role matching game, trac
   );
 });
 
-test("employment applications block only customers with paid orders in the same store", async () => {
-  const filters = [];
-  const supabase = {
-    from(table) {
-      assert.equal(table, "play_orders");
-      return {
-        select() { return this; },
-        eq(column, value) { filters.push([column, value]); return this; },
-        in(column, values) { filters.push([column, values]); return this; },
-        async limit() { return { data: [{ id: "paid-order" }], error: null }; },
-      };
-    },
-  };
-
-  assert.equal(await hasPaidOrderAtStore({
-    supabase,
-    discordUserId: "123456789012345678",
-    guildId: "qiunai-guild",
-  }), true);
-  assert.deepEqual(filters, [
-    ["guild_id", "qiunai-guild"],
-    ["customer_id", "123456789012345678"],
-    ["paid", true],
-    ["order_type", ["訂單", "自助訂單", "訂單追加"]],
-  ]);
-});
-
 test("tip-only customers are not blocked from employment applications", async () => {
   const replies = [];
   const supabase = {
@@ -2224,6 +2202,7 @@ test("tip-only customers are not blocked from employment applications", async ()
   await system.handleInteraction({
     customId: "employment_start",
     guildId: "qiunai-guild",
+    guild: { members: { fetch: async () => ({ pending: false }) } },
     user: { id: "123456789012345678" },
     async deferReply(payload) { replies.push(["defer", payload]); },
     async editReply(payload) { replies.push(["edit", payload]); },
@@ -2231,7 +2210,7 @@ test("tip-only customers are not blocked from employment applications", async ()
   assert.match(replies[1][1].content, /是否同意陪玩共同守則/);
 });
 
-test("paid customers receive the owner restriction when starting an application", async () => {
+test("verified paid customers can start an employment application", async () => {
   const replies = [];
   const supabase = {
     from(table) {
@@ -2256,6 +2235,7 @@ test("paid customers receive the owner restriction when starting an application"
   const handled = await system.handleInteraction({
     customId: "employment_start",
     guildId: "qiunai-guild",
+    guild: { members: { fetch: async () => ({ pending: false }) } },
     user: { id: "123456789012345678" },
     async deferReply(payload) { replies.push(["defer", payload]); },
     async editReply(payload) { replies.push(["edit", payload]); },
@@ -2263,10 +2243,7 @@ test("paid customers receive the owner restriction when starting an application"
 
   assert.equal(handled, true);
   assert.equal(replies[0][1].flags, 64);
-  assert.equal(
-    replies[1][1].content,
-    "老闆身分不給予申請陪陪，別間店消費則不受影響",
-  );
+  assert.match(replies[1][1].content, /是否同意陪玩共同守則/);
 });
 
 test("paid active companions can still start an employment assessment", async () => {
@@ -2306,11 +2283,23 @@ test("paid active companions can still start an employment assessment", async ()
   await system.handleInteraction({
     customId: "employment_start",
     guildId: "qiunai-guild",
+    guild: { members: { fetch: async () => ({ pending: false }) } },
     user: { id: "123456789012345678" },
     async deferReply(payload) { replies.push(["defer", payload]); },
     async editReply(payload) { replies.push(["edit", payload]); },
   });
   assert.match(replies[1][1].content, /是否同意陪玩共同守則/);
+});
+
+test("pending Discord members cannot start an employment application", async () => {
+  const replies = [];
+  const system = createEmploymentSystem({}, { brandName: "測試店", organization: "qiunai" }, {});
+  await system.handleInteraction({
+    customId: "employment_start", guildId: "guild", guild: { members: { fetch: async () => ({ pending: true }) } },
+    user: { id: "123456789012345678" },
+    async deferReply() {}, async editReply(payload) { replies.push(payload); },
+  });
+  assert.match(replies[0].content, /完成.*成員規則驗證/);
 });
 
 test("completed employment threads delete after 24 hours of inactivity", () => {

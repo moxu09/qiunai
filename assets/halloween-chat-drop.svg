@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="330" viewBox="0 0 1000 330">
+<defs>
+<linearGradient id="bg" x2="1" y2="1"><stop stop-color="#27183f"/><stop offset="1" stop-color="#110e20"/></linearGradient>
+<radialGradient id="glow"><stop stop-color="#b36aff" stop-opacity=".28"/><stop offset="1" stop-color="#b36aff" stop-opacity="0"/></radialGradient>
+<linearGradient id="orange" x2=".8" y2="1"><stop stop-color="#ffcc73"/><stop offset=".5" stop-color="#ff9237"/><stop offset="1" stop-color="#e75f27"/></linearGradient>
+<linearGradient id="moon" x2="1" y2="1"><stop stop-color="#fff3cf"/><stop offset="1" stop-color="#ffc57c"/></linearGradient>
+<g id="star"><path d="M0-7 2-2 7 0 2 2 0 7-2 2-7 0-2-2Z" fill="#ffd899"/></g>
+<g id="bat"><path d="M0 0 Q-12-20-29-9 Q-21-7-24 4 Q-14-2-6 8 L0 14 6 8 Q14-2 24 4 Q21-7 29-9 Q12-20 0 0" fill="#100d1e"/></g>
+</defs>
+<rect width="1000" height="330" rx="20" fill="url(#bg)"/>
+<ellipse cx="740" cy="170" rx="360" ry="260" fill="url(#glow)"/>
+<path d="M24 278Q250 232 477 282T1000 265V330H0Z" fill="#1d142c"/>
+<rect x="33" y="31" width="934" height="268" rx="12" fill="none" stroke="#e8b173" stroke-opacity=".2"/>
+<circle cx="832" cy="91" r="56" fill="url(#moon)"/><circle cx="847" cy="75" r="54" fill="#20142f"/>
+<use href="#bat" transform="translate(700 68) rotate(-13) scale(.9)"/><use href="#bat" transform="translate(917 146) rotate(17) scale(.65)"/>
+<use href="#star" transform="translate(610 110)"/><use href="#star" transform="translate(933 53) scale(.7)"/><use href="#star" transform="translate(625 253) scale(.6)"/><use href="#star" transform="translate(528 59) scale(.5)"/>
+<text x="65" y="87" fill="#ffba65" font-family="Noto Sans" font-size="17" font-weight="600" letter-spacing="5">TRICK OR TREAT</text>
+<text x="61" y="158" fill="#fff0da" font-family="Noto Sans CJK TC" font-size="48" font-weight="700">小奈的萬聖糖果夜</text>
+<text x="65" y="201" fill="#cabbdb" font-family="Noto Sans CJK TC" font-size="21">今晚的幸運，藏在南瓜糖果袋裡。</text>
+<rect x="65" y="230" width="170" height="34" rx="17" fill="#ffae55"/>
+<text x="85" y="253" fill="#2a1838" font-family="Noto Sans CJK TC" font-size="17" font-weight="700">聊天撿糖 · 限定掉落</text>
+<ellipse cx="786" cy="281" rx="128" ry="13" fill="#0d0b16"/>
+<path d="M778 137Q762 112 780 96L796 101Q781 117 792 140" fill="#90b68b"/>
+<ellipse cx="739" cy="208" rx="54" ry="70" fill="#ee702d"/><ellipse cx="831" cy="208" rx="54" ry="70" fill="#ee702d"/>
+<ellipse cx="765" cy="209" rx="53" ry="74" fill="url(#orange)"/><ellipse cx="805" cy="209" rx="53" ry="74" fill="url(#orange)"/>
+<ellipse cx="785" cy="209" rx="39" ry="75" fill="url(#orange)"/>
+<path d="M727 190 755 167 764 197Z M806 197 815 167 843 190Z" fill="#361a32"/>
+<path d="M778 207 787 192 795 207Z" fill="#361a32"/>
+<path d="M733 220Q785 263 838 220L826 248 812 243 798 260 783 247 770 257 754 240 743 242Z" fill="#361a32"/>
+<g transform="translate(658 273) rotate(-20)"><path d="M-28-12-13-5V5L-28 12Z M28-12 13-5V5L28 12Z" fill="#ffb8d0"/><rect x="-15" y="-13" width="30" height="26" rx="9" fill="#f18ab4"/><path d="M-5-12 5 12M6-12 14 5" stroke="#ffe1ec" stroke-width="5"/></g>
+<g transform="translate(910 260) rotate(25)"><path d="M-25-10-11-5V5L-25 10Z M25-10 11-5V5L25 10Z" fill="#d8b7ff"/><rect x="-13" y="-12" width="26" height="24" rx="8" fill="#a77ee6"/><path d="M-5-11 5 11" stroke="#ead9ff" stroke-width="6"/></g>
+</svg>

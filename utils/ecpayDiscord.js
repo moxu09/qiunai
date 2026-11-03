@@ -26,7 +26,7 @@ const METHODS = Object.freeze({
   BARCODE: { label: "超商條碼", min: 18, max: 20_000 },
 });
 
-function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = null, selfService = false, allowAtm = true } = {}) {
+function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = null, selfService = false, allowAtm = true, allowCancel = false } = {}) {
   const order = String(payment.platformOrderId || "");
   const base = String(payment.paymentUrl || "").split("/payments/ecpay/service/checkout")[0];
   if (!/^[A-Za-z0-9]{1,20}$/.test(order) || !/^https:\/\//.test(base))
@@ -45,7 +45,12 @@ function buildEcpayPaymentRows(payment, amount, { topup = false, onlyMethod = nu
       .setLabel(limit.label).setStyle(ButtonStyle.Primary));
   }
   if (!buttons.length) throw new Error("此訂單金額不適用所選的綠界付款方式");
-  return [new ActionRowBuilder().addComponents(buttons)];
+  const rows = [new ActionRowBuilder().addComponents(buttons)];
+  if (allowCancel && (!onlyMethod || onlyMethod === "CARD")) rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`ecpay_cancel_unsubmitted_${order}`)
+      .setLabel("取消未送出的刷卡付款並返還折抵").setStyle(ButtonStyle.Secondary),
+  ));
+  return rows;
 }
 
 async function renderBarcodes(barcodes) {
@@ -177,4 +182,22 @@ async function sendPreferredEcpayDirect(channel, userId, order, supabase, baseUr
   return !failure;
 }
 
-module.exports = { buildEcpayPaymentRows, handleEcpayDirect, sendPreferredEcpayDirect, renderBarcodes, assertBankTransferCanBeSelected };
+async function handleEcpayUnsubmittedCancel(interaction, supabase) {
+  const match = /^ecpay_cancel_unsubmitted_([A-Za-z0-9]{1,20})$/.exec(interaction.customId || "");
+  if (!match) return false;
+  if (!interaction.deferred && !interaction.replied) await interaction.deferReply({flags:64});
+  if ((interaction.guildId || interaction.guild?.id) !== "1206138511535898654") {
+    await interaction.editReply({content:"❌ 此功能僅供秋奈使用。"}); return true;
+  }
+  const result = await supabase.rpc("qiunai_cancel_unsubmitted_card", {
+    p_trade_no:match[1],p_user_id:interaction.user.id,p_channel_id:interaction.channelId,
+  });
+  if (result.error) {await interaction.editReply({content:`❌ ${result.error.message}`});return true;}
+  await interaction.message?.edit({components:[]}).catch(()=>null);
+  await interaction.editReply({content:result.data?.already_processed ? "這筆付款先前已取消，沒有重複返還。" :
+    "✅ 已取消未送出的刷卡付款與原訂單；保留的點數及有使用紀錄的優惠券已返還，可重新下單。" +
+    (result.data?.coupon_review_required ? "\n⚠️ 這張訂單的舊優惠券使用紀錄缺漏，請客服核對補回；系統沒有自動補發不明券。" : "")});
+  return true;
+}
+
+module.exports = { handleEcpayUnsubmittedCancel, buildEcpayPaymentRows, handleEcpayDirect, sendPreferredEcpayDirect, renderBarcodes, assertBankTransferCanBeSelected };

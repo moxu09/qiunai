@@ -30,29 +30,6 @@ const FONT_PATH = path.join(
 const pendingApplications = new Map();
 const processingReviews = new Set();
 
-async function hasPaidOrderAtStore({ supabase, discordUserId, guildId }) {
-  if (!supabase || !discordUserId || !guildId) {
-    throw new Error("目前無法確認申請人的消費身分，請稍後再試");
-  }
-
-  const { data, error } = await supabase
-    .from("play_orders")
-    .select("id")
-    .eq("guild_id", guildId)
-    .eq("customer_id", discordUserId)
-    .eq("paid", true)
-    // 打賞雖然會記成已付款 play_orders，並不代表申請人是下單闆闆。
-    .in("order_type", ["訂單", "自助訂單", "訂單追加"])
-    .limit(1);
-
-  if (error) {
-    console.error("[入職申請] 查詢同店消費紀錄失敗", error);
-    throw new Error("目前無法確認申請人的消費身分，請稍後再試");
-  }
-
-  return Array.isArray(data) && data.length > 0;
-}
-
 async function hasActiveCompanionAtStore({
   supabase,
   discordUserId,
@@ -1382,27 +1359,9 @@ function createEmploymentSystem(client, config, supabase) {
     try {
       if (customId === "employment_start") {
         await interaction.deferReply({ flags: 64 });
-        const guildId = interaction.guildId || interaction.guild?.id || config.guildId;
-        const [isStoreCustomer, isActiveCompanion] = await Promise.all([
-          hasPaidOrderAtStore({
-            supabase,
-            discordUserId: interaction.user.id,
-            guildId,
-          }),
-          hasActiveCompanionAtStore({
-            supabase,
-            discordUserId: interaction.user.id,
-            guildId,
-            organization: config.organization,
-          }),
-        ]);
-        const hasCustomerApplicationException = (
-          config.customerApplicationExceptions || []
-        ).some((id) => String(id) === String(interaction.user.id));
-        if (isStoreCustomer && !isActiveCompanion && !hasCustomerApplicationException) {
-          await interaction.editReply({
-            content: "老闆身分不給予申請陪陪，別間店消費則不受影響",
-          });
+        const applicant = await interaction.guild?.members?.fetch(interaction.user.id).catch(() => null);
+        if (!applicant || applicant.pending !== false) {
+          await interaction.editReply({ content: "❌ 請先完成這家店 Discord 伺服器的成員規則驗證，再申請入職。" });
           return true;
         }
         createFlow(interaction.user);
@@ -1588,7 +1547,6 @@ module.exports = {
   getApplicationFields,
   getConfiguredRoleNames,
   hasActiveCompanionAtStore,
-  hasPaidOrderAtStore,
   normalizeRoleName,
   requestEmploymentSigningInvitation,
 };

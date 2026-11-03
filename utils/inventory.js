@@ -22,7 +22,10 @@ function groupInventoryItems(items) {
 
 function formatInventoryItemTitle(item) {
   const count = Math.max(1, Number(item?.count) || 1);
-  return `• ${item?.item_name || "未知物品"}${count > 1 ? ` ×${count}` : ""}`;
+  const name = item?.item_type === "ticket" && /^秋奈一番賞抽獎[券劵]$/.test(item.item_name)
+    ? "一番賞抽獎券"
+    : item?.item_name || "未知物品";
+  return `• ${name}${count > 1 ? ` ×${count}` : ""}`;
 }
 
 module.exports = {

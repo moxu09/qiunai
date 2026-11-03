@@ -3,24 +3,13 @@ const assert = require("node:assert/strict");
 const { createEmploymentSystem } = require("../events/employmentSystem");
 const config = require("../config/employment");
 
-async function startApplication(userId, applicationConfig) {
+async function startApplication(userId, pending) {
   const replies = [];
-  const supabase = {
-    from(table) {
-      return {
-        select() { return this; },
-        eq() { return this; },
-        in() { return this; },
-        async limit() {
-          return { data: table === "play_orders" ? [{ id: "paid" }] : [], error: null };
-        },
-      };
-    },
-  };
-  const system = createEmploymentSystem({}, applicationConfig, supabase);
+  const system = createEmploymentSystem({}, config, {});
   await system.handleInteraction({
     customId: "employment_start",
     guildId: "test-guild",
+    guild: { members: { fetch: async () => ({ pending }) } },
     user: { id: userId },
     async deferReply() {},
     async editReply(payload) { replies.push(payload); },
@@ -28,11 +17,11 @@ async function startApplication(userId, applicationConfig) {
   return replies.at(-1).content;
 }
 
-test("only the approved Qiunai customer bypasses the customer restriction", async () => {
-  assert.match(await startApplication("404285545024585729", config), /是否同意陪玩共同守則/);
-  assert.match(await startApplication("123456789012345678", config), /老闆身分不給予申請/);
+test("完成伺服器驗證的顧客都可以申請入職", async () => {
+  for (const userId of ["404285545024585729", "123456789012345678"])
+    assert.match(await startApplication(userId, false), /是否同意陪玩共同守則/);
 });
 
-test("the customer exception does not apply without the store configuration", async () => {
-  assert.match(await startApplication("404285545024585729", { organization: "deepnight" }), /老闆身分不給予申請/);
+test("尚未完成成員規則驗證不得申請", async () => {
+  assert.match(await startApplication("123456789012345678", true), /成員規則驗證/);
 });

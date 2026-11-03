@@ -1,8 +1,10 @@
 const { SlashCommandBuilder } = require("discord.js");
 const { buildHeartInquiryCommand } = require("./utils/heartInquiry");
+const { buildRedeemPrizeCommand } = require("./utils/prizeRedemption");
 
 module.exports = [
   buildHeartInquiryCommand(),
+  buildRedeemPrizeCommand(),
   new SlashCommandBuilder().setName("首充返利")
     .setDescription("查看或選擇本月首充消費點數返利方案")
     .addStringOption(option => option.setName("方案").setDescription("已領本月返利後不能更換")
@@ -58,6 +60,22 @@ module.exports = [
     .addStringOption((option) =>
       option.setName("description").setDescription("商品介紹").setRequired(true)
     ),
+
+  new SlashCommandBuilder()
+    .setName("發送優惠券")
+    .setDescription("發送優惠券給指定玩家")
+    .addUserOption(option => option.setName("玩家").setDescription("選擇要發送優惠券的玩家").setRequired(true))
+    .addStringOption(option => option.setName("優惠券").setDescription("選擇要發送的優惠券").setRequired(true)
+      .addChoices(
+        {name:"95折券",value:"95折券"},
+        {name:"9折券",value:"9折券"},
+        {name:"85折券（限原價1500元內）",value:"85折折價券"},
+        {name:"8折折價券",value:"8折折價券"},
+        {name:"7折折價券",value:"7折折價券"},
+        {name:"6折折價券",value:"6折折價券"},
+      ))
+    .addIntegerOption(option => option.setName("數量").setDescription("要發送幾張").setRequired(true).setMinValue(1).setMaxValue(20))
+    .addStringOption(option => option.setName("備註").setDescription("可不填，例如：活動補發、VIP福利、客服補償").setRequired(false)),
 
   new SlashCommandBuilder()
     .setName("使用優惠券")

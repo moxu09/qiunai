@@ -1,4 +1,6 @@
 const { buildHeartInquiryCommand, handleHeartInquiry } = require("./utils/heartInquiry");
+const { buildRedeemPrizeCommand, createPrizeRedemption } = require("./utils/prizeRedemption");
+const { buildTimedRoleCommand, buildExtendTimedRoleCommand, createTimedRoleManager } = require("./utils/timedRoles");
 const { recoverPendingEcpayPayments } = require("./utils/ecpayInquiry");
 const { memberHasRole, interactionHasPermission } = require("./utils/interactionPermissions");
 require("dotenv").config();
@@ -78,6 +80,7 @@ const { parseAllowedServices } = require("./utils/services");
 const { ORDER_FLOW_TTL_MS } = require("./utils/orderFlow");
 const { createServiceFlowStore } = require("./utils/serviceFlowStore");
 const { scheduleChannelDeletion } = require("./utils/channelCleanup");
+const { isInChannelOrder } = require("./utils/inChannelOrder");
 const { createCustomerServiceTickets } = require("./events/customerServiceTickets");
 const { createQiunaiReferrals } = require("./events/qiunaiReferrals");
 const {
@@ -136,6 +139,7 @@ const {
   getRedPacketModeLabel,
   normalizeRedPacketMode,
 } = require("./utils/redPackets");
+const {createRedPacketExpiry} = require("./utils/redPacketExpiry");
 const TIP_GIFTS = require("./config/tipGifts");
 const TIP_BROADCASTS = require("./config/tipBroadcasts");
 const CROWN_PACKAGES = require("./config/crownPackages");
@@ -154,6 +158,9 @@ const BANK_TRANSFER_QR_CODE_PATH = path.join(
   "bank-transfer-line-bank.png",
 );
 const complaintConfig = require("./config/complaint");
+const { buildChatDropPayload, chatDropClaimText } = require("./utils/chatDropTheme");
+const { installSeasonalMessages } = require("./utils/halloweenSeason");
+const { createHalloweenLifecycle } = require("./utils/halloweenLifecycle");
 const {
   createEmploymentSystem,
 } = require("./events/employmentSystem");
@@ -175,6 +182,7 @@ const {
 const { appendTipBackButton, rewindTipFlow } = require("./utils/tipNavigation");
 const {
   buildCrownOrderItem,
+  describeCrownPackage,
   getCrownPackageByKey,
 } = require("./utils/crownOrders");
 const {
@@ -242,7 +250,6 @@ const QIUNAI_STAFF_MALE_ROLE_ID = "1513214182093488148";
 const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 const REVIEW_SHOWCASE_CHANNEL_ID = "1206157728532271185";
-const TIP_BROADCAST_CHANNEL_ID = "1210250269292761099";
 const JKOPAY_REFUND_CHANNEL_ID =
   process.env.JKOPAY_REFUND_CHANNEL_ID || "1545380103675052092";
 const client = new Client({
@@ -254,13 +261,28 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
+const prizeRedemption = createPrizeRedemption({
+  db: supabase, guildId: process.env.GUILD_ID, organization: "qiunai",
+  customerServiceRoleIds: [
+    "1210642900355125288",
+    ...(String(process.env.CUSTOMER_SERVICE_ROLE_ID || "").match(/\d{17,20}/g) || []),
+    ...(String(process.env.CUSTOMER_SERVICE_ROLE_IDS || "").match(/\d{17,20}/g) || []),
+  ],
+});
+const timedRoleManager = createTimedRoleManager({ db: supabase, client, guildId: process.env.GUILD_ID });
 const heartGiftConfig = require("./utils/heartGifts");
 const heartGifts = heartGiftConfig.createHeartGifts({ client, supabase });
 const serviceGiftCatalog = require("./utils/serviceGiftCatalog.cjs").createServiceGiftCatalog({
   organization: "qiunai",
   tipGifts: TIP_GIFTS,
   readMessage: path => client.rest.get(path),
+  token: process.env.TOKEN,
 });
+const serviceTemplatePanel = require("./utils/serviceTemplatePanel.cjs").createServiceTemplatePanel({
+  client, supabase, organization: "qiunai", tipGifts: TIP_GIFTS,
+  tipBroadcasts: TIP_BROADCASTS, loadHeartGifts: serviceGiftCatalog.heart,
+});
+installSeasonalMessages(client.rest);
 const customerServiceTickets = createCustomerServiceTickets({
   client,
   isStaff: isAdminOrStaff,
@@ -281,13 +303,15 @@ const deviceAuditReviewerSync = createDeviceAuditReviewerSync({
   roleId:
     process.env.DEVICE_AUDIT_REVIEWER_ROLE_ID || "1513626379437211900",
 });
+const redPacketExpiry = createRedPacketExpiry({supabase,client,guildId:process.env.GUILD_ID});
 const employmentSystem = createEmploymentSystem(client, employmentConfig, supabase);
-const complaintSystem = createComplaintSystem(client, complaintConfig);
+const complaintSystem = createComplaintSystem(client, complaintConfig, supabase);
 const runtimeHealth = createHealthState("rainbot-qiunai");
 let jkopayService;
 let websiteOrderBridge;
 const runtimeServer = createHealthServer(runtimeHealth, {
   requestHandler: async (request, response) => {
+    if (await serviceGiftCatalog.handleHttpRequest(request, response)) return true;
     if(websiteOrderBridge&&await websiteOrderBridge.handleHttpRequest(request,response))return true;
     return await jkopayService?.handleHttpRequest(request,response)||false;
   },
@@ -975,18 +999,18 @@ async function sendTipBroadcastSafely(tipData) {
   if (!tipData.broadcastEnabled || tipData.crownOrder || tipData.heartTip) return;
 
   try {
-    const channel = await client.channels
-      .fetch(TIP_BROADCAST_CHANNEL_ID)
-      .catch(() => null);
-    if (!channel?.isTextBased()) {
-      throw new Error(`找不到打賞播報頻道 ${TIP_BROADCAST_CHANNEL_ID}`);
-    }
     const failures = [];
-    let sentCount = 0;
+    const sentChannels = new Map();
+    const channels = new Map();
     const jobs = splitTipBroadcastAllocations(allocations);
-    for (const [index, { staffId, line }] of jobs.entries()) {
+    for (const [index, { staffId, line, channelId }] of jobs.entries()) {
       const entry = getTipBroadcastEntry(line.name, line.key);
       try {
+        if (!channels.has(channelId)) {
+          channels.set(channelId, await client.channels.fetch(channelId).catch(() => null));
+        }
+        const channel = channels.get(channelId);
+        if (!channel?.isTextBased()) throw new Error(`找不到打賞播報頻道 ${channelId}`);
         const mentionIds = tipData.broadcastAnonymous
           ? [staffId]
           : [tipData.tipperId, staffId];
@@ -1025,7 +1049,7 @@ async function sendTipBroadcastSafely(tipData) {
           tipData,
           `${index}:${staffId}:${line.key || line.name}`,
         );
-        sentCount += 1;
+        sentChannels.set(channelId, channel);
       } catch (error) {
         failures.push(error);
         console.error(
@@ -1034,15 +1058,16 @@ async function sendTipBroadcastSafely(tipData) {
         );
       }
     }
-    if (sentCount) {
+    for (const [channelId, channel] of sentChannels) {
       const thanksPayload = {
         content: "**感謝老闆對秋奈陪玩及陪陪的喜愛 <:I_cn_b02:1221687963621265451>**",
         allowedMentions: { parse: [] },
       };
       try {
-        await sendTipBroadcastMessage(channel, thanksPayload, tipData, "thanks");
+        const thanksKey = channelId === "1210250269292761099" ? "thanks" : `thanks:${channelId}`;
+        await sendTipBroadcastMessage(channel, thanksPayload, tipData, thanksKey);
       } catch (error) {
-        throw error;
+        failures.push(error);
       }
     }
     if (failures.length) {
@@ -1155,11 +1180,17 @@ async function sendTipPaymentSelectPrompt(channel, tipId, selectedStaffText) {
   });
 }
 async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
-  if (
-    !tipData.heartTip && !getTipGiftSelections(tipData).some((gift) =>
-      getTipBroadcastEntry(gift.name),
-    )
-  ) {
+  let broadcastChannelIds;
+  try {
+    broadcastChannelIds = tipData.heartTip
+      ? [heartGiftConfig.BROADCAST_CHANNEL_ID]
+      : [...new Set(splitTipBroadcastAllocations(buildTipAllocations(tipData)).map((job) => job.channelId))];
+  } catch (error) {
+    console.error("[打賞播報資料不完整]", error);
+    await channel.send({ content: "❌ 打賞對象或金額資料不完整，請重新選擇陪陪與品項後再付款。" });
+    return;
+  }
+  if (!broadcastChannelIds.length) {
     tipData.broadcastEnabled = false;
     tipData.broadcastPreferenceCompleted = true;
     await setPendingTip(tipId, tipData);
@@ -1175,7 +1206,7 @@ async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
   await channel.send({
     content: tipData.heartTip
       ? `<@${tipData.tipperId}> 是否需要將這次心動值打賞播報到 <#${heartGiftConfig.BROADCAST_CHANNEL_ID}>？付款後會依各位陪陪收到的禮物分開累積心動值。`
-      : `<@${tipData.tipperId}> 是否需要將這次打賞播報到秋奈公開打賞頻道？`,
+      : `<@${tipData.tipperId}> 是否需要將這次打賞播報到 ${broadcastChannelIds.map((id) => `<#${id}>`).join("、")}？\n本筆打賞依每位陪陪收到的所有品項合計金額判定：單一陪陪滿 1,300 元，該位陪陪播報至「超頻的愛」；未滿的陪陪仍在原頻道播報，不合併不同陪陪的金額。客製化打賞品項不播報。`,
     components: appendTipBackButton([
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -1570,25 +1601,28 @@ async function startCrownFlowInChannel(channel, user) {
     crownOrder: true,
   });
 
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`crown_package_${tipId}`)
-    .setPlaceholder("請選擇冠名方案")
-    .addOptions(
-      CROWN_PACKAGES.map((item) => ({
-        label: item.custom
-          ? `${item.name}｜價格需議`
-          : `${item.name}｜${item.price} 元`,
-        description: item.custom
-          ? "價格、贈送還單時數及冠名時長由客服議定"
-          : `贈送還單 ${item.giftedHours}hrs｜冠名 ${item.durationHours}hrs`,
-        value: item.key,
-      })),
-    );
+  const menus = [
+    { key: "regular", placeholder: "一般冠名｜請選擇冠名方案", suffixOnly: false },
+    { key: "suffix", placeholder: "純後綴｜請選擇後綴期限", suffixOnly: true },
+  ].map((group) => {
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(`crown_package_${group.key}_${tipId}`)
+      .setPlaceholder(group.placeholder)
+      .addOptions(
+        CROWN_PACKAGES.filter((item) => Boolean(item.suffixOnly) === group.suffixOnly)
+          .map((item) => ({
+            label: item.custom ? `${item.name}｜價格需議` : `${item.name}｜${item.price} 元`,
+            description: describeCrownPackage(item),
+            value: item.key,
+          })),
+      );
+    return new ActionRowBuilder().addComponents(menu);
+  });
   await channel.send({
     content:
       "👑 請選擇冠名方案\n" +
-      "品項標示的時數為贈送還單時數，冠名時長請以選單說明為準。",
-    components: [new ActionRowBuilder().addComponents(menu)],
+      "存單時數與後綴期限分開計算，請以各方案說明為準。",
+    components: menus,
   });
   return tipId;
 }
@@ -1625,7 +1659,7 @@ async function handleCrownPackageSelect(interaction) {
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferReply({ flags: 64 });
   }
-  const tipId = interaction.customId.replace("crown_package_", "");
+  const tipId = interaction.customId.replace(/^crown_package_(?:regular_|suffix_)?/, "");
   const tipData = await getPendingTip(tipId);
   if (!tipData || !tipData.crownOrder) {
     return interaction.editReply({ content: "❌ 冠名單流程已過期，請重新建立。" });
@@ -1642,6 +1676,7 @@ async function handleCrownPackageSelect(interaction) {
   }
   Object.assign(tipData, {
     crownName: crownPackage.name,
+    suffixOnly: crownPackage.suffixOnly,
     giftedHours: crownPackage.giftedHours,
     durationHours: crownPackage.durationHours,
     amount: crownPackage.price,
@@ -1691,8 +1726,8 @@ async function handleCrownPackageSelect(interaction) {
     interaction.channel,
     `✅ 已選擇：${crownPackage.name}\n` +
       (crownPackage.custom
-        ? "價格、贈送還單時數與冠名時長需由客服議定。"
-        : `價格：${crownPackage.price} 元｜贈送還單：${crownPackage.giftedHours}hrs｜冠名時長：${crownPackage.durationHours}hrs`) +
+        ? "價格、存單時數與後綴時長需由客服議定。"
+        : `價格：${crownPackage.price} 元｜${describeCrownPackage(crownPackage)}`) +
       "\n\n請選擇一位冠名陪陪：",
     rows,
   );
@@ -2410,6 +2445,9 @@ async function handleCrownSuffixChoice(interaction) {
     );
     return interaction.showModal(modal);
   }
+  if (tipData.suffixOnly) {
+    return interaction.reply({ content: "❌ 純後綴方案請先填寫陪陪尾綴。", flags: 64 });
+  }
   tipData.changeSuffixes = false;
   tipData.staffSuffix = null;
   await setPendingTip(tipId, tipData);
@@ -2427,8 +2465,10 @@ async function handleCrownSuffixModal(interaction) {
   if (!tipData?.crownOrder || !canAdvanceTipFlow(interaction, tipData)) {
     return interaction.editReply({ content: "❌ 冠名單已失效或你沒有操作權限。" });
   }
+  const staffSuffix = interaction.fields.getTextInputValue("staff_suffix").trim();
+  if (!staffSuffix) return interaction.editReply({ content: "❌ 請填寫陪陪尾綴，不能只輸入空白。" });
   tipData.changeSuffixes = true;
-  tipData.staffSuffix = interaction.fields.getTextInputValue("staff_suffix").trim();
+  tipData.staffSuffix = staffSuffix;
   await setPendingTip(tipId, tipData);
   if (tipData.suffixMessageId) {
     const suffixMessage = await interaction.channel.messages
@@ -2664,6 +2704,8 @@ async function handleTipStaffDone(interaction) {
         .setCustomId(`crown_suffix_yes_${tipId}`)
         .setLabel("修改陪陪尾綴")
         .setStyle(ButtonStyle.Primary),
+    );
+    if (!tipData.suffixOnly) suffixRow.addComponents(
       new ButtonBuilder()
         .setCustomId(`crown_suffix_no_${tipId}`)
         .setLabel("不修改尾綴")
@@ -2671,7 +2713,7 @@ async function handleTipStaffDone(interaction) {
     );
     const suffixMessage = await interaction.channel.send({
       content:
-        "是否要修改陪陪的暱稱尾綴？\n" +
+        (tipData.suffixOnly ? "純後綴方案：請填寫陪陪的暱稱尾綴。\n" : "是否要修改陪陪的暱稱尾綴？\n") +
         "此處會記錄在冠名單內，付款後由客服依冠名時長執行。",
       components: [suffixRow],
     });
@@ -7555,6 +7597,9 @@ async function sendPrivateRoomPanel(client) {
 
 const commands = sortCommandDefinitions([
   buildHeartInquiryCommand(),
+  buildRedeemPrizeCommand(),
+  buildTimedRoleCommand(),
+  buildExtendTimedRoleCommand(),
   new SlashCommandBuilder().setName("使用抽獎券")
     .setDescription("客服核銷指定客人的抽獎券，保留使用紀錄；不自動抽獎或扣款")
     .addUserOption(o => o.setName("客人").setDescription("要核銷抽獎券的客人").setRequired(true))
@@ -7812,6 +7857,10 @@ const commands = sortCommandDefinitions([
           {
             name: "9折券",
             value: "9折券",
+          },
+          {
+            name: "85折券（限原價1500元內）",
+            value: "85折折價券",
           },
           {
             name: "8折折價券",
@@ -8393,6 +8442,30 @@ async function reconcileExistingSignedEmploymentMembers() {
 }
 
 client.once(Events.ClientReady, async () => {
+  timedRoleManager.start();
+  redPacketExpiry.start();
+  const halloween = createHalloweenLifecycle({ client, db: supabase,
+    guildIds: [...new Set([process.env.GUILD_ID, QIUNAI_STAFF_GUILD_ID].filter(Boolean))],
+    refreshPanels: async () => {
+      const tasks = [
+        () => dispatchSystem.sendGameOrderPanels(), () => dispatchSystem.sendSelfServiceOrderPanel(),
+        () => dispatchSystem.sendJkopayTopupPanel(), () => dispatchSystem.sendTipOrderPanel(),
+        () => dispatchSystem.sendWorkReportPanel(), () => refreshShop(client), () => sendTopupPanel(client),
+        () => ichiban.publishPanel(), () => sendJkopayRefundPanel(), () => sendAtmPanel(client),
+        () => sendCheckinPanel(client), () => sendGachaPanel(client), () => sendPrivateRoomPanel(client),
+        () => employmentSystem.sendPanel(), () => customerServiceTickets.ensurePanel(),
+        () => serviceTemplatePanel.ensurePanel(),
+        () => qiunaiReferrals.ensurePanel(), () => complaintSystem.sendPanel(),
+      ];
+      const failures = [];
+      for (const task of tasks) { try { await task(); } catch (error) { failures.push(error); } }
+      if (failures.length) throw new Error(`有 ${failures.length} 個面板待恢復`);
+    },
+  });
+  void halloween.start().catch(error => {
+    console.error("[萬聖節主題] 初始化失敗", { code: error?.code || "unknown" });
+    runtimeHealth.addFailure("萬聖節主題", error);
+  });
   websiteOrderBridge=require('./utils/websiteOrderBridge').createWebsiteOrderBridge({db:supabase,client,token:process.env.TOKEN,
     createOrder:payload=>dispatchSystem.createWebsiteOrder(payload)});
   websiteOrderBridge.start();
@@ -8430,13 +8503,14 @@ client.once(Events.ClientReady, async () => {
       { name: "報單面板", run: () => dispatchSystem.sendWorkReportPanel() },
       { name: "商店面板", run: () => refreshShop(client) },
       { name: "儲值面板", run: () => sendTopupPanel(client) },
-      { name: "一番賞面板", run: () => ichiban.publishPanel() },
+      { name: "一番賞面板", run: () => { ichiban.startStockRefresh(); return ichiban.publishPanel(); } },
       { name: "街口退款面板", run: sendJkopayRefundPanel },
       { name: "ATM 面板", run: () => sendAtmPanel(client) },
       { name: "簽到面板", run: () => sendCheckinPanel(client) },
       { name: "扭蛋面板", run: () => sendGachaPanel(client) },
       { name: "私人房間面板", run: () => sendPrivateRoomPanel(client) },
       { name: "入職申請面板", run: () => employmentSystem.sendPanel() },
+      { name: "客服套模板面板", run: () => serviceTemplatePanel.ensurePanel() },
       { name: "客服臨時表單", run: () => customerServiceTickets.ensurePanel() },
       { name: "邀請碼面板", run: () => qiunaiReferrals.ensurePanel() },
       { name: "執行長投訴面板", run: () => complaintSystem.sendPanel() },
@@ -8943,6 +9017,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (await customerServiceTickets.handle(interaction)) return;
     if (await qiunaiReferrals.handle(interaction)) return;
     if (await employmentSystem.handleInteraction(interaction)) return;
+    if (await serviceTemplatePanel.handleInteraction(interaction)) return;
+    if (await prizeRedemption.handleInteraction(interaction)) return;
 
     // ===== Modal Submit：交給 dispatchSystem =====
     if (interaction.isModalSubmit()) {
@@ -9335,6 +9411,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await dispatchSystem.handleDispatchInteraction(interaction);
       }
       const customId = interaction.customId;
+      if (["owner_cancel_ticket", "close_ticket", "customer_confirm_close_order", "delete_order_now", "save_order_log"].includes(customId)) {
+        const { data: protectedOrder, error: protectionError } = await supabase.from("play_orders")
+          .select("id").eq("channel_id", interaction.channel.id)
+          .eq("guild_id", interaction.guildId)
+          .or("is_deleted.eq.false,is_deleted.is.null")
+          .in("status", ["pending", "accepted"])
+          .like("note", "%[IN_CHANNEL_ORDER]%").limit(1).maybeSingle();
+        if (protectionError || protectedOrder) {
+          const payload = { content: protectionError
+            ? "❌ 無法確認原房保護狀態，請稍後重試。"
+            : "此頻道用於原房加單，會持續保留。請使用單筆訂單的完成或取消功能。", flags: 64 };
+          return interaction.deferred || interaction.replied
+            ? interaction.editReply(payload) : interaction.reply(payload);
+        }
+      }
       if (
         customId.startsWith("bulk_delete_confirm_") ||
         customId.startsWith("bulk_delete_cancel_")
@@ -9947,6 +10038,9 @@ async function ensureCompletedOrderChannelAccess(channel, customerId) {
   }
 }
 async function handleSlashCommand(interaction) {
+  if (interaction.commandName === "兌換獎品") return prizeRedemption.handleCommand(interaction);
+  if (interaction.commandName === "限時身分組") return timedRoleManager.handle(interaction);
+  if (interaction.commandName === "延長限時身分組") return timedRoleManager.extend(interaction);
   if (interaction.commandName === "心動值查詢") return handleHeartInquiry(interaction, supabase);
   if (interaction.commandName === "指令") {
     return interaction.editReply({ content: buildCommandHelp(commands) });
@@ -10541,7 +10635,10 @@ async function handleSlashCommand(interaction) {
     const target = interaction.options.getUser("玩家");
     const couponName = interaction.options.getString("優惠券");
     const count = interaction.options.getInteger("數量");
-    const note = interaction.options.getString("備註") || "客服發送優惠券";
+    const rawNote = interaction.options.getString("備註") || "客服發送優惠券";
+    const note = String(couponName || "").includes("85折")
+      ? `${rawNote}\n限訂單原價 1,500 元（含）以內使用，折後為原價的 85%。`
+      : rawNote;
     if (!target) {
       return interaction.editReply({
         content: "❌ 找不到玩家",
@@ -11623,9 +11720,9 @@ async function createRedPacketShares(packetId, shares) {
   }
 }
 
-async function claimPreparedRedPacket(packetId, userId) {
+async function claimPreparedRedPacket(packetId, userId, channelId) {
   const { data, error } = await supabase.rpc(
-    "claim_prepared_red_packet_atomic",
+    "qiunai_claim_red_packet",
     { p_packet_id: packetId, p_user_id: userId },
   );
 
@@ -11634,6 +11731,23 @@ async function claimPreparedRedPacket(packetId, userId) {
     throw new Error(error.message || "搶紅包失敗");
   }
 
+  if (data?.success === false && data?.message === "找不到秋奈紅包") {
+    // Legacy packets predate organization_code. Keep their old atomic claim path;
+    // never adopt and bulk-refund historical active packets on bot startup.
+    const { data: legacy, error: legacyError } = await supabase.from("red_packets")
+      .select("id").eq("id", packetId).eq("channel_id", channelId)
+      .is("organization_code", null).eq("status", "active").maybeSingle();
+    if (legacyError) throw legacyError;
+    if (!legacy) return data;
+    const { data: prepared, error: preparedError } = await supabase.rpc(
+      "claim_prepared_red_packet_atomic", { p_packet_id: packetId, p_user_id: userId });
+    if (preparedError) throw preparedError;
+    if (prepared) return prepared;
+    const { data: ordinary, error: ordinaryError } = await supabase.rpc(
+      "claim_red_packet_safe", { p_packet_id: packetId, p_user_id: userId });
+    if (ordinaryError) throw ordinaryError;
+    return Array.isArray(ordinary) ? ordinary[0] : ordinary;
+  }
   return data;
 }
 
@@ -11667,6 +11781,8 @@ async function createRedPacket(
     });
   }
 
+  const policy = await supabase.rpc("qiunai_red_packet_expiry_ready");
+  if (policy.error || policy.data !== true) return interaction.editReply({content:"❌ 紅包自動退回服務尚未準備好，請稍後再試；尚未扣款。"});
   const senderData = await getUser(interaction.user.id);
 
   if ((senderData.coins || 0) < totalAmount) {
@@ -11701,6 +11817,7 @@ async function createRedPacket(
     .from("red_packets")
     .insert({
       packet_no: packetNo,
+      organization_code: "qiunai",
       sender_id: interaction.user.id,
       total_amount: totalAmount,
       remaining_amount: totalAmount,
@@ -11750,7 +11867,8 @@ async function createRedPacket(
         `💰 總金額：${totalAmount} 星雨幣\n` +
         `👥 數量：${totalCount} 份\n\n` +
         `🎲 分配：${getRedPacketModeLabel(distributionMode)}\n\n` +
-        `快點下方按鈕搶紅包！`,
+        `快點下方按鈕搶紅包！\n` +
+        `⏰ 截止：<t:${Math.floor(Date.parse(packet.expires_at) / 1000)}:F>\n發出24小時後，未領取的剩餘金額會自動退回發送人。`,
     )
     .setFooter({
       text: `紅包編號：${packetNo}`,
@@ -11798,6 +11916,7 @@ async function claimRedPacket(interaction) {
     result = await claimPreparedRedPacket(
       Number(packetId),
       interaction.user.id,
+      interaction.channelId,
     );
   } catch (error) {
     console.error("[預分配搶紅包失敗]", error);
@@ -11809,24 +11928,6 @@ async function claimRedPacket(interaction) {
     });
   }
 
-  if (!result) {
-    const { data, error } = await supabase.rpc("claim_red_packet_safe", {
-      p_packet_id: Number(packetId),
-      p_user_id: interaction.user.id,
-    });
-
-    if (error) {
-      console.error("[安全搶紅包失敗]", error);
-
-      return interaction.editReply({
-        content:
-          "❌ 搶紅包失敗，請稍後再試。\n" +
-          `錯誤：${error.message || "未知錯誤"}`,
-      });
-    }
-
-    result = Array.isArray(data) ? data[0] : data;
-  }
 
   if (!result || !result.success) {
     return interaction.editReply({
@@ -13066,7 +13167,7 @@ async function handleButtonInteraction(interaction) {
         .catch(() => {});
 
       return await interaction.editReply({
-        content: `☔ 成功領取 ${reward} 星雨幣`,
+        content: chatDropClaimText(interaction.message, reward),
       });
     }
 
@@ -13933,7 +14034,7 @@ async function handleButtonInteraction(interaction) {
       reorderInFlight.add(reorderKey);
       try {
         const customer = await client.users.fetch(customerId);
-        await dispatchSystem.startNewOrderFlow(interaction.channel, customer);
+        await dispatchSystem.startNewOrderFlow(interaction.channel, customer, "", { inChannelOnly: isInChannelOrder(order) });
         await interaction.message
           .edit({
             content: `🛒 <@${customerId}> 選擇在此頻道再下一單。`,
@@ -14206,7 +14307,7 @@ async function handleButtonInteraction(interaction) {
               .filter(Boolean),
           ),
         );
-        const playersToRevoke = remainingOrderError
+        const playersToRevoke = remainingOrderError || isInChannelOrder(order)
           ? []
           : assignedPlayers.filter((id) => !remainingPlayerIds.has(id));
         // 完成後立刻收回所有接單陪陪的頻道權限；客人與客服保留存取，
@@ -14229,7 +14330,7 @@ async function handleButtonInteraction(interaction) {
             permissionFailures.map((result) => result.reason),
           );
         }
-        await ensureCompletedOrderChannelAccess(
+        if (!isInChannelOrder(order)) await ensureCompletedOrderChannelAccess(
           interaction.channel,
           order.customer_id,
         );
@@ -14287,6 +14388,14 @@ async function handleButtonInteraction(interaction) {
           ],
         });
         await sendOrderReviewPanel(interaction.channel, order, assignedPlayers);
+        if (isInChannelOrder(order)) {
+          await interaction.channel.send({
+            content: `<@${order.customer_id}> 訂單 ${order.order_no || order.id} 已完成，原房會持續保留。`,
+            components: [new ActionRowBuilder().addComponents(new ButtonBuilder()
+              .setCustomId("customer_reorder_same_channel").setLabel("🛒 再下一單").setStyle(ButtonStyle.Primary))],
+          });
+          return await safeReply(interaction, { content: "✅ 訂單已完成，原頻道保留。", ephemeral: true });
+        }
         if (remainingOrders.length > 0) {
           return await safeReply(interaction, {
             content: `✅ 已完成訂單 ${order.order_no || order.id}；此工單還有 ${remainingOrders.length} 筆訂單進行中，因此暫不關閉頻道。`,
@@ -15022,85 +15131,79 @@ async function handleStringSelectInteraction(interaction) {
           });
         }
 
+        const couponBase = Number(order.original_price || order.price || order.final_price || 0);
+        if (!Number.isFinite(couponBase) || couponBase <= 0) {
+          return interaction.editReply({ content: "❌ 訂單金額錯誤，請客服重新報價。" });
+        }
         let discountAmount = 0;
-        let finalPrice = order.price;
+        let finalPrice = couponBase;
 
         const fixedAmountMatch = String(coupon.item_name).match(
           /(\d+(?:\.\d+)?)\s*ASD\s*折價券/i,
         );
 
         if (fixedAmountMatch) {
-          discountAmount = Math.min(order.price, Number(fixedAmountMatch[1]));
-          finalPrice = Math.max(0, order.price - discountAmount);
+          discountAmount = Math.min(couponBase, Number(fixedAmountMatch[1]));
+          finalPrice = Math.max(0, couponBase - discountAmount);
         } else if (coupon.item_name.includes("95折")) {
-          if (order.price > 500) {
+          if (couponBase > 500) {
             return await interaction.editReply({
               content: "❌ 這張優惠券只能用於 500 元內商品",
             });
           }
 
-          finalPrice = Math.floor(order.price * 0.95);
-          discountAmount = order.price - finalPrice;
+          finalPrice = Math.floor(couponBase * 0.95);
+          discountAmount = couponBase - finalPrice;
         } else if (coupon.item_name.includes("9折")) {
-          if (order.price > 800) {
+          if (couponBase > 800) {
             return await interaction.editReply({
               content: "❌ 這張優惠券只能用於 800 元內商品",
             });
           }
 
-          finalPrice = Math.floor(order.price * 0.9);
-          discountAmount = order.price - finalPrice;
+          finalPrice = Math.floor(couponBase * 0.9);
+          discountAmount = couponBase - finalPrice;
+        } else if (coupon.item_name.includes("85折")) {
+          const originalPrice = Number(
+            order.original_price || order.price || order.final_price || 0,
+          );
+          if (!Number.isFinite(originalPrice) || originalPrice <= 0) {
+            return await interaction.editReply({
+              content: "❌ 訂單金額錯誤，請聯繫客服重新報價",
+            });
+          }
+          if (originalPrice > 1500) {
+            return await interaction.editReply({
+              content: "❌ 這張85折券只能用於原價 1,500 元（含）以內的訂單",
+            });
+          }
+          finalPrice = Math.floor(originalPrice * 0.85);
+          discountAmount = originalPrice - finalPrice;
         } else if (
           coupon.item_name.includes("8折券∞") ||
           coupon.item_name.includes("8折券 ∞")
         ) {
-          finalPrice = Math.floor(order.price * 0.8);
-          discountAmount = order.price - finalPrice;
+          finalPrice = Math.floor(couponBase * 0.8);
+          discountAmount = couponBase - finalPrice;
         } else if (coupon.item_name.includes("8折")) {
-          if (order.price > 3000) {
+          if (couponBase > 3000) {
             return await interaction.editReply({
               content: "❌ 這張優惠券只能用於 3000 元內商品",
             });
           }
 
-          finalPrice = Math.floor(order.price * 0.8);
-          discountAmount = order.price - finalPrice;
+          finalPrice = Math.floor(couponBase * 0.8);
+          discountAmount = couponBase - finalPrice;
         }
-        const { error: updateError } = await supabase
-          .from("play_orders")
-          .update({
-            coupon_name: coupon.item_name,
-            discount_amount: discountAmount,
-            final_price: finalPrice,
-          })
-          .eq("id", order.id);
-        if (updateError) {
-          console.error("[優惠券更新訂單失敗]", updateError);
-          return await interaction.editReply({
-            content: `❌ 優惠券更新訂單失敗\n` + `錯誤：${updateError.message}`,
-          });
+        if (order.original_price != null && Number(order.price) !== couponBase) {
+          return interaction.editReply({ content: "❌ 訂單原價與目前金額不一致，請客服重新報價後使用優惠券。" });
         }
-        // ===== 嘗試寫入優惠券使用紀錄，但失敗不阻擋流程 =====
-        const { error: usedError } = await supabase
-          .from("used_coupons")
-          .insert({
-            user_id: interaction.user.id,
-            item_name: coupon.item_name,
-            item_id: coupon.id,
-            order_id: order.id,
-          });
-        if (usedError) {
-          console.error("[優惠券紀錄寫入失敗，但不阻擋使用]", usedError);
-        }
-        // ===== 只刪除一次優惠券 =====
-        try {
-          await removeUserItem(coupon.id);
-        } catch (deleteError) {
-          console.error("[優惠券刪除失敗]", deleteError);
-          return await interaction.editReply({
-            content: `❌ 優惠券折扣已套用，但刪除失敗\n` + `請通知客服手動處理`,
-          });
-        }
+        const { error: updateError } = await supabase.rpc("qiunai_apply_quote_coupon", {
+          p_user_id:interaction.user.id,p_order_id:order.id,p_item_id:coupon.id,
+          p_rate:finalPrice/couponBase,
+          p_discount:discountAmount,p_final:finalPrice,
+        });
+        if (updateError) return interaction.editReply({content:`❌ 優惠券套用失敗：${updateError.message}`});
         // ===== 公開通知 =====
         await interaction.channel.send({
           content:
@@ -15405,22 +15508,10 @@ client.on("messageCreate", async (message) => {
   if (dropCooldown.has(channelId)) return;
   // 訊息少於 5 字不掉落
   if (message.content.replace(/\s/g, "").length < 5) return;
-  // 0.5% 掉落機率
+  // 聊天掉落機率：1%
   if (!shouldCreateChatDrop()) return;
   const reward = Math.floor(Math.random() * 20) + 1;
-  const button = new ButtonBuilder()
-    .setCustomId(`claim_${reward}`)
-    .setLabel("☔ 領取星雨幣")
-    .setStyle(ButtonStyle.Success);
-  const row = new ActionRowBuilder().addComponents(button);
-  const embed = new EmbedBuilder()
-    .setColor("#57F287")
-    .setTitle("☔ 星雨幣掉落")
-    .setDescription(`有人掉了 ${reward} 星雨幣！\n\n快點擊下方按鈕領取 ✨`);
-  await message.channel.send({
-    embeds: [embed],
-    components: [row],
-  });
+  await message.channel.send(buildChatDropPayload(reward));
   // ===== 開始冷卻 =====
   dropCooldown.set(channelId, true);
 

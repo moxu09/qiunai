@@ -9,6 +9,8 @@ const {
 } = require("discord.js");
 
 const PANEL_TITLE = "您的建議，是我們成長的動力";
+const { randomUUID } = require("node:crypto");
+const { createComplaintSenderStore } = require("../utils/complaintSenderStore");
 
 function formatTaipeiDateTime(date = new Date()) {
   return new Intl.DateTimeFormat("zh-TW", {
@@ -24,12 +26,110 @@ function formatTaipeiDateTime(date = new Date()) {
 }
 
 function formatComplaintSender(anonymous, user) {
-  if (anonymous) return "匿名（未紀錄發送者）";
+  if (anonymous) return "匿名（帳號由系統留存供回覆，不向執行長顯示）";
   return `<@${user.id}>（${user.tag}｜${user.id}）`;
 }
 
-function createComplaintSystem(client, config) {
+function createComplaintSystem(client, config, db = null) {
   let ceoUserId = String(config.ceoUserId || "").trim() || null;
+  const replying = new Set();
+  const senderStore = db ? createComplaintSenderStore(db) : null;
+
+  function anonymousReference(message) {
+    if (message?.author?.id !== client.user.id || message.embeds?.[0]?.title !== "🕶️ 收到匿名投訴") return null;
+    return message.embeds[0].footer?.text?.match(/^投訴編號：([0-9a-f-]{36})$/)?.[1] || null;
+  }
+
+  function namedSender(message) {
+    if (message?.author?.id !== client.user.id) return null;
+    const embed = message.embeds?.[0];
+    if (embed?.title !== "👤 收到實名投訴") return null;
+    return embed.fields?.find(field => field.name === "投訴者")?.value?.match(/<@!?(\d{16,22})>/)?.[1] || null;
+  }
+
+  async function openHandledReply(interaction) {
+    if (!ceoUserId || interaction.user.id !== ceoUserId || interaction.guildId ||
+        interaction.message?.author?.id !== client.user.id) {
+      return interaction.reply({ content: "❌ 只有執行長可以處理原投訴私訊。", flags: 64 });
+    }
+    if (!namedSender(interaction.message) && !anonymousReference(interaction.message)) {
+      if (interaction.message.embeds?.[0]?.title === "🕶️ 收到匿名投訴") return markComplaint(interaction, true);
+      return interaction.reply({ content: "❌ 找不到原投訴人的帳號，無法回覆。", flags: 64 });
+    }
+    return interaction.showModal(new ModalBuilder()
+      .setCustomId(`complaint_reply_${interaction.message.id}`)
+      .setTitle("回覆投訴人並標記已處理")
+      .addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder()
+        .setCustomId("reply").setLabel("給投訴人的處理回覆")
+        .setPlaceholder("送出後，小奈會將這段回覆私訊給原投訴人。")
+        .setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(1000))));
+  }
+
+  async function submitHandledReply(interaction) {
+    if (!ceoUserId || interaction.user.id !== ceoUserId || interaction.guildId) {
+      return interaction.reply({ content: "❌ 只有執行長可以回覆投訴。", flags: 64 });
+    }
+    await interaction.deferReply({ flags: 64 });
+    const messageId = interaction.customId.slice("complaint_reply_".length);
+    if (!/^\d{16,22}$/.test(messageId)) return interaction.editReply({ content: "❌ 投訴資料無效。" });
+    if (replying.has(messageId)) return interaction.editReply({ content: "⏳ 這筆回覆正在傳送，請勿重複送出。" });
+    replying.add(messageId);
+    let delivered = false;
+    try {
+      const original = await interaction.channel.messages.fetch(messageId);
+      let senderId = namedSender(original);
+      const anonymousId = anonymousReference(original);
+      if (!senderId && anonymousId) {
+        const saved = await senderStore?.get(anonymousId);
+        if (saved?.ceoId === ceoUserId && !saved.messageId) {
+          saved.messageId = original.id;
+          saved.channelId = interaction.channelId;
+          await senderStore.bind(anonymousId, saved);
+        }
+        if (saved?.ceoId === ceoUserId && saved?.messageId === original.id &&
+            saved?.channelId === interaction.channelId && /^\d{16,22}$/.test(saved?.userId || "")) senderId = saved.userId;
+      }
+      if (!senderId) return interaction.editReply({ content: "❌ 找不到原投訴人的回覆資料，無法私訊。" });
+      if (original.embeds[0].fields.some(field => field.name === "處理狀態" && !field.value.includes("尚未處理"))) {
+        return interaction.editReply({ content: "這筆投訴已處理，未重複傳送回覆。" });
+      }
+      let reply = interaction.fields.getTextInputValue("reply").trim();
+      if (!reply || reply.length > 1000) return interaction.editReply({ content: "❌ 請輸入 1～1000 字的回覆。" });
+      const recipient = await client.users.fetch(senderId);
+      const dm = await recipient.createDM();
+      const reference = `投訴回覆：${messageId}`;
+      const recent = await dm.messages.fetch({ limit: 100 });
+      const previous = recent.find(message => message.author?.id === client.user.id &&
+        message.embeds?.some(embed => embed.footer?.text === reference));
+      if (previous) {
+        reply = previous.embeds.find(embed => embed.footer?.text === reference).description;
+      } else {
+        const subject = original.embeds[0].fields.find(field => field.name === "主旨")?.value || "投訴處理結果";
+        await dm.send({
+          embeds: [new EmbedBuilder().setColor("#16a34a").setTitle("📩 您的投訴已有處理回覆")
+            .setDescription(reply).addFields({ name: "原投訴主旨", value: subject })
+            .setFooter({ text: reference }).setTimestamp()],
+          allowedMentions: { parse: [] },
+          nonce: require("node:crypto").createHash("sha256").update(reference).digest("hex").slice(0, 24),
+          enforceNonce: true,
+        });
+      }
+      delivered = true;
+      const fields = original.embeds[0].fields.filter(field => !["處理狀態", "處理時間", "處理回覆"].includes(field.name));
+      await original.edit({ embeds: [EmbedBuilder.from(original.embeds[0]).setColor("#16a34a").setFields(...fields)
+        .addFields({ name: "處理狀態", value: "✅ 已處理｜已私訊回覆", inline: true },
+          { name: "處理時間", value: formatTaipeiDateTime(), inline: true },
+          { name: "處理回覆", value: reply })], components: [] });
+      return interaction.editReply({ content: "✅ 已私訊回覆原投訴人，並標記為已處理。" });
+    } catch (error) {
+      console.error("[投訴回覆] 傳送或更新失敗", { code: error?.code || "unknown", delivered });
+      return interaction.editReply({ content: delivered
+        ? "⚠️ 回覆已傳送，但處理狀態更新失敗。請重試，系統會檢查原回覆以避免重複傳送。"
+        : "❌ 無法私訊原投訴人（可能關閉私訊或暫時連線失敗），尚未標記已處理，請稍後重試。" });
+    } finally {
+      replying.delete(messageId);
+    }
+  }
 
   function buildPanelPayload() {
     const embed = new EmbedBuilder()
@@ -38,7 +138,7 @@ function createComplaintSystem(client, config) {
       .setDescription(
         "此表單的投訴內容只會傳送給執行長本人。\n" +
           "其他管理員、客服及陪陪都看不到投訴內容。\n\n" +
-          "• 匿名投訴：不紀錄、不傳送投訴者帳號\n" +
+          "• 匿名投訴：系統會記錄 Discord 帳號供處理回覆，不向執行長顯示\n" +
           "• 實名投訴：會附上投訴者 Discord 帳號\n" +
           "• 兩種方式都會記錄送出時間\n\n" +
           "請選擇投訴方式後填寫主旨與詳細內容。",
@@ -95,9 +195,9 @@ function createComplaintSystem(client, config) {
   function openComplaintModal(interaction, anonymous) {
     const modal = new ModalBuilder()
       .setCustomId(
-        anonymous ? "complaint_submit_anonymous" : "complaint_submit_named",
+        anonymous ? "complaint_submit_anonymous_v2" : "complaint_submit_named",
       )
-      .setTitle(anonymous ? "匿名投訴" : "實名投訴")
+      .setTitle(anonymous ? "匿名投訴（系統會留存帳號供回覆）" : "實名投訴")
       .addComponents(
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
@@ -112,7 +212,7 @@ function createComplaintSystem(client, config) {
           new TextInputBuilder()
             .setCustomId("complaint_content")
             .setLabel("投訴內容")
-            .setPlaceholder("請詳細說明事情經過與需要協助的內容")
+            .setPlaceholder(anonymous ? "系統會留存你的 Discord 帳號供回覆，不向執行長顯示。請詳細說明事情經過。" : "請詳細說明事情經過與需要協助的內容")
             .setMaxLength(3500)
             .setRequired(true)
             .setStyle(TextInputStyle.Paragraph),
@@ -134,6 +234,9 @@ function createComplaintSystem(client, config) {
         flags: 64,
       });
     }
+
+    if (anonymous && !senderStore) return interaction.reply({ content: "❌ 暫時無法保存回覆資料，請稍後再試。", flags: 64 });
+    await interaction.deferReply({ flags: 64 });
 
     const subject = interaction.fields
       .getTextInputValue("complaint_subject")
@@ -171,19 +274,26 @@ function createComplaintSystem(client, config) {
     );
 
     try {
+      const reference = anonymous ? randomUUID() : null;
+      const payload = anonymous ? { userId: interaction.user.id, ceoId: ceoUserId } : null;
+      if (anonymous) {
+        await senderStore.save(reference, payload);
+        embed.setFooter({ text: `投訴編號：${reference}` });
+      }
       const ceo = await client.users.fetch(ceoUserId);
-      await ceo.send({ embeds: [embed], components: [row] });
+      const delivered = await ceo.send({ embeds: [embed], components: [row] });
+      if (anonymous) await senderStore.bind(reference, { ...payload, messageId: delivered.id, channelId: delivered.channelId });
     } catch (error) {
       console.error("[投訴表單] 私訊執行長失敗", error?.message || error);
-      return interaction.reply({
+      return interaction.editReply({
         content: "❌ 投訴傳送失敗，請稍後再試或直接聯繫執行長。",
         flags: 64,
       });
     }
 
-    return interaction.reply({
+    return interaction.editReply({
       content: anonymous
-        ? "✅ 匿名投訴已傳送給執行長；系統未紀錄你的帳號。"
+        ? "✅ 匿名投訴已傳送；系統已保存帳號供私訊回覆，不會向執行長顯示你的帳號。"
         : "✅ 實名投訴已傳送給執行長。",
       flags: 64,
     });
@@ -232,7 +342,7 @@ function createComplaintSystem(client, config) {
         return true;
       }
       if (interaction.customId === "complaint_mark_handled") {
-        await markComplaint(interaction, true);
+        await openHandledReply(interaction);
         return true;
       }
       if (interaction.customId === "complaint_mark_rejected") {
@@ -241,7 +351,15 @@ function createComplaintSystem(client, config) {
       }
     }
     if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith("complaint_reply_")) {
+        await submitHandledReply(interaction);
+        return true;
+      }
       if (interaction.customId === "complaint_submit_anonymous") {
+        await interaction.reply({ content: "匿名表單已更新：系統將記錄帳號供回覆，不向執行長顯示。請重新點選「匿名投訴」開啟新表單。", flags: 64 });
+        return true;
+      }
+      if (interaction.customId === "complaint_submit_anonymous_v2") {
         await submitComplaint(interaction, true);
         return true;
       }
