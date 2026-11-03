@@ -51,6 +51,12 @@ test('未完成、未付款、退款、異店與帳號不符都不能通知或�
   const db=dbFor({qiunai_membership_cashbacks:[{order_id:'a',reversed_at:'now'}]});
   assert.equal(await createCashbackNotifier(db,{}).notify('a'),false);
 });
+test('同一筆打賞有群組編號時不會走逐筆私訊收據',async()=>{
+  const db=dbFor({qiunai_membership_cashbacks:[{order_id:'a',user_id:'u',points:1}],
+    play_orders:[{id:'a',guild_id:GUILD_ID,customer_id:'u',order_type:'打賞',order_group_id:'tip:checkout',paid:true,status:'completed'}]});
+  const perOrderStore={claim(){throw Error('打賞不應建立逐筆通知收據');}};
+  assert.equal(await createCashbackNotifier(db,{},console,perOrderStore).notify('a'),false);
+});
 test('查詢錯誤不得偽裝成零點',async()=>{
   const db={from(){return{select(){return this;},eq(){return this;},or(){return this;},maybeSingle:async()=>({error:Error('offline')}),order(){return this;},limit:async()=>({error:Error('offline')})};}};
   await assert.rejects(getPointSummary(db,'me'),/offline/);
