@@ -252,6 +252,13 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
+const heartGiftConfig = require("./utils/heartGifts");
+const heartGifts = heartGiftConfig.createHeartGifts({ client, supabase });
+const serviceGiftCatalog = require("./utils/serviceGiftCatalog.cjs").createServiceGiftCatalog({
+  organization: "qiunai",
+  tipGifts: TIP_GIFTS,
+  readMessage: path => client.rest.get(path),
+});
 const customerServiceTickets = createCustomerServiceTickets({
   client,
   isStaff: isAdminOrStaff,
@@ -699,6 +706,7 @@ async function startJkopayTipPayment({ tipId, tipData, channel }) {
       broadcastEnabled: Boolean(tipData.broadcastEnabled),
       broadcastAnonymous: Boolean(tipData.broadcastAnonymous),
       crownOrder: tipData.crownOrder || null,
+      heartTip: Boolean(tipData.heartTip),
     },
   });
   const paymentEmbed = new EmbedBuilder()
@@ -747,6 +755,7 @@ async function startEcpayTipPayment({ tipId, tipData, channel }) {
       tipperId: String(tipData.tipperId), allocations,
       broadcastEnabled: Boolean(tipData.broadcastEnabled),
       broadcastAnonymous: Boolean(tipData.broadcastAnonymous), crownOrder: tipData.crownOrder || null,
+      heartTip: Boolean(tipData.heartTip),
     },
   });
   const message = await channel.send({
@@ -770,12 +779,13 @@ async function saveTipAllocations({
   channelId,
   countReason = null,
   idempotencyKey = null,
+  heartFlowId = null,
 }) {
   if (hasSelfTip(tipperId, allocations.map((allocation) => allocation.staffId))) {
     throw new Error("不能打賞自己");
   }
   const orders = [];
-  const purchaseGroupId = idempotencyKey?.startsWith("manual-tip:")
+  const purchaseGroupId = heartFlowId ? `heart:${heartFlowId}` : idempotencyKey?.startsWith("manual-tip:")
     ? `tip:manual:${idempotencyKey.slice("manual-tip:".length)}`
     : `tip:flow:${require("node:crypto").randomUUID()}`;
   for (const allocation of allocations) {
@@ -955,7 +965,7 @@ async function sendTipBroadcastSafely(tipData) {
   const allocations = buildTipAllocations(tipData);
   if (!allocations.length) return;
   await sendTipReceiptSafely(tipData, allocations);
-  if (!tipData?.broadcastEnabled || tipData.crownOrder) return;
+  if (!tipData.broadcastEnabled || tipData.crownOrder || tipData.heartTip) return;
 
   try {
     const channel = await client.channels
@@ -1126,7 +1136,7 @@ function buildTipPaymentMenu(tipId, salaryDeductionEnabled = false) {
 }
 async function sendTipPaymentSelectPrompt(channel, tipId, selectedStaffText) {
   const tipData = await getPendingTip(tipId);
-  const salaryEligible = await dispatchSystem.isActivePaymentStaff(
+  const salaryEligible = !tipData?.heartTip && await dispatchSystem.isActivePaymentStaff(
     tipData?.tipperId || tipData?.createdBy,
   );
   const rows = buildTipPaymentMenu(tipId, salaryEligible);
@@ -1139,7 +1149,7 @@ async function sendTipPaymentSelectPrompt(channel, tipId, selectedStaffText) {
 }
 async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
   if (
-    !getTipGiftSelections(tipData).some((gift) =>
+    !tipData.heartTip && !getTipGiftSelections(tipData).some((gift) =>
       getTipBroadcastEntry(gift.name),
     )
   ) {
@@ -1156,7 +1166,9 @@ async function sendTipBroadcastPreferencePrompt(channel, tipId, tipData) {
   tipData.broadcastPreferenceShown = true;
   await setPendingTip(tipId, tipData);
   await channel.send({
-    content: `<@${tipData.tipperId}> 是否需要將這次打賞播報到秋奈公開打賞頻道？`,
+    content: tipData.heartTip
+      ? `<@${tipData.tipperId}> 是否需要將這次心動值打賞播報到 <#${heartGiftConfig.BROADCAST_CHANNEL_ID}>？付款後會依各位陪陪收到的禮物分開累積心動值。`
+      : `<@${tipData.tipperId}> 是否需要將這次打賞播報到秋奈公開打賞頻道？`,
     components: appendTipBackButton([
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -1490,19 +1502,21 @@ async function handleBulkDeleteCancel(interaction) {
   });
 }
 async function sendTipGiftSelect(channel, tipId) {
+  const heartCatalog = (await getPendingTip(tipId))?.heartGifts;
+  const gifts = heartCatalog || TIP_GIFTS;
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`tip_gift_${tipId}`)
     .setPlaceholder("請選擇要打賞的禮物，可複選")
     .setMinValues(1)
-    .setMaxValues(Math.min(TIP_GIFTS.length, 25))
+    .setMaxValues(Math.min(gifts.length, 25))
     .addOptions(
-      TIP_GIFTS.slice(0, 25).map((gift) => ({
+      gifts.slice(0, 25).map((gift) => ({
         label: (
           gift.customPrice
             ? `${gift.name}｜價格由客服填寫`
-            : `${gift.name}｜${gift.price} ASD`
+            : `${gift.name}｜${gift.price} ${heartCatalog ? "T" : "ASD"}`
         ).slice(0, 100),
-        description: gift.description.slice(0, 100),
+        description: (heartCatalog ? `增加 ${gift.price} 心動值` : gift.description).slice(0, 100),
         value: gift.key,
       })),
     );
@@ -1510,11 +1524,19 @@ async function sendTipGiftSelect(channel, tipId) {
   const selectRow = new ActionRowBuilder().addComponents(menu);
 
   await channel.send({
-    content: `💝 請選擇要打賞的禮物，可一次複選多項：`,
+    content: heartCatalog ? "💗 請選擇心動禮物，可一次複選多項。" : "💝 請選擇要打賞的禮物，可一次複選多項：",
     components: [selectRow],
   });
 }
-async function startTipFlowInChannel(channel, user) {
+async function startTipFlowInChannel(channel, user, { heart = false } = {}) {
+  let heartCatalog;
+  if (heart) {
+    if (!heartGiftConfig.ENABLED || channel.guildId !== heartGiftConfig.GUILD_ID) {
+      throw new Error("此頻道無法建立心動值打賞");
+    }
+    heartCatalog = await serviceGiftCatalog.heart();
+    if (!heartCatalog.length || heartCatalog.length > 25) throw new Error("心動禮物價目暫時無法使用");
+  }
   const tipId = `${user.id}_${Date.now()}`;
 
   await setPendingTip(tipId, {
@@ -1523,8 +1545,8 @@ async function startTipFlowInChannel(channel, user) {
     tipperId: user.id,
     channelId: channel.id,
     guildId: channel.guildId,
+    ...(heart ? { heartTip: true, heartGifts: heartCatalog } : {}),
   });
-
 
   await sendTipGiftSelect(channel, tipId);
 
@@ -1755,7 +1777,7 @@ async function handleTipGiftSelect(interaction) {
   }
 
   const gifts = interaction.values
-    .map((key) => getTipGiftByKey(key))
+    .map((key) => tipData.heartTip ? findTipGiftByKey(tipData.heartGifts, key) : getTipGiftByKey(key))
     .filter(Boolean);
 
   if (!gifts.length || gifts.length !== interaction.values.length) {
@@ -2680,6 +2702,10 @@ async function handleTipPaymentSelect(interaction) {
   }
 
   const paymentMethod = selection?.paymentMethod;
+  if (tipData.heartTip && (!canAdvanceTipFlow(interaction, tipData) ||
+      !paymentMethod || paymentMethod.includes("扣薪"))) {
+    return interaction.editReply({ content: "請使用原打賞頻道的心動值付款選單。" });
+  }
 
   const { tipperId, item, amount } = tipData;
   const selectedStaffIds = getTipStaffIds(tipData);
@@ -2719,6 +2745,17 @@ async function handleTipPaymentSelect(interaction) {
       tipData.checkoutStarted = false;
       await setPendingTip(tipId, tipData);
       return interaction.editReply({ content: `❌ ${error.message}` });
+    }
+  }
+
+  if (tipData.heartTip) {
+    try {
+      await heartGifts.prepareCheckout(tipId, tipData, allocations, paymentMethod);
+    } catch (error) {
+      tipData.checkoutStarted = false;
+      await setPendingTip(tipId, tipData);
+      console.error("[心動值] 無法建立付款明細", error.code || error.name);
+      return interaction.editReply({ content: "暫時無法保存心動值打賞明細，請稍後重試。" });
     }
   }
 
@@ -2878,6 +2915,7 @@ async function handleTipPaymentSelect(interaction) {
       .setLabel("❌ 取消打賞")
       .setStyle(ButtonStyle.Danger),
   );
+  if (tipData.heartTip) embed.addFields({ name: "打賞類型", value: "心動值打賞" });
 
   await interaction.channel.send({
     content: `<@&${process.env.STAFF_ROLE}> 有新的打賞等待確認付款。`,
@@ -3454,21 +3492,9 @@ async function buildQiunaiWorkReportSalaryPayload({ row, meta, endedAt }) {
     is_deleted: false,
   };
 }
-async function payTipWithWalletAtomic({
-  operationKey,
-  notificationGroupId,
-  guildId,
-  tipperId,
-  staffIds,
-  item,
-  amount,
-  channelId,
-}) {
-  if (hasSelfTip(tipperId, staffIds)) {
-    throw new Error("不能打賞自己");
-  }
+async function getTipWalletStaff(staffIds) {
   const finishedAt = new Date().toISOString();
-  const staff = await Promise.all(
+  return Promise.all(
     staffIds.map(async (staffId) => {
       const regularCommission = await getQiunaiCommissionInfo(
         staffId,
@@ -3492,6 +3518,21 @@ async function payTipWithWalletAtomic({
       };
     }),
   );
+}
+async function payTipWithWalletAtomic({
+  operationKey,
+  notificationGroupId,
+  guildId,
+  tipperId,
+  staffIds,
+  item,
+  amount,
+  channelId,
+}) {
+  if (hasSelfTip(tipperId, staffIds)) {
+    throw new Error("不能打賞自己");
+  }
+  const staff = await getTipWalletStaff(staffIds);
   const { data, error } = await supabase.rpc("pay_tip_with_wallet_atomic", {
     p_operation_key: operationKey,
     p_guild_id: guildId,
@@ -3514,6 +3555,7 @@ async function payTipWithWalletAtomic({
 }
 async function payTipAllocationsWithWalletAtomic({
   operationKey,
+  heartFlowId,
   guildId,
   tipperId,
   allocations,
@@ -3532,6 +3574,19 @@ async function payTipAllocationsWithWalletAtomic({
     };
     current.staffIds.push(allocation.staffId);
     groups.set(key, current);
+  }
+  if (heartFlowId) {
+    const paymentGroups = await Promise.all([...groups.values()].map(async group => ({
+      item: group.item,
+      amount: group.amount,
+      staff: await getTipWalletStaff(group.staffIds),
+    })));
+    const { data, error } = await supabase.rpc("qiunai_pay_heart_wallet", {
+      p_flow_id: heartFlowId,
+      p_groups: paymentGroups,
+    });
+    if (error) throw error;
+    return data;
   }
   const orders = [];
   let balance = null;
@@ -4575,7 +4630,8 @@ async function handleJkopayServicePaid({ payment, transaction }) {
         channelId: payment.channel_id,
         paid: true,
         idempotencyKey: `${paymentLabel}:${payment.platform_order_id}:${allocationIndex}`,
-        purchaseGroupId: `tip:${paymentLabel}:${payment.platform_order_id}`,
+        purchaseGroupId: metadata.heartTip ? `heart:${metadata.tipId || payment.entity_key}` :
+          `tip:${paymentLabel}:${payment.platform_order_id}`,
       }),
     );
   }
@@ -4617,6 +4673,7 @@ async function handleJkopayServicePaid({ payment, transaction }) {
     broadcastEnabled: Boolean(metadata.broadcastEnabled),
     broadcastAnonymous: Boolean(metadata.broadcastAnonymous),
     crownOrder: metadata.crownOrder || null,
+    heartTip: Boolean(metadata.heartTip),
   };
   await sendTipWorkReportsSafely(tipOrders, { tipperId });
   await sendTipBroadcastSafely(tipData);
@@ -8434,6 +8491,10 @@ client.once(Events.ClientReady, async () => {
     5 * 60 * 1000,
   );
   signedEmploymentChannelTimer.unref?.();
+  if (heartGiftConfig.ENABLED) {
+    const deliveryTimer = setInterval(createNonOverlappingTask("心動值播報與身分組", heartGifts.deliver), 15000);
+    deliveryTimer.unref?.();
+  }
 
   setInterval(
     createNonOverlappingTask("月卡 VIP 到期清理", async () => {
@@ -9386,6 +9447,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         interaction.customId === "jkopay_topup_start" ||
         interaction.customId.startsWith("jkopay_topup_amount_") ||
         interaction.customId === "order_start_tip" ||
+        interaction.customId === "order_start_heart_tip" ||
         interaction.customId === "order_start_crown"
       ) {
         return await dispatchSystem.handleDispatchInteraction(interaction);
@@ -13492,6 +13554,7 @@ async function handleButtonInteraction(interaction) {
       try {
         payment = await payTipAllocationsWithWalletAtomic({
           operationKey: `${getGuildId(interaction)}:wallet-tip:${tipId}`,
+          heartFlowId: tipData.heartTip ? tipId : null,
           guildId: getGuildId(interaction),
           tipperId,
           allocations,
@@ -13582,6 +13645,31 @@ async function handleButtonInteraction(interaction) {
         ? customId.replace("confirm_tip_paid_flow_", "")
         : null;
       let flowTipData = flowTipId ? await getPendingTip(flowTipId) : null;
+      const isHeart = currentMessage.embeds[0]?.fields?.some(field =>
+        field.name === "打賞類型" && field.value === "心動值打賞");
+      if (isHeart && (!flowTipId || currentMessage.author.id !== client.user.id ||
+          !currentMessage.components.some(row => row.components.some(button => button.customId === customId)))) {
+        return interaction.editReply({ content: "此心動值打賞確認已失效。" });
+      }
+      if (isHeart && !flowTipData && !(await tipFlows.isClosed(flowTipId))) {
+        const saved = await heartGifts.checkout(flowTipId, interaction.channel.id);
+        if (!saved) return interaction.editReply({ content: "找不到此心動值打賞的付款明細，請交由管理員核對。" });
+        flowTipData = {
+          heartTip: true,
+          flowId: flowTipId,
+          tipperId: saved.buyer_id,
+          channelId: saved.channel_id,
+          selectedStaffIds: saved.allocations.map(allocation => allocation.staffId),
+          allocations: saved.allocations.map(allocation => ({
+            ...allocation,
+            lines: allocation.lines.map(line => ({
+              ...line, price: line.points / line.quantity, subtotal: line.points,
+            })),
+          })),
+          paymentMethod: saved.payment_method,
+          broadcastAnonymous: saved.anonymous,
+        };
+      }
       if (flowTipId && !flowTipData && !(isStoredTipFlow(flowTipId) && await tipFlows.isClosed(flowTipId))) {
         const { recoverManualTip } = require("./utils/manualTipConfirmation");
         const history = await interaction.channel.messages.fetch({ limit: 100, before: currentMessage.id });
@@ -13676,6 +13764,7 @@ async function handleButtonInteraction(interaction) {
               channelId: interaction.channel.id,
               countReason: "客服確認打賞付款完成",
               idempotencyKey: `manual-tip:${flowTipId}`,
+              heartFlowId: flowTipData.heartTip ? flowTipId : null,
             })
           : await saveTipToPlayOrdersForStaff({
               guildId: getGuildId(interaction),

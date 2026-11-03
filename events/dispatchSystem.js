@@ -626,6 +626,7 @@ function getServiceName(serviceType) {
 const CATEGORY_CHANNEL_LIMIT = 50;
 const ORDER_TICKET_CATEGORY_ID = "1530875019851202851";
 const TIP_ORDER_PANEL_CHANNEL_ID = "1531515179559551047";
+const heartGifts = require("../utils/heartGifts");
 function getCategoryIds(value) {
   return String(value || "")
     .split(",")
@@ -3676,6 +3677,7 @@ async function sendTipOrderPanel() {
     .setDescription(
       `想支持喜歡的陪陪嗎？請點擊下方按鈕建立專屬打賞頻道。\n\n` +
         `可建立一般打賞單或冠名單，完成後選擇陪陪及付款方式。\n\n` +
+        (heartGifts.ENABLED ? `心動值打賞的價目與福利請查看 <#1513513773686722701>、<#1528115702559539333>。\n\n` : "") +
         `打賞與冠名商品介紹請查看：\n` +
         `<#1513312500832010400>\n` +
         `<#1528136121878446281>`,
@@ -3695,6 +3697,10 @@ async function sendTipOrderPanel() {
       .setStyle(ButtonStyle.Primary),
   );
   const messages = await channel.messages.fetch({ limit: 20 });
+  if (heartGifts.ENABLED) row.addComponents(
+    new ButtonBuilder().setCustomId("order_start_heart_tip").setLabel("心動值打賞")
+      .setEmoji("💗").setStyle(ButtonStyle.Success),
+  );
   const oldPanel = messages.find(
     (message) =>
       message.author.id === client.user.id &&
@@ -5856,6 +5862,11 @@ async function createTipTicket(interaction, mode = "tip") {
   }
 
   const guild = interaction.guild;
+  const heart = mode === "heart";
+  if (heart && (!heartGifts.ENABLED || guild?.id !== heartGifts.GUILD_ID ||
+      interaction.channelId !== TIP_ORDER_PANEL_CHANNEL_ID)) {
+    return interaction.editReply({ content: "請到秋奈的打賞下單區使用心動值打賞。" });
+  }
   const parentId = await resolveTicketParentId(
     guild,
     ORDER_TICKET_CATEGORY_ID,
@@ -5863,7 +5874,7 @@ async function createTipTicket(interaction, mode = "tip") {
   );
 
   const channel = await guild.channels.create({
-    name: `${mode === "crown" ? "冠名" : "打賞"}-${interaction.user.username}`.slice(0, 90),
+    name: `${heart ? "心動值打賞" : mode === "crown" ? "冠名" : "打賞"}-${interaction.user.username}`.slice(0, 90),
     type: ChannelType.GuildText,
     parent: parentId,
     topic: `owner:${interaction.user.id}`,
@@ -5899,11 +5910,11 @@ async function createTipTicket(interaction, mode = "tip") {
     embeds: [
       new EmbedBuilder()
         .setColor(QIUNAI_WATER_BLUE)
-        .setTitle(mode === "crown" ? "👑 冠名單頻道" : "💝 打賞頻道")
+        .setTitle(heart ? "💗 心動值打賞頻道" : mode === "crown" ? "👑 冠名單頻道" : "💝 打賞頻道")
         .setDescription(
           mode === "crown"
             ? "請依照下方選單選擇冠名方案。"
-            : "請依照下方選單選擇打賞禮物。",
+            : heart ? "請選擇心動禮物，付款完成後會依闆闆與陪陪的配對累積心動值。" : "請依照下方選單選擇打賞禮物。",
         ),
     ],
     components: [
@@ -5924,7 +5935,7 @@ async function createTipTicket(interaction, mode = "tip") {
   if (!startFlow) {
     await channel.send("❌ 打賞／冠名流程尚未接入。");
   } else {
-    await startFlow(channel, interaction.user);
+    await startFlow(channel, interaction.user, { heart });
   }
 
   return interaction.editReply({
@@ -15545,6 +15556,10 @@ async function handleDispatchInteractionInner(interaction) {
 
     if (interaction.customId === "order_start_tip") {
       await createTipTicket(interaction);
+      return true;
+    }
+    if (interaction.customId === "order_start_heart_tip") {
+      await createTipTicket(interaction, "heart");
       return true;
     }
     if (interaction.customId === "order_start_crown") {
