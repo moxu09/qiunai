@@ -1,6 +1,8 @@
 const { SlashCommandBuilder } = require("discord.js");
+const { buildHeartInquiryCommand } = require("./utils/heartInquiry");
 
 module.exports = [
+  buildHeartInquiryCommand(),
   new SlashCommandBuilder().setName("首充返利")
     .setDescription("查看或選擇本月首充消費點數返利方案")
     .addStringOption(option => option.setName("方案").setDescription("已領本月返利後不能更換")

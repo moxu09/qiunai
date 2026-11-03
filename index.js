@@ -1,3 +1,4 @@
+const { buildHeartInquiryCommand, handleHeartInquiry } = require("./utils/heartInquiry");
 const { recoverPendingEcpayPayments } = require("./utils/ecpayInquiry");
 const { memberHasRole, interactionHasPermission } = require("./utils/interactionPermissions");
 require("dotenv").config();
@@ -7423,6 +7424,7 @@ async function sendPrivateRoomPanel(client) {
 // ===== 指令定義 =====
 
 const commands = sortCommandDefinitions([
+  buildHeartInquiryCommand(),
   new SlashCommandBuilder().setName("使用抽獎券")
     .setDescription("客服核銷指定客人的抽獎券，保留使用紀錄；不自動抽獎或扣款")
     .addUserOption(o => o.setName("客人").setDescription("要核銷抽獎券的客人").setRequired(true))
@@ -9824,6 +9826,7 @@ async function ensureCompletedOrderChannelAccess(channel, customerId) {
   }
 }
 async function handleSlashCommand(interaction) {
+  if (interaction.commandName === "心動值查詢") return handleHeartInquiry(interaction, supabase);
   if (interaction.commandName === "指令") {
     return interaction.editReply({ content: buildCommandHelp(commands) });
   }
