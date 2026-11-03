@@ -19,12 +19,61 @@ function buildHeartInquiryCommand() {
     .addUserOption(option => option.setName("對象").setDescription("要查詢的人").setRequired(true));
 }
 
+function buildHeartAdjustmentCommand() {
+  return new SlashCommandBuilder()
+    .setName("調整心動值")
+    .setDescription("調整指定老闆與陪陪配對的心動值（秋奈管理員）")
+    .setContexts(InteractionContextType.Guild)
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addUserOption(option => option.setName("老闆").setDescription("這筆配對的老闆").setRequired(true))
+    .addUserOption(option => option.setName("陪陪").setDescription("這筆配對的陪陪").setRequired(true))
+    .addIntegerOption(option => option.setName("數額").setDescription("要調整的心動值，直接設定時可輸入 0")
+      .setMinValue(0).setMaxValue(2_147_483_647).setRequired(true))
+    .addStringOption(option => option.setName("方式").setDescription("選擇增加、減少或直接設定").setRequired(true)
+      .addChoices({ name: "增加", value: "add" }, { name: "減少", value: "subtract" }, { name: "直接設定", value: "set" }));
+}
+
+async function handleHeartAdjustment(interaction, db) {
+  const authorized = SUPPORT_ROLE_BY_GUILD.has(interaction.guildId) &&
+    (interaction.guild?.ownerId === interaction.user.id ||
+      interaction.memberPermissions?.has(PermissionFlagsBits.Administrator));
+  if (!authorized) return interaction.editReply({ content: "只有秋奈管理員可以調整心動值。" });
+  const buyer = interaction.options.getUser("老闆", true);
+  const staff = interaction.options.getUser("陪陪", true);
+  const points = interaction.options.getInteger("數額", true);
+  const operation = interaction.options.getString("方式", true);
+  if (buyer.bot || staff.bot || buyer.id === staff.id) {
+    return interaction.editReply({ content: "請選擇兩個不同的非機器人成員。" });
+  }
+  if (points === 0 && operation !== "set") {
+    return interaction.editReply({ content: "增加或減少請輸入大於 0 的整數。" });
+  }
+  const { data, error } = await db.rpc("qiunai_adjust_heart_points", {
+    p_interaction_id: interaction.id,
+    p_actor_id: interaction.user.id,
+    p_buyer_id: buyer.id,
+    p_staff_id: staff.id,
+    p_operation: operation,
+    p_points: points,
+  });
+  if (error?.code === "22023" && error.message === "扣減數額超過目前心動值") {
+    return interaction.editReply({ content: "扣減數額超過目前心動值，請輸入較小的數額。" });
+  }
+  if (error) throw error;
+  const previous = BigInt(data.previous).toLocaleString("zh-TW");
+  const total = BigInt(data.total).toLocaleString("zh-TW");
+  return interaction.editReply({
+    content: `✅ 已調整心動值\n老闆 <@${buyer.id}> → 陪陪 <@${staff.id}>\n${previous} → **${total}**`,
+    allowedMentions: NO_MENTIONS,
+  });
+}
+
 async function readDirection(db, userId, targetColumn, partnerColumn) {
   const pairs = [];
   let after;
   while (true) {
     let query = db.from("qiunai_heart_pairs")
-      .select(`${partnerColumn},opening_points::text,earned_points::text,opening_verified_at`)
+      .select(`${partnerColumn},balance_points::text,opening_verified_at`)
       .eq(targetColumn, userId).order(partnerColumn).limit(QUERY_SIZE);
     if (after) query = query.gt(partnerColumn, after);
     const { data, error } = await query;
@@ -32,7 +81,7 @@ async function readDirection(db, userId, targetColumn, partnerColumn) {
     if (!data.length) return pairs;
 
     for (const row of data) {
-      const points = BigInt(row.opening_points) + BigInt(row.earned_points);
+      const points = BigInt(row.balance_points);
       if (points > 0n) {
         pairs.push({ id: row[partnerColumn], points, verified: Boolean(row.opening_verified_at) });
       }
@@ -114,4 +163,4 @@ async function handleHeartInquiry(interaction, db) {
   return message;
 }
 
-module.exports = { buildHeartInquiryCommand, findHeartPartners, handleHeartInquiry };
+module.exports = { buildHeartInquiryCommand, findHeartPartners, handleHeartInquiry, buildHeartAdjustmentCommand, handleHeartAdjustment };

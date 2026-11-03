@@ -1,4 +1,4 @@
-const { buildHeartInquiryCommand, handleHeartInquiry } = require("./utils/heartInquiry");
+const { buildHeartInquiryCommand, handleHeartInquiry, buildHeartAdjustmentCommand, handleHeartAdjustment } = require("./utils/heartInquiry");
 const { buildRedeemPrizeCommand, createPrizeRedemption } = require("./utils/prizeRedemption");
 const { buildTimedRoleCommand, buildExtendTimedRoleCommand, createTimedRoleManager } = require("./utils/timedRoles");
 const { recoverPendingEcpayPayments } = require("./utils/ecpayInquiry");
@@ -7607,6 +7607,7 @@ async function sendPrivateRoomPanel(client) {
 
 const commands = sortCommandDefinitions([
   buildHeartInquiryCommand(),
+  buildHeartAdjustmentCommand(),
   buildRedeemPrizeCommand(),
   buildTimedRoleCommand(),
   buildExtendTimedRoleCommand(),
@@ -10052,6 +10053,7 @@ async function handleSlashCommand(interaction) {
   if (interaction.commandName === "限時身分組") return timedRoleManager.handle(interaction);
   if (interaction.commandName === "延長限時身分組") return timedRoleManager.extend(interaction);
   if (interaction.commandName === "心動值查詢") return handleHeartInquiry(interaction, supabase);
+  if (interaction.commandName === "調整心動值") return handleHeartAdjustment(interaction, supabase);
   if (interaction.commandName === "指令") {
     return interaction.editReply({ content: buildCommandHelp(commands) });
   }

@@ -1,9 +1,10 @@
 const { SlashCommandBuilder } = require("discord.js");
-const { buildHeartInquiryCommand } = require("./utils/heartInquiry");
+const { buildHeartInquiryCommand, buildHeartAdjustmentCommand } = require("./utils/heartInquiry");
 const { buildRedeemPrizeCommand } = require("./utils/prizeRedemption");
 
 module.exports = [
   buildHeartInquiryCommand(),
+  buildHeartAdjustmentCommand(),
   buildRedeemPrizeCommand(),
   new SlashCommandBuilder().setName("首充返利")
     .setDescription("查看或選擇本月首充消費點數返利方案")
