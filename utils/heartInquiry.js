@@ -63,61 +63,35 @@ async function handleHeartAdjustment(interaction, db) {
   const previous = BigInt(data.previous).toLocaleString("zh-TW");
   const total = BigInt(data.total).toLocaleString("zh-TW");
   return interaction.editReply({
-    content: `✅ 已調整心動值\n老闆 <@${buyer.id}> → 陪陪 <@${staff.id}>\n${previous} → **${total}**`,
+    content: `✅ 已調整心動值\n配對 <@${buyer.id}> ＆ <@${staff.id}>\n${previous} → **${total}**`,
     allowedMentions: NO_MENTIONS,
   });
 }
 
-async function readDirection(db, userId, targetColumn, partnerColumn) {
-  const pairs = [];
+async function findHeartPartners(db, userId) {
+  const partners = [];
   let after;
   while (true) {
-    let query = db.from("qiunai_heart_pairs")
-      .select(`${partnerColumn},balance_points::text,opening_verified_at`)
-      .eq(targetColumn, userId).order(partnerColumn).limit(QUERY_SIZE);
-    if (after) query = query.gt(partnerColumn, after);
+    let query = db.rpc("qiunai_list_heart_partners", { p_user_id: userId })
+      .order("partner_id").limit(QUERY_SIZE);
+    if (after) query = query.gt("partner_id", after);
     const { data, error } = await query;
     if (error) throw error;
-    if (!data.length) return pairs;
-
     for (const row of data) {
-      const points = BigInt(row.balance_points);
-      if (points > 0n) {
-        pairs.push({ id: row[partnerColumn], points, verified: Boolean(row.opening_verified_at) });
-      }
+      partners.push({ id: row.partner_id, total: BigInt(row.total_points), verified: row.opening_verified });
     }
-    after = data.at(-1)[partnerColumn];
+    if (data.length < QUERY_SIZE) break;
+    after = data.at(-1).partner_id;
   }
-}
-
-async function findHeartPartners(db, userId) {
-  const [sent, received] = await Promise.all([
-    readDirection(db, userId, "buyer_id", "staff_id"),
-    readDirection(db, userId, "staff_id", "buyer_id"),
-  ]);
-  const byId = new Map();
-  for (const [direction, pairs] of [["sent", sent], ["received", received]]) {
-    for (const pair of pairs) {
-      const partner = byId.get(pair.id) || { id: pair.id, total: 0n };
-      partner[direction] = pair;
-      partner.total += pair.points;
-      byId.set(pair.id, partner);
-    }
-  }
-  return [...byId.values()].sort((a, b) =>
+  return partners.sort((a, b) =>
     a.total === b.total ? a.id.localeCompare(b.id) : a.total > b.total ? -1 : 1);
 }
 
 function renderPage(userId, partners, page, controls = true) {
   const pageCount = Math.max(1, Math.ceil(partners.length / PAGE_SIZE));
   const rows = partners.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  const lines = rows.map(partner => {
-    const scores = [
-      partner.sent && `送給對方 ${partner.sent.points.toLocaleString("zh-TW")}${partner.sent.verified ? "" : "＊"}`,
-      partner.received && `對方送來 ${partner.received.points.toLocaleString("zh-TW")}${partner.received.verified ? "" : "＊"}`,
-    ].filter(Boolean);
-    return `<@${partner.id}>｜${scores.join("／")}`;
-  });
+  const lines = rows.map(partner =>
+    `<@${partner.id}>｜共同累積 ${partner.total.toLocaleString("zh-TW")}${partner.verified ? "" : "＊"}`);
   const embed = new EmbedBuilder().setColor(0xd66199).setTitle("秋奈｜心動值查詢")
     .setDescription(`查詢對象 <@${userId}>，共 ${partners.length} 位\n\n${lines.join("\n") || "目前沒有已記錄的正數心動值。"}`)
     .setFooter({ text: `第 ${page + 1}／${pageCount} 頁・僅顯示已建檔配對・＊表示舊資料尚未完整核對` });
