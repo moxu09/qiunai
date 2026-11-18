@@ -163,6 +163,7 @@ const { installSeasonalMessages } = require("./utils/halloweenSeason");
 const { createHalloweenLifecycle } = require("./utils/halloweenLifecycle");
 const {
   createEmploymentSystem,
+  resendEmploymentSigningLink,
 } = require("./events/employmentSystem");
 const { createComplaintSystem } = require("./events/complaintSystem");
 const {
@@ -281,6 +282,9 @@ const serviceGiftCatalog = require("./utils/serviceGiftCatalog.cjs").createServi
 const serviceTemplatePanel = require("./utils/serviceTemplatePanel.cjs").createServiceTemplatePanel({
   client, supabase, organization: "qiunai", tipGifts: TIP_GIFTS,
   tipBroadcasts: TIP_BROADCASTS, loadHeartGifts: serviceGiftCatalog.heart,
+  resendSigning: (discordId, reviewerId) => resendEmploymentSigningLink({
+    client, supabase, config: employmentConfig, discordId, reviewerId,
+  }),
 });
 installSeasonalMessages(client.rest);
 const customerServiceTickets = createCustomerServiceTickets({

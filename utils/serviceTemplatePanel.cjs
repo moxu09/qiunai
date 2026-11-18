@@ -18,8 +18,9 @@ const QUICK_ACTIONS=[
  ['clock-in-out','上下班打卡'],
 ];
 const privateMessage={flags:64,allowedMentions:{parse:[]}};
-module.exports.createServiceTemplatePanel=function({client,supabase,organization,tipGifts=[],tipBroadcasts={},loadHeartGifts=async()=>[],now=()=>Date.now()}){
+module.exports.createServiceTemplatePanel=function({client,supabase,organization,tipGifts=[],tipBroadcasts={},loadHeartGifts=async()=>[],resendSigning,now=()=>Date.now()}){
  const store=STORES[organization];if(!store)throw Error('客服面板店家不正確');
+ const canResendSigning=organization==='qiunai'&&typeof resendSigning==='function';
  const gifts=new Map(tipGifts.filter(gift=>typeof gift?.key==='string'&&gift.key.length<=100&&
   typeof gift.name==='string'&&gift.name.trim()&&(gift.customPrice||Number.isFinite(gift.price)&&gift.price>0))
   .map(gift=>[gift.key,gift]));
@@ -69,6 +70,20 @@ module.exports.createServiceTemplatePanel=function({client,supabase,organization
  const checked=async(query)=>{const result=await query;if(result.error)throw result.error;return result.data;};
  async function list(){const templates=await checked(supabase.from('service_templates').select('*').eq('organization_code',organization).eq('is_active',true).order('title'));return templates.filter((template)=>{try{engine.validateTemplate(template,scope(template));return true;}catch{return false;}});}
  async function load(id){if(!/^[a-f0-9-]{36}$/i.test(id))throw Error('請重新選擇模板');const template=await checked(supabase.from('service_templates').select('*').eq('organization_code',organization).eq('id',id).maybeSingle());if(!template)throw Error('模板不存在或已停用');engine.validateTemplate(template,scope(template));return template;}
+ function templateSectionMenu(templates,section,page=0){
+  const items=templates.filter(template=>section==='broadcast'?template.category==='播報':template.category!=='播報');
+  if(!items.length)return null;
+  const size=items.length>25?23:25;
+  const totalPages=Math.ceil(items.length/size);
+  if(!Number.isInteger(page)||page<0||page>=totalPages)throw Error('請重新選擇模板');
+  const options=items.slice(page*size,(page+1)*size).map(template=>({
+   label:template.title.slice(0,100),value:template.id,description:(template.description||template.category).slice(0,100),
+  }));
+  if(page>0)options.push({label:'上一頁',value:`page:${section}:${page-1}`});
+  if(page+1<totalPages)options.push({label:'下一頁',value:`page:${section}:${page+1}`});
+  return row({type:3,custom_id:`svc:template:${section}:${page}`,
+   placeholder:section==='broadcast'?'直接選擇播報模板':'直接選擇訂單協助或內部登記',options});
+ }
  async function allowed(interaction){
   if(interaction.guildId!==store.guild||interaction.channelId!==store.channel)return false;
   const actor=String(interaction.user?.id||'');if(!/^\d{15,22}$/.test(actor))return false;
@@ -81,6 +96,14 @@ module.exports.createServiceTemplatePanel=function({client,supabase,organization
   if(!roles.includes(store.role))return false;
   const staff=await checked(supabase.from(store.staff).select('discord_id,is_active').eq('discord_id',actor).maybeSingle());
   return Boolean(staff&&staff.is_active!==false);
+ }
+ async function canResendActor(interaction){
+  if(!canResendSigning)return false;
+  const actor=String(interaction.user?.id||'');
+  const assignment=await checked(supabase.from('erp_role_assignments').select('role,is_active').eq('organization_code',organization).eq('discord_id',actor).maybeSingle());
+  if(assignment?.is_active===false)return false;
+  return actor==='847840193859682304'||['super_admin','store_manager','customer_service'].includes(assignment?.role)
+   ||Boolean(interaction.memberPermissions?.has?.(8n));
  }
  function sweep(){for(const [id,draft] of drafts)if(draft.expires<=now())drafts.delete(id);}
  function draftFor(interaction,id){sweep();const draft=drafts.get(id);if(!draft||draft.actor!==interaction.user.id)throw Error('這份表單已過期或不屬於你，請重新選擇模板');return draft;}
@@ -143,13 +166,42 @@ module.exports.createServiceTemplatePanel=function({client,supabase,organization
    if(!await allowed(interaction)){await interaction.reply({...privateMessage,content:'僅本店客服與主管可以在指定頻道使用此面板。'});return true;}
    shouldReset=interaction.isStringSelectMenu?.()&&isOurPanel(interaction.message);
    const [,action,id,pageText]=customId.split(':');
-   if(action==='category'){
+   if(action==='signing-resend'&&interaction.isButton?.()&&isOurPanel(interaction.message)){
+    if(!await canResendActor(interaction))throw Error('只有客服與主管可以重發簽約連結。');
+    await interaction.showModal({custom_id:`svc:signing-submit:${interaction.user.id}`,title:'重發簽約連結',
+     components:[row({type:4,style:1,custom_id:'discord_id',label:'申請人的 Discord ID',required:true,min_length:15,max_length:22})]});
+   }else if(action==='signing-submit'&&interaction.isModalSubmit?.()&&id===interaction.user.id){
+    if(!await canResendActor(interaction))throw Error('只有客服與主管可以重發簽約連結。');
+    await interaction.deferReply({flags:64});
+    const status=await resendSigning(interaction.fields.getTextInputValue('discord_id').trim(),interaction.user.id)
+     .catch(error=>{console.warn('[重發簽約連結] 操作失敗',error.code||error.name);return 'failed';});
+    const replies={
+     sent:'✅ 小奈已將新的簽約連結私訊給申請人。',
+     invalid_id:'請輸入有效的 Discord 使用者 ID。',
+     no_invitation:'這個 ID 沒有秋奈簽約邀請紀錄，請核對後再試。',
+     already_signed:'這位申請人已完成簽約，可查詢既有紀錄。',
+     signing:'這位申請人正在簽署，請等候簽署完成。',
+     not_required:'系統判定這位申請人目前無需重新簽約。',
+     busy:'這位申請人的連結剛處理過，請等兩分鐘再試。',
+     dm_blocked:'Discord 無法私訊這位申請人，請對方開啟伺服器私訊後再試。',
+    };
+    await interaction.editReply({content:replies[status]||'簽約連結暫時無法送出，請稍後再試。',allowedMentions:{parse:[]}});
+   }else if(action==='category'){
     await interaction.deferReply({flags:64});
     const templates=(await list()).filter((template)=>template.category===interaction.values?.[0]);
     if(!templates.length){await interaction.editReply({content:'這個分類目前沒有可用模板，請重新選擇。',allowedMentions:{parse:[]}});return true;}
     await interaction.editReply({content:`${store.name}｜選擇模板（只產生文字，不會自動發布）：`,components:[row({type:3,custom_id:'svc:template',placeholder:'選擇話術模板',options:templates.slice(0,25).map((template)=>({label:template.title.slice(0,100),value:template.id,description:(template.description||template.category).slice(0,100)}))})],allowedMentions:{parse:[]}});
    }else if(action==='template'||action==='quick'){
-    const template=await load(action==='quick'?id:interaction.values?.[0]);
+    const selected=action==='quick'?id:interaction.values?.[0];
+    const page=String(selected||'').match(/^page:(broadcast|other):(\d+)$/);
+    if(page){
+     await interaction.deferReply({flags:64});
+     const menu=templateSectionMenu(await list(),page[1],Number(page[2]));
+     if(!menu)throw Error('請重新選擇模板');
+     await interaction.editReply({content:`${store.name}｜選擇模板`,components:[menu],allowedMentions:{parse:[]}});
+     return true;
+    }
+    const template=await load(selected);
     if(template.slug==='gift-broadcast'&&giftOptions.length){
      await interaction.reply({...privateMessage,content:`${store.name}｜禮物播報`,components:[giftMenu()]});
     }else if(template.slug==='heart-gift-broadcast'&&organization==='qiunai'){
@@ -200,7 +252,7 @@ module.exports.createServiceTemplatePanel=function({client,supabase,organization
     }catch(error){drafts.delete(id);throw error;}
    }else{await interaction.reply({...privateMessage,content:'這個操作已失效，請從客服面板重新選擇。'});}
   }catch(error){
-   const safe=error instanceof engine.ServiceTemplateError||error instanceof Error&&/請|模板|表單|欄位|頁|這份/.test(error.message)?error.message:'客服模板暫時無法使用，請稍後重試。';
+   const safe=error instanceof engine.ServiceTemplateError||error instanceof Error&&/請|模板|表單|欄位|頁|這份|只有客服與主管/.test(error.message)?error.message:'客服模板暫時無法使用，請稍後重試。';
    try{if(interaction.deferred||interaction.replied)await interaction.editReply({content:safe,components:[],allowedMentions:{parse:[]}});else await interaction.reply({...privateMessage,content:safe});}catch{console.warn('[客服模板] 無法回覆此互動，請重新操作');}
   }finally{
    if(shouldReset&&(interaction.replied||interaction.deferred)){
@@ -224,24 +276,22 @@ module.exports.createServiceTemplatePanel=function({client,supabase,organization
      const template=templates.find(item=>item.slug===slug);
      return template?[actionButton(`svc:quick:${template.id}`,label)]:[];
     });
-    if(quick.length)components.push({type:1,components:quick});
-    const sections=[
-     {label:'直接選擇播報模板',items:templates.filter(template=>template.category==='播報')},
-     {label:'直接選擇訂單協助或內部登記',items:templates.filter(template=>template.category!=='播報')},
-    ];
-    for(const {label,items} of sections){
-     for(let start=0;start<items.length&&components.length<5;start+=25){
-      components.push(row({type:3,custom_id:`svc:template:${components.length}`,placeholder:label,options:items.slice(start,start+25).map(template=>({
-       label:template.title.slice(0,100),value:template.id,description:(template.description||template.category).slice(0,100),
-      }))}));
-     }
+    if(canResendSigning)quick.push(actionButton('svc:signing-resend','重發簽約連結'));
+    const buttonsPerRow=canResendSigning?3:5;
+    for(let start=0;start<quick.length;start+=buttonsPerRow){
+     components.push({type:1,components:quick.slice(start,start+buttonsPerRow)});
+    }
+    for(const section of ['broadcast','other']){
+     const menu=templateSectionMenu(templates,section);
+     if(menu)components.push(menu);
     }
     let message=null;
     if(lease.message_id){try{message=await channel.messages.fetch(lease.message_id);}catch(error){if(error.code!==10008)throw error;}if(message&&!isOurPanel(message))throw Error('客服面板紀錄不符合本機器人');}
     if(!message){const recent=await channel.messages.fetch({limit:100});message=[...recent.values()].find(isOurPanel)||null;}
     const data={embeds:[{
      title:`${store.name}｜客服操作面板`,
-     description:'選擇本店打賞品項可直接帶入禮物名稱。也可點常用按鈕，或從同一則面板選擇播報、訂單協助與登記模板。\n產生的文字只會私下回覆給操作的客服。',
+     description:'選擇本店打賞品項可直接帶入禮物名稱。也可點常用按鈕，或從同一則面板選擇播報、訂單協助與登記模板。\n產生的文字只會私下回覆給操作的客服。'+
+      (canResendSigning?'\n重發簽約連結會由小奈私訊給申請人。':''),
      color:organization==='qiunai'?0x7287df:0x68579c,footer:{text:friendlyFooter},
     }],components,allowedMentions:{parse:[]}};
     // Renew ownership immediately before touching Discord, then fence the DB save.

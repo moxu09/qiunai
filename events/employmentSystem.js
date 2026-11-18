@@ -1,4 +1,5 @@
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 const PDFDocument = require("pdfkit");
 const {
   ActionRowBuilder,
@@ -638,7 +639,7 @@ function buildApprovedEmploymentDmContent(config, signingInvitation) {
   );
 }
 
-async function requestEmploymentSigningInvitation(config, applicant, reviewerId) {
+async function requestEmploymentSigningInvitation(config, applicant, reviewerId, { forceSigning = false, signal } = {}) {
   const secret = String(process.env.EMPLOYMENT_SIGNING_API_SECRET || "").trim();
   if (secret.length < 32) {
     throw new Error("EMPLOYMENT_SIGNING_API_SECRET 尚未設定或長度不足");
@@ -648,6 +649,7 @@ async function requestEmploymentSigningInvitation(config, applicant, reviewerId)
     `${baseUrl}/api/${config.organization}/employment-signing/invite`,
     {
       method: "POST",
+      signal,
       headers: {
         Authorization: `Bearer ${secret}`,
         "Content-Type": "application/json",
@@ -656,6 +658,7 @@ async function requestEmploymentSigningInvitation(config, applicant, reviewerId)
         discordId: applicant.id,
         discordName: applicant.globalName || applicant.username || applicant.id,
         invitedBy: reviewerId,
+        forceSigning,
       }),
     },
   );
@@ -668,6 +671,77 @@ async function requestEmploymentSigningInvitation(config, applicant, reviewerId)
     throw new Error(payload.message || `簽署邀請服務回傳 ${response.status}`);
   }
   return payload.invitation;
+}
+
+async function resendEmploymentSigningLink({ client, supabase, config, discordId, reviewerId }) {
+  if (config.organization !== "qiunai" || !/^\d{15,22}$/.test(discordId)) return "invalid_id";
+  const { data: signings, error } = await supabase.from("employment_contract_signings")
+    .select("organization_code,status").eq("discord_id", discordId);
+  if (error) throw error;
+  if ((signings || []).some(({ status }) => ["signed", "activated"].includes(status))) return "already_signed";
+  if ((signings || []).some(({ organization_code, status }) =>
+    organization_code === config.organization && status === "signing")) return "signing";
+  const hasPriorInvite = (signings || []).some(({ organization_code, status }) =>
+    organization_code === config.organization &&
+    ["invited", "opened", "read", "expired"].includes(status));
+  if (!hasPriorInvite) return "no_invitation";
+
+  const table = () => supabase.from("bot_service_order_flows");
+  const at = new Date();
+  const leaseId = randomUUID();
+  const lease = {
+    organization_code: "qiunai:employment-signing-resend",
+    flow_id: discordId,
+    payload: { requestedBy: reviewerId, leaseId },
+    expires_at: new Date(at.getTime() + 120_000).toISOString(),
+    updated_at: at.toISOString(),
+    closed_at: null,
+  };
+  const claim = await table().insert(lease);
+  if (claim.error?.code === "23505") {
+    const renewed = await table().update(lease).eq("organization_code", lease.organization_code)
+      .eq("flow_id", discordId).lte("expires_at", lease.updated_at).select("flow_id").maybeSingle();
+    if (renewed.error) throw renewed.error;
+    if (!renewed.data) return "busy";
+  } else if (claim.error) {
+    throw claim.error;
+  }
+
+  let delivered = false;
+  try {
+    const applicant = await client.users.fetch(discordId).catch((fetchError) => {
+      if (Number(fetchError.code) === 10013) return null;
+      throw fetchError;
+    });
+    if (!applicant || applicant.bot || applicant.id !== discordId) return "invalid_id";
+    // Check that the recipient accepts DMs before the API revokes their old link.
+    await applicant.send(`${config.brandName}正在重新產生入職契約簽署連結，請稍候。`);
+    const invitation = await requestEmploymentSigningInvitation(config, applicant, reviewerId, {
+      forceSigning: true,
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (invitation.required === false) {
+      await applicant.send('你的入職契約目前無需重新簽署。').catch(() => null);
+      return invitation.reason === "already_signed" ? "already_signed" : "not_required";
+    }
+    await applicant.send(
+      `${config.brandName}重新發送入職契約簽署連結。請使用此 Discord 帳號登入並完成簽署。\n\n` +
+      `${invitation.url}\n\n此連結限本人使用，有效期 7 日。`,
+    );
+    delivered = true;
+    return "sent";
+  } catch (sendError) {
+    if (Number(sendError.code) === 50007) return "dm_blocked";
+    throw sendError;
+  } finally {
+    if (!delivered) {
+      const releasedAt = new Date().toISOString();
+      const release = await table().update({ expires_at: releasedAt, closed_at: releasedAt, updated_at: releasedAt })
+        .eq("organization_code", lease.organization_code).eq("flow_id", discordId)
+        .contains("payload", { leaseId });
+      if (release.error) console.warn("[重發簽約連結] 無法釋放失敗租約", release.error.code || release.error.name);
+    }
+  }
 }
 
 function buildEmploymentResultNotice(reviewer, reviewerId) {
@@ -1549,4 +1623,5 @@ module.exports = {
   hasActiveCompanionAtStore,
   normalizeRoleName,
   requestEmploymentSigningInvitation,
+  resendEmploymentSigningLink,
 };
