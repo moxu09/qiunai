@@ -3,6 +3,7 @@
 // (/app/ai/parse-order, see appOrderAssist). Never creates orders. /app/tips/* (see appTips)
 // is the only path that charges: ASD-wallet 打賞 through the bot's existing tip RPC.
 // /app/prize-claims/notify (see appPrizeClaims) DMs the allowlisted staff about an in-app prize claim.
+// /app/wall/notify (see appWall) DMs them a new 留言牆 post with 「通過／不通過」 buttons.
 const { authenticate } = require("./websiteOrderBridge");
 const { UNCERTAIN: TIPS_UNCERTAIN } = require("./appTips");
 
@@ -14,6 +15,7 @@ const AI_UNAVAILABLE = "AI 暫時無法使用，請手動填寫";
 const FALLBACK_REASON = "暫時無法自動試算，送出後由客服報價";
 const TIPS_UNAVAILABLE = "打賞暫時無法完成，請稍後再試";
 const PRIZE_CLAIMS_UNAVAILABLE = "領獎通知暫時無法送出，請稍後再試";
+const WALL_UNAVAILABLE = "留言審核通知暫時無法送出，請稍後再試";
 
 // APP game labels (mobile Order.tsx GAMES + /app/pricing labels) -> bridge game keys.
 const APP_GAME_ALIASES = [
@@ -186,7 +188,7 @@ function estimatePrice(P, body) {
   return { amount: result.total, unit: result.unit, unitPrice: result.unitPrice };
 }
 
-function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai, tips, prizeClaims } = {}) {
+function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai, tips, prizeClaims, wall } = {}) {
   async function handleHttpRequest(request, response) {
     if (!request.url?.startsWith("/app/")) return false;
     const reply = (status, data) => {
@@ -263,6 +265,18 @@ function createAppBridge({ token, pricing = require("../config/selfServicePricin
         return reply(result.status, result.body);
       } catch {
         return reply(503, { error: PRIZE_CLAIMS_UNAVAILABLE });
+      }
+    }
+    if (path === "/app/wall/notify") {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      if (!wall) return reply(503, { error: WALL_UNAVAILABLE });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { error: "請求格式錯誤" }); }
+      try {
+        const result = await wall.notify(value);
+        return reply(result.status, result.body);
+      } catch {
+        return reply(503, { error: WALL_UNAVAILABLE });
       }
     }
     return reply(404, { error: "not_found" });

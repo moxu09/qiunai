@@ -313,6 +313,7 @@ const complaintSystem = createComplaintSystem(client, complaintConfig, supabase)
 const appPrizeClaims = require("./utils/appPrizeClaims").createAppPrizeClaims({
   db: supabase, client, recipientIds: process.env.APP_PRIZE_CLAIM_NOTIFY_USER_IDS,
 });
+const appWall = require("./utils/appWall").createAppWall({ db: supabase, client, recipientIds: process.env.APP_PRIZE_CLAIM_NOTIFY_USER_IDS });
 const runtimeHealth = createHealthState("rainbot-qiunai");
 let jkopayService;
 let websiteOrderBridge;
@@ -8495,7 +8496,7 @@ client.once(Events.ClientReady, async () => {
   websiteOrderBridge=require('./utils/websiteOrderBridge').createWebsiteOrderBridge({db:supabase,client,token:process.env.TOKEN,
     createOrder:payload=>dispatchSystem.createWebsiteOrder(payload)});
   websiteOrderBridge.start();
-  appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN,prizeClaims:appPrizeClaims,ai:require('./utils/appOrderAssist').createAppOrderAssist(),
+  appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN,prizeClaims:appPrizeClaims,wall:appWall,ai:require('./utils/appOrderAssist').createAppOrderAssist(),
     tips:require('./utils/appTips').createAppTips({guildId:process.env.GUILD_ID,listActiveStaff,payTipAllocations:payTipAllocationsWithWalletAtomic,
       countOrderVipSpentOnce,sendTipWorkReports:sendTipWorkReportsSafely,sendTipBroadcast:sendTipBroadcastSafely,
       lookupTipOperation:async key=>{const {data,error}=await supabase.from('tip_payment_operations').select('user_id,result').eq('operation_key',key).maybeSingle();if(error)throw error;return data;}})});
@@ -9048,6 +9049,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (await appPrizeClaims.handleInteraction(interaction)) return;
+    if (await appWall.handleInteraction(interaction)) return;
     if (await complaintSystem.handleInteraction(interaction)) return;
     if (await customerServiceTickets.handle(interaction)) return;
     if (await qiunaiReferrals.handle(interaction)) return;
