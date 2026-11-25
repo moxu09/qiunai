@@ -11,7 +11,13 @@ async function requestEcpayInquiry(order, { source, userId, channelId, baseUrl, 
   const response = await fetcher(`${baseUrl.replace(/\/$/, '')}/api/payments/ecpay/service/inquiry`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ecpay-Bot-Signature': signature }, body, signal: AbortSignal.timeout(25000),
   });
-  if (!response.ok) throw new Error('查詢暫時無法完成，請稍後再試；勿重複付款');
+  if (!response.ok) {
+    const failure = new Error('查詢暫時無法完成，請稍後再試；勿重複付款');
+    failure.status = response.status;
+    // 官網 409「此付款類型不支援自動查詢」：這張單不會因重試而改變，排程不再排入。
+    failure.terminal = response.status === 409;
+    throw failure;
+  }
   return response.json();
 }
 async function handleEcpayInquiry(interaction, supabase, baseUrl) {
@@ -34,24 +40,17 @@ async function handleEcpayInquiry(interaction, supabase, baseUrl) {
   } catch (error) { await interaction.editReply({ content: `❌ ${error.message}` }); }
   return true;
 }
-async function recoverPendingEcpayPayments(supabase, baseUrl, { now = Date.now(), request = requestEcpayInquiry } = {}) {
+// 官網查單 route 只接受 APP 付款抽（payment_kind 'draw'，其他類型回 409），因此排程只選秋奈與深夜的 draw 待繳單
+// （ATM／超商代碼／超商條碼）。手動「我已付款，重新查詢」按鈕（handleEcpayInquiry）不變。
+const terminalInquirySkips = new Set();
+async function recoverPendingEcpayPayments(supabase, baseUrl, { now = Date.now(), request = requestEcpayInquiry, terminalSkips = terminalInquirySkips } = {}) {
   const { data: payments, error } = await supabase.from('ecpay_service_payments')
-    .select('merchant_trade_no,raw_result,metadata,created_at').eq('organization_code','qiunai').eq('status','pending')
-    .gte('created_at', new Date(now - 7 * 86400000).toISOString()).lte('created_at',new Date(now - 60000).toISOString())
-    .order('created_at').limit(500);
-  // APP 付款抽（payment_kind 'draw'）：秋奈與深夜的單都查，且含超商條碼；其他付款單維持秋奈 ATM／超商代碼。
-  // 兩個來源各自隔離：任一查詢失敗只記錄，另一邊照常查單；兩邊都失敗才拋錯。
-  const { data: draws, error: drawError } = await supabase.from('ecpay_service_payments')
     .select('merchant_trade_no,raw_result,metadata,created_at').in('organization_code',['qiunai','deepnight']).eq('payment_kind','draw').eq('status','pending')
     .gte('created_at', new Date(now - 7 * 86400000).toISOString()).lte('created_at',new Date(now - 60000).toISOString())
-    .order('created_at').limit(500).then(r => r, e => ({ data: null, error: e }));
-  if (error && drawError) throw new Error('無法讀取待付款查單清單');
-  if (error) console.error('[ECPAY][INQUIRY] 一般待付款查詢失敗', error.message || error);
-  if (drawError) console.error('[ECPAY][INQUIRY] APP 付款抽待付款查詢失敗', drawError.message || drawError);
+    .order('created_at').limit(500);
+  if (error) throw new Error('無法讀取待付款查單清單');
   const method = p => String(p.raw_result?.PaymentType || p.metadata?.ecpay_direct_method || '').split('_')[0];
-  const drawCandidates = (drawError ? [] : draws || []).filter(p => ['ATM','CVS','BARCODE'].includes(method(p)));
-  const drawNos = new Set(drawCandidates.map(p => p.merchant_trade_no));
-  const candidates = (error ? [] : payments || []).filter(p => !drawNos.has(p.merchant_trade_no) && ['ATM','CVS'].includes(method(p))).concat(drawCandidates);
+  const candidates = (payments || []).filter(p => !terminalSkips.has(p.merchant_trade_no) && ['ATM','CVS','BARCODE'].includes(method(p)));
   if (!candidates.length) return { checked: 0 };
   const { data: checks, error: checksError } = await supabase.from('ecpay_service_inquiries')
     .select('merchant_trade_no,next_check_at,last_checked_at,review_required,lease_until').in('merchant_trade_no',candidates.map(p=>p.merchant_trade_no));
@@ -60,7 +59,13 @@ async function recoverPendingEcpayPayments(supabase, baseUrl, { now = Date.now()
   const due = candidates.filter(p=>{const q=byNo.get(p.merchant_trade_no);return !q?.review_required && !(Date.parse(q?.next_check_at)>now) && !(Date.parse(q?.lease_until)>now);})
     .sort((a,b)=>(Date.parse(byNo.get(a.merchant_trade_no)?.last_checked_at)||0)-(Date.parse(byNo.get(b.merchant_trade_no)?.last_checked_at)||0));
   if (!due.length) return { checked: 0 };
-  const result = await request(due[0].merchant_trade_no,{ source: 'scheduled',baseUrl });
-  return { checked: 1, status: result.status };
+  try {
+    const result = await request(due[0].merchant_trade_no,{ source: 'scheduled',baseUrl });
+    return { checked: 1, status: result.status };
+  } catch (requestError) {
+    if (!requestError?.terminal) throw requestError;
+    terminalSkips.add(due[0].merchant_trade_no);
+    return { checked: 1, status: 'unsupported' };
+  }
 }
 module.exports = { buildEcpayInquiryRow, requestEcpayInquiry, handleEcpayInquiry, recoverPendingEcpayPayments };

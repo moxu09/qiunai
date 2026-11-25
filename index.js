@@ -353,7 +353,7 @@ async function startEcpayFulfillmentRecoveryScheduler() {
       lastInquiryAt = Date.now();
       try {
         const inquiry = await recoverPendingEcpayPayments(supabase, ecpayService.config.publicBaseUrl);
-        if (["paid", "needs_review", "error"].includes(inquiry.status))
+        if (["paid", "needs_review", "error", "unsupported"].includes(inquiry.status))
           console.log(`[ECPAY][INQUIRY] ${inquiry.status}`);
       } catch (error) { console.error("[ECPAY][INQUIRY]", error.message); }
     }

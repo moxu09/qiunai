@@ -313,7 +313,14 @@ test("查單選擇：draw 單含超商條碼與深夜 draw 單；其他單維持
     } });
     if (!result.checked) break;
   }
-  assert.deepEqual(called.sort(), ["D_DRAW_BAR", "D_DRAW_CVS", "Q_DRAW_BAR", "Q_DRAW_DIRECT", "Q_TOPUP_ATM"]);
+  // Round 4: 官網查單 route 只接受 draw（其他類型回 409），排程只選 draw 單；儲值等其他單不再排入。
+  assert.deepEqual(called.sort(), ["D_DRAW_BAR", "D_DRAW_CVS", "Q_DRAW_BAR", "Q_DRAW_DIRECT"]);
+  const paymentQueries = db.queries.filter((q) => q.table === "ecpay_service_payments");
+  assert.ok(paymentQueries.length > 0);
+  for (const q of paymentQueries) {
+    assert.ok(q.filters.some(([k, v]) => k === "payment_kind" && v === "draw"), "每個排程查詢都限定 draw");
+    assert.deepEqual(q.filters.find(([k]) => k === "organization_code")[1], ["qiunai", "deepnight"]);
+  }
 });
 
 test("需人工核對的 draw 單在標記失敗後私訊老闆名單一次（不提及、不含其他客人資料）", async () => {
@@ -384,24 +391,37 @@ test("需人工核對的 draw 單在查詢中就排除，超過 limit 筆也不�
   for (const q of db.queries) assert.deepEqual(q.ors, [`payment_kind.neq.draw,fulfillment_error.is.null,fulfillment_error.not.like.${PERMANENT_FAILURE_PREFIX}*`]);
 });
 
-test("查單：draw 查詢失敗不影響一般查單；一般查詢失敗仍查 draw 單；兩者都失敗才拋錯", async () => {
-  const { recoverPendingEcpayPayments } = require("../utils/ecpayInquiry");
-  const make = (failDraw, failMain) => ({ from(table) {
-    const state = { draw: false };
-    const q = { select() { return q; }, gte() { return q; }, lte() { return q; }, order() { return q; },
-      eq(k, v) { if (k === "payment_kind" && v === "draw") state.draw = true; return q; }, in() { return q; },
-      async limit() {
-        if (state.draw) return failDraw ? { data: null, error: { message: "draw boom" } } : { data: [{ merchant_trade_no: "QDRAW", raw_result: { PaymentType: "BARCODE_BARCODE" } }], error: null };
-        return failMain ? { data: null, error: { message: "main boom" } } : { data: [{ merchant_trade_no: "QTOPUP", raw_result: { PaymentType: "ATM_LAND" } }], error: null };
-      },
-      then(resolve, reject) { return Promise.resolve({ data: [], error: null }).then(resolve, reject); } };
-    return q;
-  } });
-  const origError = console.error; console.error = () => {};
-  try {
-    const run = async (failDraw, failMain) => { const called = []; await recoverPendingEcpayPayments(make(failDraw, failMain), "https://pay.example", { request: async (no) => { called.push(no); return { status: "pending" }; } }); return called; };
-    assert.deepEqual(await run(true, false), ["QTOPUP"]);
-    assert.deepEqual(await run(false, true), ["QDRAW"]);
-    await assert.rejects(run(true, true), /無法讀取待付款查單清單/);
-  } finally { console.error = origError; }
+test("查單：只送 draw 單；查詢失敗拋錯；官網回 409 視為此單終止、之後不再排入，其他錯誤照舊拋出", async () => {
+  const { recoverPendingEcpayPayments, requestEcpayInquiry } = require("../utils/ecpayInquiry");
+  const rows = [
+    { merchant_trade_no: "QDRAW1", organization_code: "qiunai", payment_kind: "draw", status: "pending", raw_result: { PaymentType: "BARCODE_BARCODE" } },
+    { merchant_trade_no: "QDRAW2", organization_code: "deepnight", payment_kind: "draw", status: "pending", raw_result: { PaymentType: "ATM_LAND" } },
+    { merchant_trade_no: "QTOPUP", organization_code: "qiunai", payment_kind: "topup", status: "pending", raw_result: { PaymentType: "ATM_LAND" } },
+  ];
+  const checks = [{ merchant_trade_no: "QDRAW2", last_checked_at: new Date(Date.now() - 1000).toISOString() }];
+  const terminalSkips = new Set();
+  const conflict = async () => { const e = new Error("x"); e.status = 409; e.terminal = true; throw e; };
+  const called = [];
+  const first = await recoverPendingEcpayPayments(tableDb({ ecpay_service_payments: rows, ecpay_service_inquiries: checks }), "https://pay.example",
+    { terminalSkips, request: async (no, o) => { called.push(no); return conflict(no, o); } });
+  assert.deepEqual(first, { checked: 1, status: "unsupported" });
+  assert.deepEqual([...terminalSkips], ["QDRAW1"]);
+  const second = await recoverPendingEcpayPayments(tableDb({ ecpay_service_payments: rows, ecpay_service_inquiries: checks }), "https://pay.example",
+    { terminalSkips, request: async (no) => { called.push(no); return { status: "pending" }; } });
+  assert.deepEqual(second, { checked: 1, status: "pending" });
+  assert.deepEqual(called, ["QDRAW1", "QDRAW2"]);
+  await assert.rejects(recoverPendingEcpayPayments(tableDb({ ecpay_service_payments: rows }), "https://pay.example",
+    { terminalSkips: new Set(), request: async () => { throw new Error("查詢暫時無法完成"); } }), /查詢暫時無法完成/);
+  const failing = { from() { const q = { select() { return q; }, eq() { return q; }, in() { return q; }, gte() { return q; }, lte() { return q; }, order() { return q; },
+    async limit() { return { data: null, error: { message: "boom" } }; } }; return q; } };
+  await assert.rejects(recoverPendingEcpayPayments(failing, "https://pay.example", { request: async () => ({}) }), /無法讀取待付款查單清單/);
+  // requestEcpayInquiry: 409 標記為 terminal，訊息維持原樣（手動查單按鈕顯示不變）
+  const r409 = await requestEcpayInquiry("QTOPUP", { source: "manual", baseUrl: "https://pay.example", secret: "s",
+    fetcher: async () => ({ ok: false, status: 409 }) }).then(() => null, (e) => e);
+  assert.equal(r409.terminal, true);
+  assert.equal(r409.status, 409);
+  assert.equal(r409.message, "查詢暫時無法完成，請稍後再試；勿重複付款");
+  const r500 = await requestEcpayInquiry("QTOPUP", { source: "manual", baseUrl: "https://pay.example", secret: "s",
+    fetcher: async () => ({ ok: false, status: 500 }) }).then(() => null, (e) => e);
+  assert.ok(!r500.terminal);
 });
