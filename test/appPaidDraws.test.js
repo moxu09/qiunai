@@ -457,3 +457,44 @@ test("手動「我已付款」按鈕：非 draw 單遇官網 409 與原本失敗
     if (origKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = origKey;
   }
 });
+
+test("Round 5：深夜 draw 查詢失敗只記錄、秋奈單照常補償；秋奈查詢失敗仍處理深夜 draw；兩者都失敗才拋錯", async () => {
+  const { createEcpayService } = require("../utils/ecpay");
+  const make = (failMain, failDraw) => {
+    const db = { from() {
+      let deep = false;
+      const q = { select() { return q; }, eq() { return q; }, or() { return q; }, order() { return q; },
+        in(k, v) { if (k === "organization_code") deep = true; return q; },
+        async limit() {
+          if (deep) return failDraw ? { data: null, error: { message: "draw boom" } } : { data: [{ id: 2, organization_code: "deepnight", payment_kind: "draw", merchant_trade_no: "D2" }], error: null };
+          return failMain ? { data: null, error: { message: "main boom" } } : { data: [{ id: 1, organization_code: "qiunai", payment_kind: "topup", merchant_trade_no: "Q1" }], error: null };
+        } };
+      return q;
+    } };
+    db.rpc = async (name, args) => name === "ecpay_claim_service_fulfillment" ? { data: { id: args.p_payment_id, claimed: true, attempt: 1 }, error: null } : { data: true, error: null };
+    return db;
+  };
+  const logs = [];
+  const origError = console.error; console.error = (...a) => logs.push(a.join(" "));
+  try {
+    const run = async (failMain, failDraw) => { const handled = []; await createEcpayService({ supabase: make(failMain, failDraw), env: { ECPAY_PUBLIC_BASE_URL: "https://pay.example" }, drawOrganizationCodes: ["deepnight"],
+      onServicePaid: async ({ payment }) => handled.push(payment.id) }).recoverPaidFulfillments(); return handled; };
+    assert.deepEqual(await run(false, true), [1]);
+    assert.ok(logs.some((l) => l.includes("draw boom")));
+    assert.deepEqual(await run(true, false), [2]);
+    assert.ok(logs.some((l) => l.includes("main boom")));
+    await assert.rejects(run(true, true), /main boom/);
+    // 未設定深夜 draw 時，秋奈查詢失敗照舊直接拋錯
+    await assert.rejects(createEcpayService({ supabase: make(true, false), env: { ECPAY_PUBLIC_BASE_URL: "https://pay.example" }, onServicePaid: async () => {} }).recoverPaidFulfillments(), /main boom/);
+  } finally { console.error = origError; }
+});
+
+test("Round 5：通知名單為空時每次通知都記錄錯誤（不默默略過）", async () => {
+  const { createPaidDrawFailureAlert } = require("../utils/appPaidDraws");
+  const logs = [];
+  const alert = createPaidDrawFailureAlert({ client: { users: { async fetch() { throw new Error("should not DM"); } } }, recipientIds: [], log: (m) => logs.push(m) });
+  assert.equal(await alert({ payment: { payment_kind: "draw", merchant_trade_no: "QD9", amount: 1 }, error: new Error("x") }), false);
+  assert.equal(await alert({ payment: { payment_kind: "draw", merchant_trade_no: "QD8", amount: 1 }, error: new Error("x") }), false);
+  assert.equal(logs.length, 2);
+  assert.match(logs[0], /通知名單為空.*QD9/);
+});

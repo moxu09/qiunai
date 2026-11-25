@@ -118,17 +118,20 @@ function createEcpayService({ supabase, onServicePaid, env = process.env, organi
       .select("*").eq("organization_code", config.organizationCode).eq("status", "paid")
       .in("fulfillment_status", ["pending", "failed", "processing"]).or(NOT_PERMANENT_FAILURE)
       .order("fulfillment_updated_at", { ascending: true }).limit(Math.max(1, Math.min(limit, 100)));
-    if (error) throw new Error(error.message || "無法查詢待處理綠界付款");
-    let rows = payments || [];
     const drawOrgs = drawOrganizationCodes.filter(code => code && code !== config.organizationCode);
+    if (error && !drawOrgs.length) throw new Error(error.message || "無法查詢待處理綠界付款");
+    // 兩個查詢各自隔離：一邊失敗只記錄，另一邊載入的單照常補償；兩邊都失敗才拋錯。
+    if (error) console.error("[ECPAY][RECOVERY] 待處理綠界付款查詢失敗", error.message || error);
+    let rows = error ? [] : payments || [];
     if (drawOrgs.length) {
       // 其他店家（深夜）只處理 APP 付款抽（payment_kind 'draw'），其餘付款單不碰。
       const { data: draws, error: drawError } = await supabase.from("ecpay_service_payments")
         .select("*").in("organization_code", drawOrgs).eq("payment_kind", "draw").eq("status", "paid")
         .in("fulfillment_status", ["pending", "failed", "processing"]).or(NOT_PERMANENT_FAILURE)
         .order("fulfillment_updated_at", { ascending: true }).limit(Math.max(1, Math.min(limit, 100)));
-      if (drawError) throw new Error(drawError.message || "無法查詢待處理綠界付款");
-      rows = rows.concat(draws || []);
+      if (drawError && error) throw new Error(error.message || "無法查詢待處理綠界付款");
+      if (drawError) console.error("[ECPAY][RECOVERY] 深夜 APP 付款抽查詢失敗", drawError.message || drawError);
+      else rows = rows.concat(draws || []);
     }
     const summary = { candidates: rows.length, completed: 0, failed: 0, skipped: 0 };
     for (const payment of rows) {

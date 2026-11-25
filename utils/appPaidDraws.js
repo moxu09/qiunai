@@ -83,11 +83,17 @@ function createAppPaidDrawFulfiller({ supabase, client, env = process.env, log =
 // 需人工核對的 draw 單：私訊老闆名單（APP_PRIZE_CLAIM_NOTIFY_USER_IDS）一次。「已通知」記在記憶體（付款單沒有多餘欄位）；
 // 該單 fulfillment_error 帶 PERMANENT_FAILURE_PREFIX 後補償迴圈不再重試，因此重啟後也不會再觸發。
 function createPaidDrawFailureAlert({ client, recipientIds = process.env.APP_PRIZE_CLAIM_NOTIFY_USER_IDS, log = message => console.error(message) }) {
-  const recipients = parseRecipientIds(recipientIds);
+  const recipients = Array.isArray(recipientIds)
+    ? [...new Set(recipientIds.map(String).filter(id => /^\d{17,20}$/.test(id)))]
+    : parseRecipientIds(recipientIds);
   const alerted = new Set();
   return async function alertPaidDrawFailure({ payment, error }) {
     const tradeNo = String(payment?.merchant_trade_no || payment?.platform_order_id || "");
     if (payment?.payment_kind !== "draw" || !tradeNo || alerted.has(tradeNo)) return false;
+    if (!recipients.length) {
+      log(`[ECPAY][DRAW] 人工核對通知名單為空，未私訊任何人：${tradeNo}`);
+      return false;
+    }
     alerted.add(tradeNo);
     const userId = /^\d{17,20}$/.test(String(payment.user_id || "")) ? String(payment.user_id) : null;
     const lines = [
