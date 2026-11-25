@@ -292,3 +292,39 @@ test("index.js routes prize-claim interactions first and passes prizeClaims to t
   assert.match(source, /createAppBridge\(\{[^]*?prizeClaims:appPrizeClaims/);
   assert.match(source, /APP_PRIZE_CLAIM_NOTIFY_USER_IDS/);
 });
+
+test("customer-supplied text in the DM is markdown-escaped (no fake masked links)", async () => {
+  const client = fakeClient();
+  const link = "[點我確認](https://evil.example/x)";
+  const contact = { name: `**${link}**`, phone: "0912345678", address: link, email: "a_b_c@example.com" };
+  const messages = [{ id: MESSAGE, claim_id: CLAIM, sender: "customer", staff_id: null, body: `請看 ${link}`, created_at: "2026-11-25T01:00:00Z" }];
+  const prizeClaims = createAppPrizeClaims({ db: fakeDb({ claims: [claimRow({ prize_name: `~~${link}~~`, contact })], messages }), client });
+  assert.equal((await prizeClaims.notify({ claimId: CLAIM, messageId: MESSAGE })).status, 200);
+  const embed = embedOf(client.sent[0].payload);
+  for (const name of ["獎品", "收件資料摘要", "客人回覆"]) {
+    const value = embed.fields.find(item => item.name === name).value;
+    assert.doesNotMatch(value, /(^|[^\\])\[點我確認\]\(/, name);
+    assert.match(value, /\\\[點我確認\]/, name);
+  }
+  const summary = embed.fields.find(item => item.name === "收件資料摘要").value;
+  assert.doesNotMatch(summary, /(^|[^\\])\*\*/);
+  assert.match(summary, /0912345678/);
+  assert.equal(embed.fields.find(item => item.name === "申請人").value, `<@${CUSTOMER}>`);
+});
+
+test("modal reply length counts code points: 1000 emoji are accepted, 1001 refused with the typed text kept", async () => {
+  const db = fakeDb({ claims: [claimRow()] });
+  const prizeClaims = createAppPrizeClaims({ db, client: fakeClient() });
+  const ok = fakeInteraction({ kind: "modal", customId: `app_claim_reply_modal_${CLAIM}`, body: "😀".repeat(1000) });
+  await prizeClaims.handleInteraction(ok);
+  assert.equal(text(ok.calls.edits.at(-1) ?? ok.calls.replies.at(-1)), "已送出，客人會在 APP 看到");
+  assert.equal(db.inserted.length, 1);
+  const typed = `${"好".repeat(1000)}尾`;
+  const tooLong = fakeInteraction({ kind: "modal", customId: `app_claim_reply_modal_${CLAIM}`, body: typed });
+  await prizeClaims.handleInteraction(tooLong);
+  const message = text(tooLong.calls.edits.at(-1) ?? tooLong.calls.replies.at(-1));
+  assert.match(message, /1000/);
+  assert.ok(message.includes(typed), "typed text must be returned so it is not lost");
+  assert.ok(message.length <= 2000);
+  assert.equal(db.inserted.length, 1);
+});

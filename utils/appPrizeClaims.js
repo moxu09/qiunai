@@ -4,7 +4,11 @@
 // (sender 'staff') so the customer sees it in the APP.
 // The claim and message are read here with the service-role client; the app never sends
 // contact data over the notify call. Contact data only goes into the DM, never into logs.
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, escapeMarkdown } = require("discord.js");
+
+// Customer-supplied text: escape markdown so e.g. a masked link can't be faked in the owner's DM.
+const safe = value => escapeMarkdown(String(value ?? "").trim(),
+  { maskedLink: true, heading: true, bulletedList: true, numberedList: true });
 
 const DEFAULT_RECIPIENT_ID = "847840193859682304";
 const BUTTON_PREFIX = "app_claim_reply_";
@@ -51,7 +55,7 @@ function contactSummary(raw) {
     ["超商門市", contact.store],
     ["Email", contact.email],
   ].filter(([, value]) => value != null && String(value).trim())
-    .map(([label, value]) => `${label}：${String(value).trim()}`);
+    .map(([label, value]) => `${label}：${safe(value)}`);
   return clip(lines.join("\n") || "（未填）");
 }
 
@@ -60,13 +64,13 @@ function buildDm(claim, message) {
     .setColor(0x7c4dff)
     .setTitle(message ? "💬 領獎申請新回覆" : "📦 APP 領獎申請")
     .addFields(
-      { name: "獎品", value: clip(claim.prize_name) || "（未命名）", inline: true },
+      { name: "獎品", value: clip(safe(claim.prize_name)) || "（未命名）", inline: true },
       { name: "來源", value: SOURCE_LABELS[claim.source_type] || "其他", inline: true },
       { name: "申請人", value: `<@${claim.user_id}>`, inline: true },
       { name: "收件資料摘要", value: contactSummary(claim.contact) },
     )
     .setFooter({ text: `申請編號 ${claim.id}` });
-  if (message) embed.addFields({ name: "客人回覆", value: clip(message.body) || "（空白）" });
+  if (message) embed.addFields({ name: "客人回覆", value: clip(safe(message.body)) || "（空白）" });
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`${BUTTON_PREFIX}${claim.id}`).setLabel("回覆").setStyle(ButtonStyle.Primary),
   );
@@ -143,7 +147,13 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
     if (!UUID.test(claimId)) return interaction.reply(ephemeral(INVALID));
     const body = String(interaction.fields.getTextInputValue("body") || "").trim();
     if (!body) return interaction.reply(ephemeral(BLANK));
-    if (body.length > MAX_BODY) return interaction.reply(ephemeral(TOO_LONG));
+    // Code points, not UTF-16 units, so emoji don't push a ≤1000-character reply over the limit.
+    // On refusal the typed text is echoed back (in a code block) so the owner doesn't lose it.
+    if ([...body].length > MAX_BODY) {
+      const prefix = `${TOO_LONG}，請縮短後再送出。你剛剛輸入的內容：\n\`\`\`\n`;
+      const kept = body.replaceAll("```", "ˋˋˋ").slice(0, 2000 - prefix.length - 4);
+      return interaction.reply(ephemeral(`${prefix}${kept}\n\`\`\``));
+    }
     await interaction.deferReply({ flags: 64 });
     try {
       const claim = await loadClaim(claimId);
