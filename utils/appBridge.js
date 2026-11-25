@@ -118,6 +118,13 @@ function validEstimateBody(value) {
   return optionalText && numberLike;
 }
 
+// Integer 1–20 only: a number, or a plain digit string. No partial digit extraction.
+function strictCount(value) {
+  const number = typeof value === "number" ? value
+    : typeof value === "string" && /^\d{1,2}$/.test(value.trim()) ? Number(value.trim()) : NaN;
+  return Number.isInteger(number) && number >= 1 && number <= 20 ? number : null;
+}
+
 function estimatePrice(P, body) {
   const fail = reason => ({ amount: null, reason: chineseReason(reason) });
   const game = P.match(body.game, APP_GAME_ALIASES);
@@ -126,14 +133,22 @@ function estimatePrice(P, body) {
     const text = String(label || "").trim();
     return APP_RANK_LABELS[table][P.normalize(text)] || text;
   };
-  const base = { quantity: body.amount, playerCount: body.companionCount };
+  const quantity = strictCount(body.amount);
+  if (!quantity) return fail("時數／局數請選擇 1 至 20 的整數");
+  const playerCount = strictCount(body.companionCount);
+  if (!playerCount) return fail("陪陪人數請選擇 1 至 20 的整數");
+  const base = { quantity, playerCount };
   let input;
   if (game === "valorant") {
-    const target = appRank("valorantTarget", body.targetRank);
+    const rawTarget = appRank("valorantTarget", body.targetRank);
+    const target = rawTarget === "不限" ? "" : rawTarget;
     // The bot treats an unknown target rank as 黃金; an APP label it can't map must not be priced as 黃金.
     if (target && !P.match(target, P.RANK_ALIASES.valorant)) return fail("段位不在目前自動報價範圍內");
+    // 娛樂 takes the bot's entertainment branch (as getValorantPriceLevel / NG orders do), whatever companionRank says.
+    const entertain = P.match(body.serviceType, P.TYPE_ALIASES) === "entertain";
     const companion = appRank("valorantCompanion", body.companionRank);
-    const level = companion || (P.match(body.serviceType, P.TYPE_ALIASES) === "entertain" ? "娛樂" : "");
+    if (!entertain && !target) return fail("請先選擇要打的段位");
+    const level = entertain ? "娛樂" : companion;
     input = { ...base, game: "valorant", serviceType: target, rankOrMap: level, platformOrMode: "" };
   } else if (game === "delta") {
     // Platform does not change the delta price; the bot only requires 電腦 or 手機.

@@ -194,3 +194,39 @@ test("estimate: invalid JSON and bad field types are 400; wrong method 405; unkn
   assert.equal((await call(bridge(), "GET", "/app/pricing/estimate", undefined)).response.status, 405);
   assert.equal((await call(bridge(), "GET", "/app/nothing", undefined)).response.status, 404);
 });
+
+// Fix round 1 (review I1–I3)
+test("I1: 特戰 ranked estimate without a target rank is not priced as 黃金", async () => {
+  for (const companionRank of ["超凡", "神話"]) {
+    for (const targetRank of ["", undefined, "不限"]) {
+      const { response } = await estimate({ game: "特戰英豪", serviceType: "競技上分", targetRank, companionRank, amount: 1, unit: "小時", companionCount: 1 });
+      assert.deepEqual(response.json, { amount: null, reason: "請先選擇要打的段位" }, `${targetRank}/${companionRank}`);
+    }
+  }
+});
+
+test("I2: 特戰 娛樂 follows the bot's entertainment branch even when a companion rank is filled", async () => {
+  const { response } = await estimate({ game: "特戰英豪", serviceType: "娛樂", targetRank: "鑽石", companionRank: "超凡", amount: 2, unit: "小時", companionCount: 1 });
+  // Bot's own inputs for an NG / 娛樂 valorant order: target rank in serviceType, 娛樂 as the companion level.
+  const direct = pricing.calculateSelfServicePrice({ game: "valorant", platformOrMode: "ng", serviceType: "鑽石", rankOrMap: "超凡", quantity: 2, playerCount: 1 });
+  assert.equal(direct.unit, "小時");
+  assert.deepEqual(response.json, { amount: direct.total, unit: direct.unit, unitPrice: direct.unitPrice });
+});
+
+test("I3: amount and companionCount must be integers 1–20, parsed strictly", async () => {
+  const base = { game: "Apex 英雄", serviceType: "技術", targetRank: "鑽石", unit: "小時" };
+  const bad = [
+    { amount: -2, companionCount: 1 }, { amount: 0, companionCount: 1 }, { amount: "1e3", companionCount: 1 },
+    { amount: 1.5, companionCount: 1 }, { amount: 21, companionCount: 1 }, { amount: "2小時", companionCount: 1 },
+    { amount: 1, companionCount: -1 }, { amount: 1, companionCount: "2位" }, { amount: 1, companionCount: 0 },
+    { amount: 1, companionCount: 21 }, { amount: 1, companionCount: 1.5 },
+  ];
+  for (const nums of bad) {
+    const { response } = await estimate({ ...base, ...nums });
+    assert.equal(response.json.amount, null, JSON.stringify(nums));
+    assert.match(response.json.reason, /[\u4e00-\u9fff]/);
+  }
+  const ok = (await estimate({ ...base, amount: "3", companionCount: "2" })).response.json;
+  const direct = pricing.calculateSelfServicePrice({ game: "apex", serviceType: "技術", rankOrMap: "鑽石", quantity: 3, playerCount: 2 });
+  assert.equal(ok.amount, direct.total);
+});
