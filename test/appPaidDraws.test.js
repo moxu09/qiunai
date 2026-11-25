@@ -136,7 +136,7 @@ test("綠界補償迴圈把 draw 單交給抽獎入帳；RPC 失敗時以中文�
     const rpcNames = [];
     const supabase = {
       from(table) {
-        const q = { select() { return q; }, eq() { return q; }, in() { return q; }, order() { return q; },
+        const q = { select() { return q; }, eq() { return q; }, in() { return q; }, or() { return q; }, order() { return q; },
           async limit() { return { data: [row], error: null }; },
           upsert() { return q; },
           then(resolve, reject) { return Promise.resolve({ data: [{ request_id: REQUEST }], error: null }).then(resolve, reject); } };
@@ -221,12 +221,28 @@ function tableDb(tables) {
     from(table) {
       const filters = [];
       queries.push({ table, filters });
-      const rows = () => (tables[table] || []).filter((r) => filters.every(([k, v]) => (Array.isArray(v) ? v.includes(r[k]) : r[k] === v)));
+      const ors = [];
+      let orderBy = null;
+      queries[queries.length - 1].ors = ors;
+      // PostgREST or(): only "col.is.null" and "col.not.like.prefix*" are needed here.
+      const orMatch = (r, expr) => expr.split(",").some((part) => {
+        const [col, ...rest] = part.split(".");
+        const op = rest.join(".");
+        if (op === "is.null") return r[col] == null;
+        if (op.startsWith("neq.")) return r[col] !== op.slice(4);
+        if (op.startsWith("not.like.")) return r[col] != null && !String(r[col]).startsWith(op.slice(9).replace(/\*$/, ""));
+        throw new Error(`unsupported or ${part}`);
+      });
+      const rows = () => (tables[table] || []).filter((r) => filters.every(([k, v]) => (Array.isArray(v) ? v.includes(r[k]) : r[k] === v))
+        && ors.every((expr) => orMatch(r, expr)))
+        .sort((a, b) => (orderBy ? String(a[orderBy] ?? "").localeCompare(String(b[orderBy] ?? "")) : 0));
       const q = {
-        select() { return q; }, gte() { return q; }, lte() { return q; }, order() { return q; },
+        select() { return q; }, gte() { return q; }, lte() { return q; },
+        order(col) { orderBy = col; return q; },
+        or(expr) { ors.push(expr); return q; },
         eq(k, v) { filters.push([k, v]); return q; },
         in(k, v) { filters.push([k, v]); return q; },
-        async limit() { return { data: rows(), error: null }; },
+        async limit(n) { return { data: rows().slice(0, n), error: null }; },
         async maybeSingle() { return { data: rows()[0] || null, error: null }; },
         then(resolve, reject) { return Promise.resolve({ data: rows(), error: null }).then(resolve, reject); },
       };
@@ -261,9 +277,9 @@ test("補償迴圈：深夜只處理 draw 單，深夜儲值／訂單不碰；�
       const deepQuery = db.queries.find((q) => q.filters.some(([k, v]) => k === "organization_code" && [].concat(v).includes("deepnight")));
       assert.deepEqual(deepQuery.filters.find(([k]) => k === "organization_code")[1], ["deepnight"]);
       assert.ok(deepQuery.filters.some(([k, v]) => k === "payment_kind" && v === "draw"));
-      assert.equal(summary.skipped, 2);
+      assert.equal(summary.skipped, 0, "需人工核對的單在查詢就排除");
     } else {
-      assert.equal(summary.skipped, 1);
+      assert.equal(summary.skipped, 0);
       assert.deepEqual(handled.sort(), ["qiunai:draw:6", "qiunai:order:8", "qiunai:topup:1"]);
       assert.equal(db.queries.length, 1);
     }
@@ -311,7 +327,7 @@ test("需人工核對的 draw 單在標記失敗後私訊老闆名單一次（�
     amount: 300, user_id: "123456789012345678", metadata: metadata({ displayName: "秘密暱稱" }) };
   for (const message of ["付款金額與抽獎內容不符", "付款金額與抽獎內容不符", "付款尚未完成"]) {
     const supabase = {
-      from() { const q = { select() { return q; }, eq() { return q; }, in() { return q; }, order() { return q; }, async limit() { return { data: [row], error: null }; } }; return q; },
+      from() { const q = { select() { return q; }, eq() { return q; }, in() { return q; }, or() { return q; }, order() { return q; }, async limit() { return { data: [row], error: null }; } }; return q; },
       async rpc(name, args) {
         if (name === "ecpay_claim_service_fulfillment") return { data: { ...row, claimed: true, attempt: 1 }, error: null };
         if (name === "ecpay_finish_service_fulfillment") { order.push(`finish:${args.p_error}`); return { data: true, error: null }; }
@@ -345,4 +361,47 @@ test("通知名單取 APP_PRIZE_CLAIM_NOTIFY_USER_IDS；私訊失敗不拋錯；
   assert.equal(await alert({ payment: { payment_kind: "topup", merchant_trade_no: "QN1", amount: 1 }, error: new Error("x") }), false);
   assert.equal(await alert({ payment: { payment_kind: "draw", merchant_trade_no: "QD1", amount: 1, user_id: "<@evil>" }, error: new Error("【需人工核對】x") }), true);
   assert.deepEqual(sent, ["111111111111111111"]);
+});
+
+test("需人工核對的 draw 單在查詢中就排除，超過 limit 筆也不會卡住其他補償（秋奈與深夜查詢皆是）", async () => {
+  const { createEcpayService } = require("../utils/ecpay");
+  const stuck = Array.from({ length: 45 }, (_, i) => ({ id: 100 + i, organization_code: i % 2 ? "deepnight" : "qiunai", payment_kind: "draw", merchant_trade_no: `P${i}`,
+    status: "paid", fulfillment_status: "failed", fulfillment_error: `${PERMANENT_FAILURE_PREFIX}綠界付款抽獎入帳失敗：付款金額與抽獎內容不符`,
+    fulfillment_updated_at: `2026-11-01T00:00:${String(i).padStart(2, "0")}Z` }));
+  const rows = [...stuck,
+    { id: 1, organization_code: "qiunai", payment_kind: "topup", merchant_trade_no: "T1", status: "paid", fulfillment_status: "failed", fulfillment_error: "x", fulfillment_updated_at: "2026-11-20T00:00:00Z" },
+    { id: 2, organization_code: "deepnight", payment_kind: "draw", merchant_trade_no: "T2", status: "paid", fulfillment_status: "pending", fulfillment_error: null, fulfillment_updated_at: "2026-11-20T00:00:00Z" }];
+  const db = tableDb({ ecpay_service_payments: rows });
+  db.rpc = async (name, args) => name === "ecpay_claim_service_fulfillment"
+    ? { data: { ...rows.find((r) => r.id === args.p_payment_id), claimed: true, attempt: 1 }, error: null } : { data: true, error: null };
+  const handled = [];
+  const service = createEcpayService({ supabase: db, env: { ECPAY_PUBLIC_BASE_URL: "https://pay.example" }, drawOrganizationCodes: ["deepnight"],
+    onServicePaid: async ({ payment: p }) => handled.push(p.id) });
+  const summary = await service.recoverPaidFulfillments();
+  assert.deepEqual(handled.sort(), [1, 2]);
+  assert.equal(summary.candidates, 2);
+  assert.equal(db.queries.length, 2);
+  for (const q of db.queries) assert.deepEqual(q.ors, [`payment_kind.neq.draw,fulfillment_error.is.null,fulfillment_error.not.like.${PERMANENT_FAILURE_PREFIX}*`]);
+});
+
+test("查單：draw 查詢失敗不影響一般查單；一般查詢失敗仍查 draw 單；兩者都失敗才拋錯", async () => {
+  const { recoverPendingEcpayPayments } = require("../utils/ecpayInquiry");
+  const make = (failDraw, failMain) => ({ from(table) {
+    const state = { draw: false };
+    const q = { select() { return q; }, gte() { return q; }, lte() { return q; }, order() { return q; },
+      eq(k, v) { if (k === "payment_kind" && v === "draw") state.draw = true; return q; }, in() { return q; },
+      async limit() {
+        if (state.draw) return failDraw ? { data: null, error: { message: "draw boom" } } : { data: [{ merchant_trade_no: "QDRAW", raw_result: { PaymentType: "BARCODE_BARCODE" } }], error: null };
+        return failMain ? { data: null, error: { message: "main boom" } } : { data: [{ merchant_trade_no: "QTOPUP", raw_result: { PaymentType: "ATM_LAND" } }], error: null };
+      },
+      then(resolve, reject) { return Promise.resolve({ data: [], error: null }).then(resolve, reject); } };
+    return q;
+  } });
+  const origError = console.error; console.error = () => {};
+  try {
+    const run = async (failDraw, failMain) => { const called = []; await recoverPendingEcpayPayments(make(failDraw, failMain), "https://pay.example", { request: async (no) => { called.push(no); return { status: "pending" }; } }); return called; };
+    assert.deepEqual(await run(true, false), ["QTOPUP"]);
+    assert.deepEqual(await run(false, true), ["QDRAW"]);
+    await assert.rejects(run(true, true), /無法讀取待付款查單清單/);
+  } finally { console.error = origError; }
 });

@@ -6,6 +6,8 @@ const MAX_AMOUNT = 199_999;
 const PERMANENT_FAILURE_PREFIX = "【需人工核對】";
 const isPermanentDrawFailure = payment => payment.payment_kind === "draw" && payment.fulfillment_status === "failed"
   && String(payment.fulfillment_error || "").startsWith(PERMANENT_FAILURE_PREFIX);
+// 查詢時就排除需人工核對的單，避免它們永遠佔住 limit 名額（只排除 draw 單，其他付款單照舊）。
+const NOT_PERMANENT_FAILURE = `payment_kind.neq.draw,fulfillment_error.is.null,fulfillment_error.not.like.${PERMANENT_FAILURE_PREFIX}*`;
 
 function getEcpayConfig(env = process.env, organizationCode = "qiunai") {
   const publicBaseUrl = String(env.ECPAY_PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
@@ -114,7 +116,7 @@ function createEcpayService({ supabase, onServicePaid, env = process.env, organi
   async function recoverPaidFulfillments({ limit = 20 } = {}) {
     const { data: payments, error } = await supabase.from("ecpay_service_payments")
       .select("*").eq("organization_code", config.organizationCode).eq("status", "paid")
-      .in("fulfillment_status", ["pending", "failed", "processing"])
+      .in("fulfillment_status", ["pending", "failed", "processing"]).or(NOT_PERMANENT_FAILURE)
       .order("fulfillment_updated_at", { ascending: true }).limit(Math.max(1, Math.min(limit, 100)));
     if (error) throw new Error(error.message || "無法查詢待處理綠界付款");
     let rows = payments || [];
@@ -123,7 +125,7 @@ function createEcpayService({ supabase, onServicePaid, env = process.env, organi
       // 其他店家（深夜）只處理 APP 付款抽（payment_kind 'draw'），其餘付款單不碰。
       const { data: draws, error: drawError } = await supabase.from("ecpay_service_payments")
         .select("*").in("organization_code", drawOrgs).eq("payment_kind", "draw").eq("status", "paid")
-        .in("fulfillment_status", ["pending", "failed", "processing"])
+        .in("fulfillment_status", ["pending", "failed", "processing"]).or(NOT_PERMANENT_FAILURE)
         .order("fulfillment_updated_at", { ascending: true }).limit(Math.max(1, Math.min(limit, 100)));
       if (drawError) throw new Error(drawError.message || "無法查詢待處理綠界付款");
       rows = rows.concat(draws || []);
