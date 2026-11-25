@@ -487,4 +487,9 @@ module.exports = {
   VALORANT_PRICING_2026_10_EFFECTIVE_AT,
   OCTOBER_PRICING_EFFECTIVE_AT,
   getActivePrices,
+  normalize,
+  match,
+  TYPE_ALIASES,
+  RANK_ALIASES,
+  VALORANT_COMPANION_ALIASES,
 };

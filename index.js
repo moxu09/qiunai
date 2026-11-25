@@ -313,10 +313,12 @@ const complaintSystem = createComplaintSystem(client, complaintConfig, supabase)
 const runtimeHealth = createHealthState("rainbot-qiunai");
 let jkopayService;
 let websiteOrderBridge;
+let appBridge;
 const runtimeServer = createHealthServer(runtimeHealth, {
   requestHandler: async (request, response) => {
     if (await serviceGiftCatalog.handleHttpRequest(request, response)) return true;
     if(websiteOrderBridge&&await websiteOrderBridge.handleHttpRequest(request,response))return true;
+    if(appBridge&&await appBridge.handleHttpRequest(request,response))return true;
     return await jkopayService?.handleHttpRequest(request,response)||false;
   },
 });
@@ -8484,6 +8486,7 @@ client.once(Events.ClientReady, async () => {
   websiteOrderBridge=require('./utils/websiteOrderBridge').createWebsiteOrderBridge({db:supabase,client,token:process.env.TOKEN,
     createOrder:payload=>dispatchSystem.createWebsiteOrder(payload)});
   websiteOrderBridge.start();
+  appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN});
   createServiceProxyQueue({ db: supabase, client, organization: "qiunai", guildId: "1206138511535898654",
     createTicket: payload => dispatchSystem.createServiceProxyTicket(payload) }).start();
   startReceiptRecovery({ supabase, guildId: process.env.GUILD_ID, sendOrderReceipt: sendOrderReceiptSafely, sendReceipt });
