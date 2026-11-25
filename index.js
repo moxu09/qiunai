@@ -8633,6 +8633,10 @@ client.once(Events.ClientReady, async () => {
     5 * 60 * 1000,
   );
   signedEmploymentChannelTimer.unref?.();
+  // 領獎寄送資料保存至寄出後一週: delete prize-claim contact + 小奈 DMs (startup + every 6 h).
+  const prizeClaimPurgeTask = createNonOverlappingTask("領獎寄送資料清除", () => appPrizeClaims.purgeExpired());
+  prizeClaimPurgeTask();
+  setInterval(prizeClaimPurgeTask, 6 * 60 * 60 * 1000).unref?.();
   if (heartGiftConfig.ENABLED) {
     const deliveryTimer = setInterval(createNonOverlappingTask("心動值播報與身分組", heartGifts.deliver), 15000);
     deliveryTimer.unref?.();
