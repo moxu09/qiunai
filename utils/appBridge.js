@@ -1,8 +1,13 @@
-// Signed /app/* endpoints for the customer APP (via app-api). Read-only: price table and
-// display-only estimates computed by the bot's own selfServicePricing. Never creates orders.
+// Signed /app/* endpoints for the customer APP (via app-api). Read-only: price table,
+// display-only estimates computed by the bot's own selfServicePricing, and AI form filling
+// (/app/ai/parse-order, see appOrderAssist). Never creates orders.
 const { authenticate } = require("./websiteOrderBridge");
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+// A legal 1.5 MB screenshot is ~2.0 MB as base64, plus text and option lists.
+const AI_PARSE_PATH = "/app/ai/parse-order";
+const MAX_AI_BODY_BYTES = 2.5 * 1024 * 1024;
+const AI_UNAVAILABLE = "AI 暫時無法使用，請手動填寫";
 const FALLBACK_REASON = "暫時無法自動試算，送出後由客服報價";
 
 // APP game labels (mobile Order.tsx GAMES + /app/pricing labels) -> bridge game keys.
@@ -177,7 +182,6 @@ function estimatePrice(P, body) {
 }
 
 function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai } = {}) {
-  void ai; // reserved for /app/ai/* (Task 2)
   async function handleHttpRequest(request, response) {
     if (!request.url?.startsWith("/app/")) return false;
     const reply = (status, data) => {
@@ -185,17 +189,18 @@ function createAppBridge({ token, pricing = require("../config/selfServicePricin
       response.end(JSON.stringify(data));
       return true;
     };
+    const path = new URL(request.url, "http://localhost").pathname;
+    const maxBytes = path === AI_PARSE_PATH ? MAX_AI_BODY_BYTES : MAX_BODY_BYTES;
     const chunks = [];
     let size = 0;
     for await (const chunk of request) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += buffer.length;
-      if (size > MAX_BODY_BYTES) return reply(413, { error: "payload_too_large" });
+      if (size > maxBytes) return reply(413, { error: "payload_too_large" });
       chunks.push(buffer);
     }
     const body = Buffer.concat(chunks).toString();
     if (!authenticate(request, body, token)) return reply(401, { error: "unauthorized" });
-    const path = new URL(request.url, "http://localhost").pathname;
     if (path === "/app/pricing") {
       if (request.method !== "GET") return reply(405, { error: "method_not_allowed" });
       return reply(200, buildPricing(pricing));
@@ -206,6 +211,18 @@ function createAppBridge({ token, pricing = require("../config/selfServicePricin
       try { value = JSON.parse(body); } catch { return reply(400, { error: "invalid_json" }); }
       if (!validEstimateBody(value)) return reply(400, { error: "invalid_request" });
       return reply(200, estimatePrice(pricing, value));
+    }
+    if (path === AI_PARSE_PATH) {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      if (!ai) return reply(503, { error: AI_UNAVAILABLE });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { error: "請求格式錯誤" }); }
+      try {
+        const result = await ai.parseOrder(value);
+        return reply(result.status, result.body);
+      } catch {
+        return reply(503, { error: AI_UNAVAILABLE });
+      }
     }
     return reply(404, { error: "not_found" });
   }
