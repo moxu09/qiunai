@@ -11,7 +11,10 @@
 // "Sent" = a bot_prize_redemptions row (/兌換獎品) for the claim's prize with redeemed_at > 7 days ago.
 // Rejected claims: the table has no status-change time, so they are purged at created_at + 30 days
 // (documented choice; the rejection itself is never stored with a timestamp).
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder, Routes, TextInputBuilder, TextInputStyle, escapeMarkdown } = require("discord.js");
+// At purge time the claim's chat (app_prize_claim_messages, customer and staff rows) is redacted too,
+// since it may repeat the address. A DM that could not be recorded, or whose delete keeps failing
+// (4 runs or 24 h), triggers one 小奈 alert to the recipients (claim short id + jump link only).
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ModalBuilder, Routes, TextInputBuilder, TextInputStyle, escapeMarkdown } = require("discord.js");
 
 // Customer-supplied text: escape markdown so e.g. a masked link can't be faked in the owner's DM.
 const safe = value => escapeMarkdown(String(value ?? "").trim(),
@@ -30,7 +33,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const SHIPPED_RETENTION_MS = 7 * DAY_MS;
 const REJECTED_RETENTION_MS = 30 * DAY_MS;
 const PURGE_BATCH = 100;
-const PURGE_SCAN_LIMIT = 1000;
+const PURGE_SCAN_PAGE = 200;
+const REDACTED_BODY = "（已依規定刪除）";
+const ALERT_AFTER_FAILURES = 4;
+const ALERT_AFTER_MS = DAY_MS;
 const PURGED_CONTACT = "寄送資料已刪除";
 const SNOWFLAKE = /^\d{17,20}$/;
 const GONE_CODES = new Set([10003, 10008]); // Unknown Channel / Unknown Message: already gone
@@ -96,6 +102,7 @@ function buildDm(claim, message) {
 
 function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE_CLAIM_NOTIFY_USER_IDS } = {}) {
   const recipients = parseRecipientIds(recipientIds);
+  const appendAlerted = new Set();
 
   async function loadClaim(claimId) {
     const { data, error } = await db.from("app_prize_claims")
@@ -121,8 +128,30 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
       }
       throw Object.assign(new Error("dm_refs contention"), { code: "contention" });
     } catch (error) {
-      console.warn("[APP 領獎通知] 私訊紀錄失敗", { claimId, code: error?.code || "unknown" });
+      console.error("[APP 領獎通知] 私訊紀錄失敗", { claimId, code: error?.code || "unknown" });
+      if (!appendAlerted.has(claimId) && await alertOwners(claimId, [ref])) appendAlerted.add(claimId);
     }
+  }
+
+  // The DM could not be auto-deleted: tell the recipients once (claim short id + jump links only).
+  async function alertOwners(claimId, refs) {
+    const lines = [`有一則 APP 領獎私訊無法自動刪除（申請 ${String(claimId).slice(0, 8)}），請手動刪除`];
+    for (const item of refs) {
+      if (SNOWFLAKE.test(String(item?.channelId)) && SNOWFLAKE.test(String(item?.messageId))) {
+        lines.push(`https://discord.com/channels/@me/${item.channelId}/${item.messageId}`);
+      }
+    }
+    let sent = 0;
+    for (const id of recipients) {
+      try {
+        const user = await client.users.fetch(id);
+        await user.send({ content: lines.join("\n"), allowedMentions: { parse: [] } });
+        sent += 1;
+      } catch (error) {
+        console.warn("[APP 領獎資料清除] 提醒私訊失敗", { claimId, recipient: id, code: error?.code || "unknown" });
+      }
+    }
+    return sent > 0;
   }
 
   async function notify(value) {
@@ -165,12 +194,15 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
     return { status: 200, body: { ok: true, sent } };
   }
 
+  // "gone" (deleted or already gone), "foreign" (not a DM channel: skip and drop), or the error.
   async function deleteDm(ref) {
     try {
+      const channel = await client.channels.fetch(ref.channelId);
+      if (channel?.type !== ChannelType.DM) return "foreign";
       await client.rest.delete(Routes.channelMessage(ref.channelId, ref.messageId));
-      return true;
+      return "gone";
     } catch (error) {
-      if (GONE_CODES.has(Number(error?.code))) return true;
+      if (GONE_CODES.has(Number(error?.code))) return "gone";
       return error || {};
     }
   }
@@ -178,14 +210,33 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
   async function purgeClaim(claim, now) {
     const refs = Array.isArray(claim.dm_refs) ? claim.dm_refs : [];
     const kept = [];
+    const toAlert = [];
     for (const ref of refs) {
       if (!SNOWFLAKE.test(String(ref?.channelId)) || !SNOWFLAKE.test(String(ref?.messageId))) continue;
-      const result = await deleteDm({ channelId: String(ref.channelId), messageId: String(ref.messageId) });
-      if (result !== true) {
-        kept.push(ref); // retried next run; contact is still nulled now
-        console.warn("[APP 領獎資料清除] 私訊刪除失敗", { claimId: claim.id, code: result.code || result.status || "unknown" });
+      const channelId = String(ref.channelId);
+      const messageId = String(ref.messageId);
+      const result = await deleteDm({ channelId, messageId });
+      if (result === "gone") continue;
+      if (result === "foreign") {
+        console.warn("[APP 領獎資料清除] 略過非私訊頻道", { claimId: claim.id });
+        continue;
       }
+      // Retried next run; contact is still nulled now.
+      const next = { channelId, messageId, failures: (Number(ref.failures) || 0) + 1,
+        firstFailedAt: ref.firstFailedAt || now.toISOString() };
+      if (ref.alertedAt) next.alertedAt = ref.alertedAt;
+      else if (next.failures >= ALERT_AFTER_FAILURES ||
+        now.getTime() - Date.parse(next.firstFailedAt) >= ALERT_AFTER_MS) toAlert.push(next);
+      kept.push(next);
+      console.warn("[APP 領獎資料清除] 私訊刪除失敗", { claimId: claim.id, code: result.code || result.status || "unknown" });
     }
+    if (toAlert.length && await alertOwners(claim.id, toAlert)) {
+      for (const item of toAlert) item.alertedAt = now.toISOString();
+    }
+    // The claim chat may repeat the address: redact customer and staff rows alike (idempotent).
+    const { error: redactError } = await db.from("app_prize_claim_messages")
+      .update({ body: REDACTED_BODY }).eq("claim_id", claim.id).neq("body", REDACTED_BODY);
+    if (redactError) throw redactError;
     // Compare-and-set on dm_refs: a DM recorded meanwhile stays for the next run instead of being lost.
     const { data, error } = await db.from("app_prize_claims")
       .update({ contact: null, contact_purged_at: claim.contact_purged_at || now.toISOString(), dm_refs: kept })
@@ -194,39 +245,52 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
     return Boolean(data?.length);
   }
 
-  // Idempotent; at most PURGE_BATCH claims per run. Never reads or logs contact.
-  async function purgeExpired({ now = new Date() } = {}) {
-    const summary = { purged: 0, deferred: 0, failed: 0 };
-    const { data: candidates, error } = await db.from("app_prize_claims")
-      .select("id,guild_id,source_type,source_id,status,created_at,dm_refs,contact_purged_at")
-      .or("contact.not.is.null,dm_refs.neq.[]")
-      .order("created_at", { ascending: true }).limit(PURGE_SCAN_LIMIT);
-    if (error) {
-      console.error("[APP 領獎資料清除] 讀取失敗", { code: error.code || "unknown" });
-      return summary;
-    }
-    const rows = candidates || [];
+  async function dueIn(rows, now) {
     const rejectedCutoff = now.getTime() - REJECTED_RETENTION_MS;
     const due = rows.filter(c => c.status === "rejected" && Date.parse(c.created_at) < rejectedCutoff);
     const shippedCutoff = new Date(now.getTime() - SHIPPED_RETENTION_MS).toISOString();
     for (const [type, redemptionType] of Object.entries(REDEMPTION_TYPES)) {
       const claims = rows.filter(c => c.status !== "rejected" && c.source_type === type);
-      for (let i = 0; i < claims.length && due.length < PURGE_BATCH; i += 100) {
+      for (let i = 0; i < claims.length; i += 100) {
         const chunk = claims.slice(i, i + 100);
-        const { data: redeemed, error: redemptionError } = await db.from("bot_prize_redemptions")
+        const { data: redeemed, error } = await db.from("bot_prize_redemptions")
           .select("guild_id,source_id,redeemed_at")
           .eq("source_type", redemptionType)
           .in("source_id", [...new Set(chunk.map(c => String(c.source_id)))])
           .lt("redeemed_at", shippedCutoff);
-        if (redemptionError) {
-          console.error("[APP 領獎資料清除] 讀取兌換紀錄失敗", { code: redemptionError.code || "unknown" });
-          return summary;
-        }
+        if (error) throw error;
         const shipped = new Set((redeemed || []).map(r => `${r.guild_id}:${r.source_id}`));
         due.push(...chunk.filter(c => shipped.has(`${c.guild_id}:${c.source_id}`)));
       }
     }
-    for (const claim of due.slice(0, PURGE_BATCH)) {
+    return due;
+  }
+
+  // Idempotent; at most PURGE_BATCH claims per run. Pages through every unpurged claim (id cursor),
+  // so never-due rows can't starve due ones; claims still holding contact go before leftover-DM retries.
+  // Never reads or logs contact.
+  async function purgeExpired({ now = new Date() } = {}) {
+    const summary = { purged: 0, deferred: 0, failed: 0 };
+    const fresh = [];
+    const leftovers = [];
+    let cursor = null;
+    try {
+      for (;;) {
+        let query = db.from("app_prize_claims")
+          .select("id,guild_id,source_type,source_id,status,created_at,dm_refs,contact_purged_at")
+          .or("contact.not.is.null,dm_refs.neq.[]");
+        if (cursor) query = query.gt("id", cursor);
+        const { data, error } = await query.order("id", { ascending: true }).limit(PURGE_SCAN_PAGE);
+        if (error) throw error;
+        const page = data || [];
+        for (const claim of await dueIn(page, now)) (claim.contact_purged_at ? leftovers : fresh).push(claim);
+        if (fresh.length >= PURGE_BATCH || page.length < PURGE_SCAN_PAGE) break;
+        cursor = page[page.length - 1].id;
+      }
+    } catch (error) {
+      console.error("[APP 領獎資料清除] 讀取失敗", { code: error?.code || "unknown" });
+    }
+    for (const claim of [...fresh, ...leftovers].slice(0, PURGE_BATCH)) {
       try {
         if (await purgeClaim(claim, now)) summary.purged += 1; else summary.deferred += 1;
       } catch (purgeError) {
