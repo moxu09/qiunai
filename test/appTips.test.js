@@ -12,6 +12,7 @@ const USER = "123456789012345678";
 const STAFF_A = "223456789012345678";
 const STAFF_B = "323456789012345678";
 const REQ = "8f14e45f-ceea-4b67-8a2c-4f1b2a3c4d5e";
+const OP = `${GUILD}:app-tip:${REQ}`;
 
 function sign(method, url, body, time = String(Date.now()), token = TOKEN) {
   const signature = createHmac("sha256", token)
@@ -36,26 +37,72 @@ async function call(bridge, method, url, data, { signed = true } = {}) {
   return response;
 }
 
-function setup(overrides = {}) {
-  const calls = { pay: [], vip: [], reports: [], broadcasts: [] };
+// Fake DB: wallet balance + tip_payment_operations, shared across app-tips instances
+// (an instance restart keeps the DB but loses the in-memory map).
+function fakeDb(balance = 1000) {
+  return { balance, operations: new Map(), rpcCalls: [], charged: 0, orderNo: 0, failNext: null, commitThenThrow: null };
+}
+
+// Mirrors index.js payTipAllocationsWithWalletAtomic + the RPC: group by item+amount in
+// allocation order, one RPC per group keyed `${operationKey}:${i}`, stored result replayed.
+function fakePay(db, calls) {
+  return async (args) => {
+    calls.pay.push(args);
+    if (args.allocations.some(a => a.staffId === args.tipperId)) throw new Error("不能打賞自己");
+    const groups = new Map();
+    for (const a of args.allocations) {
+      const key = `${a.item}\u0000${a.amount}`;
+      const g = groups.get(key) || { item: a.item, amount: a.amount, staffIds: [] };
+      g.staffIds.push(a.staffId);
+      groups.set(key, g);
+    }
+    const orders = [];
+    let balance = null;
+    let index = 0;
+    for (const group of groups.values()) {
+      const operationKey = `${args.operationKey}:${index}`;
+      if (args.beforeGroup) await args.beforeGroup({ index, operationKey, ...group });
+      db.rpcCalls.push(operationKey);
+      let payment;
+      const stored = db.operations.get(operationKey);
+      if (stored) payment = stored.result;
+      else {
+        if (db.failNext) { const error = db.failNext; db.failNext = null; throw error; }
+        const need = group.amount * group.staffIds.length;
+        if (db.balance < need) throw new Error(`餘額不足，目前餘額 ${db.balance} ASD，需要 ${need} ASD`);
+        db.balance -= need;
+        db.charged += need;
+        payment = {
+          balance: db.balance,
+          orders: group.staffIds.map(staffId => ({ id: `o${++db.orderNo}`, assigned_player: staffId, customer_id: args.tipperId, order_item: group.item, final_price: group.amount })),
+        };
+        db.operations.set(operationKey, { user_id: args.tipperId, result: payment });
+        if (db.commitThenThrow) { const error = db.commitThenThrow; db.commitThenThrow = null; throw error; }
+      }
+      orders.push(...payment.orders);
+      balance = payment.balance;
+      if (args.afterGroup) await args.afterGroup({ index, operationKey, ...group, payment });
+      index += 1;
+    }
+    return { balance, orders };
+  };
+}
+
+function setup(overrides = {}, db = fakeDb()) {
+  const calls = { pay: [], vip: [], reports: [], broadcasts: [], lookups: [] };
   const staff = [
-    { discord_id: STAFF_A, display_name: "小A", is_active: true },
+    { discord_id: STAFF_A, display_name: "小A", real_name: "王小明", is_active: true },
     { discord_id: STAFF_B, display_name: "小B", is_active: true },
     { discord_id: "423456789012345678", display_name: "離職", is_active: false },
     { discord_id: null, display_name: "無ID", is_active: true },
+    { discord_id: "623456789012345678", display_name: null, real_name: "陳真名", name: "陳真名", is_active: true },
     { discord_id: USER, display_name: "客人自己也是陪陪", is_active: true },
   ];
-  let orderNo = 0;
   const deps = {
     guildId: GUILD,
     listActiveStaff: async () => staff,
-    payTipAllocations: async (args) => {
-      calls.pay.push(args);
-      return {
-        balance: 500,
-        orders: args.allocations.map(a => ({ id: `o${++orderNo}`, assigned_player: a.staffId, customer_id: args.tipperId, final_price: a.amount })),
-      };
-    },
+    payTipAllocations: fakePay(db, calls),
+    lookupTipOperation: async (key) => { calls.lookups.push(key); return db.operations.get(key) || null; },
     countOrderVipSpentOnce: async (order, reason) => { calls.vip.push({ order, reason }); },
     sendTipWorkReports: async (orders, payload) => { calls.reports.push({ orders, payload }); },
     sendTipBroadcast: async (tipData) => { calls.broadcasts.push(tipData); },
@@ -63,7 +110,7 @@ function setup(overrides = {}) {
     ...overrides,
   };
   const tips = createAppTips(deps);
-  return { calls, tips, bridge: createAppBridge({ token: TOKEN, tips }) };
+  return { calls, tips, db, bridge: createAppBridge({ token: TOKEN, tips }) };
 }
 
 const goodBody = (extra = {}) => ({
@@ -77,6 +124,12 @@ const goodBody = (extra = {}) => ({
   source: "standalone",
   ...extra,
 });
+
+async function post(ctx, body = goodBody()) {
+  const response = await call(ctx.bridge, "POST", "/app/tips", body);
+  await ctx.tips.idle();
+  return response;
+}
 
 test("TIP_ORDER_PANEL_CHANNEL_ID matches dispatchSystem", () => {
   const source = fs.readFileSync(path.join(__dirname, "../events/dispatchSystem.js"), "utf8");
@@ -97,7 +150,7 @@ test("bridge without tips module answers 503 in Chinese", async () => {
   assert.match(response.json.error, /打賞/);
 });
 
-test("catalog excludes tip_custom and lists only active staff with a discord id", async () => {
+test("catalog excludes tip_custom and lists only active staff with a discord id and public name", async () => {
   const { bridge } = setup();
   const response = await call(bridge, "GET", `/app/tips/catalog?guildId=${GUILD}`);
   assert.equal(response.status, 200);
@@ -110,6 +163,17 @@ test("catalog excludes tip_custom and lists only active staff with a discord id"
   assert.equal(discordTipUrl, `https://discord.com/channels/${GUILD}/${TIP_ORDER_PANEL_CHANNEL_ID}`);
 });
 
+test("I2: real names never reach the app; staff without a public name are omitted and cannot be tipped", async () => {
+  const ctx = setup();
+  const catalog = await call(ctx.bridge, "GET", "/app/tips/catalog");
+  assert.ok(!catalog.text.includes("王小明"));
+  assert.ok(!catalog.text.includes("陳真名"));
+  assert.ok(!catalog.text.includes("623456789012345678"));
+  const response = await post(ctx, goodBody({ allocations: [{ staffId: "623456789012345678", lines: [{ key: "tip_33_bear_cookie", quantity: 1 }] }] }));
+  assert.equal(response.status, 400);
+  assert.equal(ctx.calls.pay.length, 0);
+});
+
 test("catalog rejects a different guild and wrong methods", async () => {
   const { bridge } = setup();
   assert.equal((await call(bridge, "GET", "/app/tips/catalog?guildId=999999999999999999")).status, 400);
@@ -117,17 +181,18 @@ test("catalog rejects a different guild and wrong methods", async () => {
   assert.equal((await call(bridge, "GET", "/app/tips")).status, 405);
 });
 
-test("successful tip pays once via the wallet machinery and runs the Discord notifications", async () => {
-  const { bridge, calls } = setup();
-  const response = await call(bridge, "POST", "/app/tips", goodBody());
+test("successful tip pays via the wallet machinery and runs the Discord notifications", async () => {
+  const ctx = setup();
+  const { calls } = ctx;
+  const response = await post(ctx);
   assert.equal(response.status, 200);
   assert.deepEqual(response.json, {
-    ok: true, total: 166, balance: 500,
+    ok: true, total: 166, balance: 834,
     orders: [{ id: "o1", staffId: STAFF_A, amount: 66 }, { id: "o2", staffId: STAFF_B, amount: 100 }],
   });
   assert.equal(calls.pay.length, 1);
   const pay = calls.pay[0];
-  assert.equal(pay.operationKey, `${GUILD}:app-tip:${REQ}`);
+  assert.equal(pay.operationKey, OP);
   assert.equal(pay.heartFlowId, null);
   assert.equal(pay.guildId, GUILD);
   assert.equal(pay.tipperId, USER);
@@ -135,8 +200,8 @@ test("successful tip pays once via the wallet machinery and runs the Discord not
   assert.deepEqual(pay.allocations.map(a => [a.staffId, a.amount, a.item]), [
     [STAFF_A, 66, "小熊棉花糖餅乾×2"], [STAFF_B, 100, "鹹酥雞×1"],
   ]);
-  // prices come from config, never from the client
-  assert.equal(pay.allocations[0].lines[0].price, 33);
+  assert.equal(pay.allocations[0].lines[0].price, 33, "prices come from config");
+  assert.deepEqual(calls.lookups, [`${OP}:0`, `${OP}:1`], "tip_payment_operations read before each group");
   assert.equal(calls.vip.length, 2);
   assert.match(calls.vip[0].reason, /錢包打賞付款完成/);
   assert.equal(calls.reports.length, 1);
@@ -151,107 +216,245 @@ test("successful tip pays once via the wallet machinery and runs the Discord not
   assert.equal(tipData.allocations.length, 2);
 });
 
+test("C1a: group keys are deterministic for a basket regardless of the order the app sends it", async () => {
+  const one = setup();
+  await post(one);
+  const two = setup();
+  const reversed = goodBody();
+  reversed.allocations.reverse();
+  await post(two, reversed);
+  assert.deepEqual(two.db.rpcCalls, one.db.rpcCalls);
+  assert.deepEqual(two.calls.pay[0].allocations.map(a => a.item), one.calls.pay[0].allocations.map(a => a.item));
+  const lines = setup();
+  await post(lines, goodBody({ allocations: [{ staffId: STAFF_A, lines: [{ key: "tip_99_fireworks", quantity: 1 }, { key: "tip_33_bear_cookie", quantity: 1 }] }] }));
+  assert.equal(lines.calls.pay[0].allocations[0].item, "小熊棉花糖餅乾×1、煙花×1");
+});
+
+test("I1: the response does not wait for notifications; they still run exactly once", async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const ctx = setup({
+    sendTipWorkReports: async (orders, payload) => { await gate; ctx.calls.reports.push({ orders, payload }); },
+  });
+  const response = await call(ctx.bridge, "POST", "/app/tips", goodBody());
+  assert.equal(response.status, 200, "answered while work reports are still blocked");
+  assert.equal(ctx.calls.reports.length, 0);
+  const again = await call(ctx.bridge, "POST", "/app/tips", goodBody());
+  assert.equal(again.status, 200);
+  release();
+  await ctx.tips.idle();
+  assert.equal(ctx.calls.reports.length, 1);
+  assert.equal(ctx.calls.vip.length, 2);
+  assert.equal(ctx.calls.broadcasts.length, 1);
+});
+
 test("broadcast disabled skips the public broadcast but still sends VIP + work reports", async () => {
-  const { bridge, calls } = setup();
-  const response = await call(bridge, "POST", "/app/tips", goodBody({ broadcast: { enabled: false, anonymous: false } }));
+  const ctx = setup();
+  const response = await post(ctx, goodBody({ broadcast: { enabled: false, anonymous: false } }));
   assert.equal(response.status, 200);
-  assert.equal(calls.vip.length, 2);
-  assert.equal(calls.reports.length, 1);
-  assert.equal(calls.broadcasts.length, 0);
+  assert.equal(ctx.calls.vip.length, 2);
+  assert.equal(ctx.calls.reports.length, 1);
+  assert.equal(ctx.calls.broadcasts.length, 0);
 });
 
 test("anonymous broadcast is passed through", async () => {
-  const { bridge, calls } = setup();
-  await call(bridge, "POST", "/app/tips", goodBody({ broadcast: { enabled: true, anonymous: true } }));
-  assert.equal(calls.broadcasts[0].broadcastAnonymous, true);
+  const ctx = setup();
+  await post(ctx, goodBody({ broadcast: { enabled: true, anonymous: true } }));
+  assert.equal(ctx.calls.broadcasts[0].broadcastAnonymous, true);
 });
 
 test("same requestId twice pays once and does not re-notify", async () => {
-  const { bridge, calls } = setup();
-  const first = await call(bridge, "POST", "/app/tips", goodBody());
-  const second = await call(bridge, "POST", "/app/tips", goodBody());
+  const ctx = setup();
+  const first = await post(ctx);
+  const second = await post(ctx);
   assert.equal(second.status, 200);
   assert.deepEqual(second.json, first.json);
-  assert.equal(calls.pay.length, 1);
-  assert.equal(calls.vip.length, 2);
-  assert.equal(calls.reports.length, 1);
-  assert.equal(calls.broadcasts.length, 1);
+  assert.equal(ctx.calls.pay.length, 1);
+  assert.equal(ctx.db.charged, 166);
+  assert.equal(ctx.calls.vip.length, 2);
+  assert.equal(ctx.calls.reports.length, 1);
+  assert.equal(ctx.calls.broadcasts.length, 1);
 });
 
-test("same requestId with a different body is rejected", async () => {
-  const { bridge, calls } = setup();
-  await call(bridge, "POST", "/app/tips", goodBody());
+test("C1b: same requestId with a different basket gets 409 and nothing is charged", async () => {
+  const ctx = setup();
+  await post(ctx);
   const changed = goodBody();
   changed.allocations[0].lines[0].quantity = 3;
-  const response = await call(bridge, "POST", "/app/tips", changed);
+  const response = await post(ctx, changed);
   assert.equal(response.status, 409);
-  assert.equal(calls.pay.length, 1);
+  assert.equal(response.json.error, "這筆打賞內容已變更，請重新確認");
+  assert.equal(ctx.calls.pay.length, 1);
+  assert.equal(ctx.db.charged, 166);
+});
+
+test("I3: replay after a restart returns the stored result and sends no notifications", async () => {
+  const db = fakeDb();
+  const first = setup({}, db);
+  const original = await post(first);
+  const restarted = setup({}, db);
+  const replay = await post(restarted);
+  assert.equal(replay.status, 200);
+  assert.deepEqual(replay.json, original.json);
+  assert.equal(db.charged, 166);
+  assert.equal(restarted.calls.vip.length + restarted.calls.reports.length + restarted.calls.broadcasts.length, 0);
+});
+
+test("C1b durable: after a restart a changed basket on a paid requestId gets 409 before any RPC", async () => {
+  const db = fakeDb();
+  await post(setup({}, db));
+  const restarted = setup({}, db);
+  const changed = goodBody();
+  changed.allocations[0].lines[0].quantity = 5;
+  const before = db.rpcCalls.length;
+  const response = await post(restarted, changed);
+  assert.equal(response.status, 409);
+  assert.equal(response.json.error, "這筆打賞內容已變更，請重新確認");
+  assert.equal(db.rpcCalls.length, before);
+  assert.equal(db.charged, 166);
+});
+
+test("C1c/d: partial charge -> 502 partial; changed basket 409; identical retry completes the rest without double charge", async () => {
+  const db = fakeDb(70);
+  const ctx = setup({}, db);
+  const first = await post(ctx);
+  assert.equal(first.status, 502);
+  assert.deepEqual(first.json, {
+    error: "部分打賞已完成，請重試以完成其餘部分（不會重複扣款）",
+    partial: true,
+    paidStaffIds: [STAFF_A],
+    balance: 4,
+    need: 100,
+  });
+  assert.equal(db.charged, 66);
+  // money moved for 小A: that group is notified (once)
+  assert.equal(ctx.calls.vip.length, 1);
+  assert.equal(ctx.calls.reports[0].orders.length, 1);
+  assert.deepEqual(ctx.calls.broadcasts[0].allocations.map(a => a.staffId), [STAFF_A]);
+
+  const edited = goodBody({ allocations: [goodBody().allocations[1]] });
+  const conflict = await post(ctx, edited);
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.json.error, "這筆打賞內容已變更，請重新確認");
+  assert.equal(db.charged, 66);
+
+  db.balance += 200; // top-up
+  const retry = await post(ctx);
+  assert.equal(retry.status, 200);
+  assert.equal(retry.json.total, 166);
+  assert.equal(db.charged, 166, "小A's group replayed, not charged again");
+  assert.equal(ctx.calls.vip.length, 2, "only the newly paid group is notified");
+  assert.equal(ctx.calls.reports.length, 2);
+  assert.deepEqual(ctx.calls.reports[1].orders.map(o => o.assigned_player), [STAFF_B]);
+  assert.deepEqual(ctx.calls.broadcasts[1].allocations.map(a => a.staffId), [STAFF_B]);
 });
 
 test("a concurrent duplicate gets 409 while the first is still paying", async () => {
   let release;
   const gate = new Promise(resolve => { release = resolve; });
-  const { bridge, calls } = setup({
-    payTipAllocations: async (args) => {
-      calls.pay.push(args);
-      await gate;
-      return { balance: 1, orders: [] };
-    },
+  const ctx = setup({
+    lookupTipOperation: async () => { await gate; return null; },
   });
-  const first = call(bridge, "POST", "/app/tips", goodBody());
+  const first = call(ctx.bridge, "POST", "/app/tips", goodBody());
   await new Promise(resolve => setImmediate(resolve));
-  const second = await call(bridge, "POST", "/app/tips", goodBody());
+  const second = await call(ctx.bridge, "POST", "/app/tips", goodBody());
   assert.equal(second.status, 409);
   assert.equal(second.json.error, "這筆打賞正在處理中");
   release();
   assert.equal((await first).status, 200);
-  assert.equal(calls.pay.length, 1);
+  assert.equal(ctx.calls.pay.length, 1);
 });
 
-test("insufficient balance maps to 402 with numeric balance and need, and may be retried", async () => {
-  let fail = true;
-  const { bridge, calls } = setup({
-    payTipAllocations: async (args) => {
-      calls.pay.push(args);
-      if (fail) throw Object.assign(new Error("餘額不足，目前餘額 120 ASD，需要 166 ASD"), { code: "P0001" });
-      return { balance: 0, orders: [] };
-    },
-  });
-  const response = await call(bridge, "POST", "/app/tips", goodBody());
+test("insufficient balance on the first group -> 402 with numbers, nothing charged, retry allowed", async () => {
+  const db = fakeDb(50);
+  const ctx = setup({}, db);
+  const response = await post(ctx);
   assert.equal(response.status, 402);
-  assert.equal(response.json.balance, 120);
-  assert.equal(response.json.need, 166);
-  assert.match(response.json.error, /餘額不足/);
-  assert.equal(calls.vip.length + calls.reports.length + calls.broadcasts.length, 0);
-  fail = false;
-  assert.equal((await call(bridge, "POST", "/app/tips", goodBody())).status, 200);
-  assert.equal(calls.pay.length, 2);
+  assert.deepEqual(response.json, { error: "餘額不足，目前餘額 50 ASD，需要 66 ASD", balance: 50, need: 66 });
+  assert.equal(ctx.calls.vip.length + ctx.calls.reports.length + ctx.calls.broadcasts.length, 0);
+  db.balance = 500;
+  assert.equal((await post(ctx)).status, 200);
+  assert.equal(db.charged, 166);
 });
 
-test("unknown RPC errors map to 503 without leaking details", async () => {
-  const { bridge, calls } = setup({
-    payTipAllocations: async () => { throw new Error("connection terminated unexpectedly"); },
-  });
-  const response = await call(bridge, "POST", "/app/tips", goodBody());
+test("I4: a network-style RPC error is 'uncertain', not 'try later'", async () => {
+  const db = fakeDb();
+  db.failNext = new Error("fetch failed");
+  const ctx = setup({}, db);
+  const response = await post(ctx);
   assert.equal(response.status, 503);
-  assert.equal(response.json.error, "打賞暫時無法完成，請稍後再試");
-  assert.equal(calls.vip.length, 0);
+  assert.deepEqual(response.json, { error: "打賞結果確認中，請到錢包確認後用同一筆重試（不會重複扣款）", uncertain: true });
+});
+
+test("I4: RPC committed but the reply was lost -> uncertain; same-request retry completes and notifies once", async () => {
+  const db = fakeDb();
+  db.commitThenThrow = new Error("socket hang up");
+  const ctx = setup({}, db);
+  const first = await post(ctx);
+  assert.equal(first.status, 503);
+  assert.equal(first.json.uncertain, true);
+  assert.equal(ctx.calls.vip.length, 0);
+  const retry = await post(ctx);
+  assert.equal(retry.status, 200);
+  assert.equal(db.charged, 166);
+  assert.equal(ctx.calls.vip.length, 2, "the group whose reply was lost is notified on the retry");
+  assert.equal(ctx.calls.reports.length, 1);
+  assert.equal(ctx.calls.broadcasts.length, 1);
+});
+
+test("I4: an error after a successful group is uncertain, not partial", async () => {
+  const db = fakeDb();
+  const ctx = setup({}, db);
+  // after group 0 succeeds, group 1's RPC fails with a non-Chinese (possibly committed) error
+  const pay = fakePay(db, ctx.calls);
+  const tips = createAppTips({
+    guildId: GUILD,
+    listActiveStaff: async () => [{ discord_id: STAFF_A, display_name: "小A" }, { discord_id: STAFF_B, display_name: "小B" }],
+    payTipAllocations: async (args) => pay({ ...args, afterGroup: async (g) => { await args.afterGroup(g); db.failNext = new Error("ETIMEDOUT"); } }),
+    lookupTipOperation: async key => db.operations.get(key) || null,
+    countOrderVipSpentOnce: async (order, reason) => { ctx.calls.vip.push({ order, reason }); },
+    sendTipWorkReports: async () => {},
+    sendTipBroadcast: async () => {},
+    logger: { error() {} },
+  });
+  const result = await tips.tip(goodBody());
+  await tips.idle();
+  assert.equal(result.status, 503);
+  assert.equal(result.body.uncertain, true);
+  assert.equal(ctx.calls.vip.length, 1, "the group that did succeed is still notified");
+});
+
+test("unknown Chinese RPC error on the first group (rolled back) keeps the generic 503", async () => {
+  const db = fakeDb();
+  db.failNext = new Error("陪陪資料不完整");
+  const ctx = setup({}, db);
+  const response = await post(ctx);
+  assert.equal(response.status, 503);
+  assert.deepEqual(response.json, { error: "打賞暫時無法完成，請稍後再試" });
+});
+
+test("tip_payment_operations read failure before the first group -> nothing charged, generic 503", async () => {
+  const ctx = setup({ lookupTipOperation: async () => { throw new Error("db down"); } });
+  const response = await post(ctx);
+  assert.equal(response.status, 503);
+  assert.deepEqual(response.json, { error: "打賞暫時無法完成，請稍後再試" });
+  assert.equal(ctx.db.charged, 0);
 });
 
 test("a known Chinese validation error from the pay function maps to 400", async () => {
-  const { bridge } = setup({ payTipAllocations: async () => { throw new Error("不能打賞自己"); } });
-  const response = await call(bridge, "POST", "/app/tips", goodBody());
+  const ctx = setup({ payTipAllocations: async () => { throw new Error("不能打賞自己"); } });
+  const response = await post(ctx);
   assert.equal(response.status, 400);
   assert.equal(response.json.error, "不能打賞自己");
 });
 
 test("notification failures after payment still return success", async () => {
-  const { bridge } = setup({
+  const ctx = setup({
     countOrderVipSpentOnce: async () => { throw new Error("vip down"); },
     sendTipWorkReports: async () => { throw new Error("discord down"); },
     sendTipBroadcast: async () => { throw new Error("discord down"); },
   });
-  const response = await call(bridge, "POST", "/app/tips", goodBody());
+  const response = await post(ctx);
   assert.equal(response.status, 200);
   assert.equal(response.json.ok, true);
 });

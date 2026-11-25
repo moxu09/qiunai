@@ -3665,6 +3665,10 @@ async function payTipAllocationsWithWalletAtomic({
   tipperId,
   allocations,
   channelId,
+  // Optional hooks (APP tips only; other callers omit them): beforeGroup runs before each
+  // group's RPC and may throw to stop; afterGroup runs after a group's RPC succeeded.
+  beforeGroup,
+  afterGroup,
 }) {
   if (hasSelfTip(tipperId, allocations.map((allocation) => allocation.staffId))) {
     throw new Error("不能打賞自己");
@@ -3697,6 +3701,7 @@ async function payTipAllocationsWithWalletAtomic({
   let balance = null;
   let index = 0;
   for (const group of groups.values()) {
+    if (beforeGroup) await beforeGroup({ index, operationKey: `${operationKey}:${index}`, ...group });
     const payment = await payTipWithWalletAtomic({
       operationKey: `${operationKey}:${index}`,
       notificationGroupId: `tip:wallet:${operationKey}`,
@@ -3709,6 +3714,7 @@ async function payTipAllocationsWithWalletAtomic({
     });
     orders.push(...(payment?.orders || []));
     balance = payment?.balance ?? balance;
+    if (afterGroup) await afterGroup({ index, operationKey: `${operationKey}:${index}`, ...group, payment });
     index += 1;
   }
   return { balance, orders };
@@ -8488,7 +8494,8 @@ client.once(Events.ClientReady, async () => {
   websiteOrderBridge.start();
   appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN,ai:require('./utils/appOrderAssist').createAppOrderAssist(),
     tips:require('./utils/appTips').createAppTips({guildId:process.env.GUILD_ID,listActiveStaff,payTipAllocations:payTipAllocationsWithWalletAtomic,
-      countOrderVipSpentOnce,sendTipWorkReports:sendTipWorkReportsSafely,sendTipBroadcast:sendTipBroadcastSafely})});
+      countOrderVipSpentOnce,sendTipWorkReports:sendTipWorkReportsSafely,sendTipBroadcast:sendTipBroadcastSafely,
+      lookupTipOperation:async key=>{const {data,error}=await supabase.from('tip_payment_operations').select('user_id,result').eq('operation_key',key).maybeSingle();if(error)throw error;return data;}})});
   createServiceProxyQueue({ db: supabase, client, organization: "qiunai", guildId: "1206138511535898654",
     createTicket: payload => dispatchSystem.createServiceProxyTicket(payload) }).start();
   startReceiptRecovery({ supabase, guildId: process.env.GUILD_ID, sendOrderReceipt: sendOrderReceiptSafely, sendReceipt });
