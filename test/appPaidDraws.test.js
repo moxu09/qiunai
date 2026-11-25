@@ -425,3 +425,35 @@ test("查單：只送 draw 單；查詢失敗拋錯；官網回 409 視為此單
     fetcher: async () => ({ ok: false, status: 500 }) }).then(() => null, (e) => e);
   assert.ok(!r500.terminal);
 });
+
+test("手動「我已付款」按鈕：非 draw 單遇官網 409 與原本失敗（路由不存在 404）顯示完全相同訊息，且不寫入任何資料", async () => {
+  const { handleEcpayInquiry } = require("../utils/ecpayInquiry");
+  const writes = [];
+  const db = { from(table) {
+    const q = { select() { return q; }, eq() { return q; },
+      async maybeSingle() { return { data: { user_id: "u", channel_id: "c", organization_code: "qiunai", payment_kind: "topup" }, error: null }; },
+      insert() { writes.push(table); return q; }, update() { writes.push(table); return q; }, upsert() { writes.push(table); return q; } };
+    return q;
+  } };
+  const origFetch = globalThis.fetch;
+  const origKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-secret";
+  const replyFor = async (status) => {
+    let calls = 0;
+    globalThis.fetch = async () => { calls += 1; return { ok: false, status, async json() { return { error: "此付款類型不支援自動查詢" }; } }; };
+    const replies = [];
+    await handleEcpayInquiry({ customId: "ecpay_inquiry_QN123", user: { id: "u" }, channelId: "c", deferred: true, async editReply(p) { replies.push(p); } }, db, "https://pay.example");
+    assert.equal(calls, 1, "只呼叫一次，不重試");
+    return replies;
+  };
+  try {
+    const before = await replyFor(404);
+    const after = await replyFor(409);
+    assert.deepEqual(after, before);
+    assert.deepEqual(after, [{ content: "❌ 查詢暫時無法完成，請稍後再試；勿重複付款" }]);
+    assert.deepEqual(writes, []);
+  } finally {
+    globalThis.fetch = origFetch;
+    if (origKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY; else process.env.SUPABASE_SERVICE_ROLE_KEY = origKey;
+  }
+});
