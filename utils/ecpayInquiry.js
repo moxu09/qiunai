@@ -40,7 +40,16 @@ async function recoverPendingEcpayPayments(supabase, baseUrl, { now = Date.now()
     .gte('created_at', new Date(now - 7 * 86400000).toISOString()).lte('created_at',new Date(now - 60000).toISOString())
     .order('created_at').limit(500);
   if (error) throw new Error('無法讀取待付款查單清單');
-  const candidates = (payments || []).filter(p => ['ATM','CVS'].includes(String(p.raw_result?.PaymentType || p.metadata?.ecpay_direct_method || '').split('_')[0]));
+  // APP 付款抽（payment_kind 'draw'）：秋奈與深夜的單都查，且含超商條碼；其他付款單維持秋奈 ATM／超商代碼。
+  const { data: draws, error: drawError } = await supabase.from('ecpay_service_payments')
+    .select('merchant_trade_no,raw_result,metadata,created_at').in('organization_code',['qiunai','deepnight']).eq('payment_kind','draw').eq('status','pending')
+    .gte('created_at', new Date(now - 7 * 86400000).toISOString()).lte('created_at',new Date(now - 60000).toISOString())
+    .order('created_at').limit(500);
+  if (drawError) throw new Error('無法讀取待付款查單清單');
+  const method = p => String(p.raw_result?.PaymentType || p.metadata?.ecpay_direct_method || '').split('_')[0];
+  const drawCandidates = (draws || []).filter(p => ['ATM','CVS','BARCODE'].includes(method(p)));
+  const drawNos = new Set(drawCandidates.map(p => p.merchant_trade_no));
+  const candidates = (payments || []).filter(p => !drawNos.has(p.merchant_trade_no) && ['ATM','CVS'].includes(method(p))).concat(drawCandidates);
   if (!candidates.length) return { checked: 0 };
   const { data: checks, error: checksError } = await supabase.from('ecpay_service_inquiries')
     .select('merchant_trade_no,next_check_at,last_checked_at,review_required,lease_until').in('merchant_trade_no',candidates.map(p=>p.merchant_trade_no));

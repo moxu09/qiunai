@@ -62,7 +62,7 @@ const {
 const { createAllianceMembership } = require("./utils/allianceMembership");
 const { createJkopayService } = require("./utils/jkopay");
 const { createEcpayService } = require("./utils/ecpay");
-const { createAppPaidDrawFulfiller } = require("./utils/appPaidDraws");
+const { createAppPaidDrawFulfiller, createPaidDrawFailureAlert } = require("./utils/appPaidDraws");
 const { createIchiban } = require("./utils/ichiban");
 const {
   buildTipReceiptData,
@@ -335,7 +335,13 @@ jkopayService = createJkopayService({
   onValidateServiceRefund: validateJkopayServiceRefund,
   onServiceRefunded: handleJkopayServiceRefunded,
 });
-const ecpayService = createEcpayService({ supabase, onServicePaid: handleJkopayServicePaid });
+const ecpayService = createEcpayService({
+  supabase,
+  onServicePaid: handleJkopayServicePaid,
+  // 深夜只處理 APP 付款抽（draw）；需人工核對的 draw 單私訊老闆名單一次。
+  drawOrganizationCodes: ["deepnight"],
+  onPermanentFailure: createPaidDrawFailureAlert({ client }),
+});
 const fulfilAppPaidDraw = createAppPaidDrawFulfiller({ supabase, client });
 const ECPAY_FULFILLMENT_POLL_MS = 10_000;
 

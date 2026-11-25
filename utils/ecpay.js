@@ -2,6 +2,10 @@ const { randomBytes } = require("node:crypto");
 
 const MIN_AMOUNT = 6;
 const MAX_AMOUNT = 199_999;
+// fulfillment_error 以此開頭的 draw 單（資料不符等）需人工核對，補償迴圈不再自動重試。
+const PERMANENT_FAILURE_PREFIX = "【需人工核對】";
+const isPermanentDrawFailure = payment => payment.payment_kind === "draw" && payment.fulfillment_status === "failed"
+  && String(payment.fulfillment_error || "").startsWith(PERMANENT_FAILURE_PREFIX);
 
 function getEcpayConfig(env = process.env, organizationCode = "qiunai") {
   const publicBaseUrl = String(env.ECPAY_PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
@@ -14,7 +18,7 @@ function getEcpayConfig(env = process.env, organizationCode = "qiunai") {
   };
 }
 
-function createEcpayService({ supabase, onServicePaid, env = process.env, organizationCode = "qiunai" }) {
+function createEcpayService({ supabase, onServicePaid, env = process.env, organizationCode = "qiunai", drawOrganizationCodes = [], onPermanentFailure = null }) {
   const config = getEcpayConfig(env, organizationCode);
 
   async function createServicePayment({ kind, entityKey, userId, amount, channelId, description, metadata = {}, requestedMethod = null }) {
@@ -99,6 +103,10 @@ function createEcpayService({ supabase, onServicePaid, env = process.env, organi
       await supabase.rpc("ecpay_finish_service_fulfillment", {
         p_payment_id: payment.id, p_attempt: attempt, p_error: String(error?.message || error).slice(0, 2000),
       });
+      if (error?.permanent === true && typeof onPermanentFailure === "function") {
+        try { await onPermanentFailure({ payment: { ...payment, ...claimed }, error }); }
+        catch (alertError) { console.error(`[ECPAY][RECOVERY] ${payment.merchant_trade_no} 人工核對通知失敗`, alertError); }
+      }
       throw error;
     }
   }
@@ -109,8 +117,20 @@ function createEcpayService({ supabase, onServicePaid, env = process.env, organi
       .in("fulfillment_status", ["pending", "failed", "processing"])
       .order("fulfillment_updated_at", { ascending: true }).limit(Math.max(1, Math.min(limit, 100)));
     if (error) throw new Error(error.message || "無法查詢待處理綠界付款");
-    const summary = { candidates: (payments || []).length, completed: 0, failed: 0, skipped: 0 };
-    for (const payment of payments || []) {
+    let rows = payments || [];
+    const drawOrgs = drawOrganizationCodes.filter(code => code && code !== config.organizationCode);
+    if (drawOrgs.length) {
+      // 其他店家（深夜）只處理 APP 付款抽（payment_kind 'draw'），其餘付款單不碰。
+      const { data: draws, error: drawError } = await supabase.from("ecpay_service_payments")
+        .select("*").in("organization_code", drawOrgs).eq("payment_kind", "draw").eq("status", "paid")
+        .in("fulfillment_status", ["pending", "failed", "processing"])
+        .order("fulfillment_updated_at", { ascending: true }).limit(Math.max(1, Math.min(limit, 100)));
+      if (drawError) throw new Error(drawError.message || "無法查詢待處理綠界付款");
+      rows = rows.concat(draws || []);
+    }
+    const summary = { candidates: rows.length, completed: 0, failed: 0, skipped: 0 };
+    for (const payment of rows) {
+      if (isPermanentDrawFailure(payment)) { summary.skipped += 1; continue; }
       try {
         const result = await processPaidFulfillment(payment);
         if (result.completed) summary.completed += 1;
@@ -126,4 +146,4 @@ function createEcpayService({ supabase, onServicePaid, env = process.env, organi
   return { config, createServicePayment, attachPaymentMessage, recoverPaidFulfillments };
 }
 
-module.exports = { MIN_AMOUNT, MAX_AMOUNT, getEcpayConfig, createEcpayService };
+module.exports = { MIN_AMOUNT, MAX_AMOUNT, PERMANENT_FAILURE_PREFIX, getEcpayConfig, createEcpayService };

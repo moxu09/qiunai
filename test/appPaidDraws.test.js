@@ -170,3 +170,179 @@ test("ATM／超商的 draw 待繳單與儲值單一樣納入 30 秒查單", asyn
   await recoverPendingEcpayPayments(db, "https://pay.example", { request: async (no) => { called.push(no); return { status: "pending" }; } });
   assert.deepEqual(called, [TRADE]);
 });
+
+// ---- Round 2: real Task 1 shape/errors, deepnight draw rows, inquiry selection ----
+const { PERMANENT_FAILURE_PREFIX } = require("../utils/ecpay");
+
+// Real app_paid_draw_fulfill answer (20261126120000_app_paid_draws.sql): snake_case already_processed, top-level
+// tier/prizeName for 一番賞, results[0] carries tier/name/reward_coins.
+const realIchiban = (extra = {}) => ({
+  merchant_trade_no: TRADE, request_id: REQUEST, already_processed: false, outcome: "drawn", kind: "ichiban", brand: "qiunai",
+  count: 1, unit_price: 300, amount: 300, draw_id: 1, tier: "A", prizeName: "抱枕", prize_id: 2, ticket_no: 5, is_last_one: false,
+  results: [{ tier: "A", name: "抱枕", reward_coins: 0 }], balance: 0, ...extra,
+});
+
+test("真實回傳格式：A 賞播報；已處理重送（already_processed:true）不播報", async () => {
+  const fresh = fakes({ rpcResult: realIchiban() });
+  await createAppPaidDrawFulfiller({ supabase: fresh.supabase, client: fresh.client, env: {} })(payment());
+  assert.equal(fresh.calls.posts[0].payload.content, "🎉 恭喜 匿名老闆 在 APP 一番賞抽中 A 賞｜抱枕！");
+  const replay = fakes({ rpcResult: realIchiban({ already_processed: true }) });
+  await createAppPaidDrawFulfiller({ supabase: replay.supabase, client: replay.client, env: {} })(payment());
+  assert.equal(replay.calls.posts.length, 0);
+  const onlyResults = fakes({ rpcResult: realIchiban({ tier: undefined, prizeName: undefined, results: [{ tier: "S", name: "大獎" }] }) });
+  await createAppPaidDrawFulfiller({ supabase: onlyResults.supabase, client: onlyResults.client, env: {} })(payment());
+  assert.match(onlyResults.calls.posts[0].payload.content, /抽中 S 賞｜大獎！$/);
+});
+
+test("「付款尚未完成」與連線錯誤可重試；資料不符等錯誤標為需人工核對", async () => {
+  const run = async (message) => {
+    const f = fakes({ rpcError: { message } });
+    return createAppPaidDrawFulfiller({ supabase: f.supabase, client: f.client, env: {} })(payment()).then(() => null, (e) => e);
+  };
+  for (const message of ["付款尚未完成", "fetch failed", "canceling statement due to lock timeout"]) {
+    const error = await run(message);
+    assert.ok(!error.message.startsWith(PERMANENT_FAILURE_PREFIX), message);
+    assert.equal(error.permanent, false);
+    assert.match(error.message, /綠界付款抽獎入帳失敗/);
+  }
+  for (const message of ["付款金額與抽獎內容不符", "付款單抽獎資料無效", "付款單會員資料無效", "付款單店家資料無效", "只能單抽或十抽",
+    "一番賞只限秋奈", "一番賞付款抽一次只能抽一張", "付款單不是抽獎付款", "找不到付款單", "付款單編號格式錯誤", "卡池權重設定錯誤"]) {
+    const error = await run(message);
+    assert.ok(error.message.startsWith(`${PERMANENT_FAILURE_PREFIX}綠界付款抽獎入帳失敗：${message}`), message);
+    assert.equal(error.permanent, true);
+  }
+});
+
+// Fake that honours eq/in filters so tests can prove which rows each query reaches.
+function tableDb(tables) {
+  const queries = [];
+  return {
+    queries,
+    from(table) {
+      const filters = [];
+      queries.push({ table, filters });
+      const rows = () => (tables[table] || []).filter((r) => filters.every(([k, v]) => (Array.isArray(v) ? v.includes(r[k]) : r[k] === v)));
+      const q = {
+        select() { return q; }, gte() { return q; }, lte() { return q; }, order() { return q; },
+        eq(k, v) { filters.push([k, v]); return q; },
+        in(k, v) { filters.push([k, v]); return q; },
+        async limit() { return { data: rows(), error: null }; },
+        async maybeSingle() { return { data: rows()[0] || null, error: null }; },
+        then(resolve, reject) { return Promise.resolve({ data: rows(), error: null }).then(resolve, reject); },
+      };
+      return q;
+    },
+  };
+}
+
+test("補償迴圈：深夜只處理 draw 單，深夜儲值／訂單不碰；需人工核對的 draw 單不再重試；未設定時行為不變", async () => {
+  const { createEcpayService } = require("../utils/ecpay");
+  const paid = (id, org, kind, extra = {}) => ({ id, organization_code: org, payment_kind: kind, merchant_trade_no: `T${id}`, status: "paid", fulfillment_status: "pending", amount: 100, ...extra });
+  const rows = [
+    paid(1, "qiunai", "topup"), paid(2, "deepnight", "topup"), paid(3, "deepnight", "order"), paid(4, "deepnight", "draw"),
+    paid(5, "qiunai", "draw", { fulfillment_status: "failed", fulfillment_error: `${PERMANENT_FAILURE_PREFIX}綠界付款抽獎入帳失敗：付款金額與抽獎內容不符` }),
+    paid(6, "qiunai", "draw", { fulfillment_status: "failed", fulfillment_error: "綠界付款抽獎入帳失敗：付款尚未完成" }),
+    paid(7, "deepnight", "draw", { fulfillment_status: "failed", fulfillment_error: `${PERMANENT_FAILURE_PREFIX}x` }),
+    paid(8, "qiunai", "order", { fulfillment_status: "failed", fulfillment_error: `${PERMANENT_FAILURE_PREFIX}x` }),
+  ];
+  for (const drawOrganizationCodes of [["deepnight"], undefined]) {
+    const db = tableDb({ ecpay_service_payments: rows });
+    const claimed = [];
+    db.rpc = async (name, args) => {
+      if (name === "ecpay_claim_service_fulfillment") { claimed.push(args.p_payment_id); return { data: { ...rows.find((r) => r.id === args.p_payment_id), claimed: true, attempt: 1 }, error: null }; }
+      return { data: true, error: null };
+    };
+    const handled = [];
+    const service = createEcpayService({ supabase: db, env: { ECPAY_PUBLIC_BASE_URL: "https://pay.example" }, drawOrganizationCodes,
+      onServicePaid: async ({ payment: p }) => handled.push(`${p.organization_code}:${p.payment_kind}:${p.id}`) });
+    const summary = await service.recoverPaidFulfillments();
+    if (drawOrganizationCodes) {
+      assert.deepEqual(handled.sort(), ["deepnight:draw:4", "qiunai:draw:6", "qiunai:order:8", "qiunai:topup:1"]);
+      const deepQuery = db.queries.find((q) => q.filters.some(([k, v]) => k === "organization_code" && [].concat(v).includes("deepnight")));
+      assert.deepEqual(deepQuery.filters.find(([k]) => k === "organization_code")[1], ["deepnight"]);
+      assert.ok(deepQuery.filters.some(([k, v]) => k === "payment_kind" && v === "draw"));
+      assert.equal(summary.skipped, 2);
+    } else {
+      assert.equal(summary.skipped, 1);
+      assert.deepEqual(handled.sort(), ["qiunai:draw:6", "qiunai:order:8", "qiunai:topup:1"]);
+      assert.equal(db.queries.length, 1);
+    }
+    assert.ok(!claimed.includes(2) && !claimed.includes(3) && !claimed.includes(5) && !claimed.includes(7));
+  }
+});
+
+test("查單選擇：draw 單含超商條碼與深夜 draw 單；其他單維持秋奈 ATM／超商代碼", async () => {
+  const { recoverPendingEcpayPayments } = require("../utils/ecpayInquiry");
+  const pending = (no, org, kind, type) => ({ merchant_trade_no: no, organization_code: org, payment_kind: kind, status: "pending", raw_result: { PaymentType: type }, metadata: {} });
+  const rows = [
+    pending("Q_TOPUP_ATM", "qiunai", "topup", "ATM_LAND"),
+    pending("Q_TOPUP_BAR", "qiunai", "topup", "BARCODE_BARCODE"),
+    pending("Q_DRAW_BAR", "qiunai", "draw", "BARCODE_BARCODE"),
+    pending("Q_DRAW_CARD", "qiunai", "draw", "Credit_CreditCard"),
+    { ...pending("Q_DRAW_DIRECT", "qiunai", "draw", undefined), raw_result: null, metadata: { ecpay_direct_method: "CVS_CVS" } },
+    pending("D_DRAW_CVS", "deepnight", "draw", "CVS_CVS"),
+    pending("D_DRAW_BAR", "deepnight", "draw", "BARCODE_BARCODE"),
+    pending("D_TOPUP_ATM", "deepnight", "topup", "ATM_LAND"),
+    pending("D_ORDER_CVS", "deepnight", "order", "CVS_CVS"),
+  ];
+  const checks = [];
+  const db = tableDb({ ecpay_service_payments: rows, ecpay_service_inquiries: checks });
+  const called = [];
+  for (let i = 0; i < 20; i++) {
+    const result = await recoverPendingEcpayPayments(db, "https://pay.example", { request: async (no, opts) => {
+      assert.deepEqual(opts, { source: "scheduled", baseUrl: "https://pay.example" });
+      called.push(no);
+      checks.push({ merchant_trade_no: no, next_check_at: new Date(Date.now() + 3600000).toISOString() });
+      return { status: "pending" };
+    } });
+    if (!result.checked) break;
+  }
+  assert.deepEqual(called.sort(), ["D_DRAW_BAR", "D_DRAW_CVS", "Q_DRAW_BAR", "Q_DRAW_DIRECT", "Q_TOPUP_ATM"]);
+});
+
+test("需人工核對的 draw 單在標記失敗後私訊老闆名單一次（不提及、不含其他客人資料）", async () => {
+  const { createEcpayService } = require("../utils/ecpay");
+  const { createPaidDrawFailureAlert } = require("../utils/appPaidDraws");
+  const sent = [];
+  const client = { users: { async fetch(id) { return { async send(p) { sent.push({ id, p }); } }; } } };
+  const alert = createPaidDrawFailureAlert({ client, recipientIds: "" });
+  const order = [];
+  const row = { id: 3, organization_code: "deepnight", payment_kind: "draw", merchant_trade_no: TRADE, status: "paid", fulfillment_status: "pending",
+    amount: 300, user_id: "123456789012345678", metadata: metadata({ displayName: "秘密暱稱" }) };
+  for (const message of ["付款金額與抽獎內容不符", "付款金額與抽獎內容不符", "付款尚未完成"]) {
+    const supabase = {
+      from() { const q = { select() { return q; }, eq() { return q; }, in() { return q; }, order() { return q; }, async limit() { return { data: [row], error: null }; } }; return q; },
+      async rpc(name, args) {
+        if (name === "ecpay_claim_service_fulfillment") return { data: { ...row, claimed: true, attempt: 1 }, error: null };
+        if (name === "ecpay_finish_service_fulfillment") { order.push(`finish:${args.p_error}`); return { data: true, error: null }; }
+        if (name === "app_paid_draw_fulfill") return { data: null, error: { message } };
+        throw new Error(name);
+      },
+    };
+    const fulfil = createAppPaidDrawFulfiller({ supabase, client, env: {} });
+    const service = createEcpayService({ supabase, env: { ECPAY_PUBLIC_BASE_URL: "https://pay.example" },
+      onServicePaid: async ({ payment: p }) => fulfil(p),
+      onPermanentFailure: async (input) => { order.push("alert"); return alert(input); } });
+    const origError = console.error; console.error = () => {};
+    await service.recoverPaidFulfillments().finally(() => { console.error = origError; });
+  }
+  assert.equal(sent.length, 1, "同一交易編號只通知一次；可重試錯誤不通知");
+  assert.equal(sent[0].id, "847840193859682304");
+  assert.ok(order.indexOf("alert") > order.findIndex((o) => o.startsWith("finish:【需人工核對】")));
+  assert.deepEqual(sent[0].p.allowedMentions, { parse: [] });
+  const lines = sent[0].p.content.split("\n");
+  assert.equal(lines[0], `⚠️ APP 付款抽獎無法自動處理：${TRADE}｜300 元｜請到後台確認（客人已付款）`);
+  assert.equal(lines[1], "客人：<@123456789012345678>");
+  assert.equal(lines[2], "原因：綠界付款抽獎入帳失敗：付款金額與抽獎內容不符");
+  assert.doesNotMatch(sent[0].p.content, /秘密暱稱/);
+});
+
+test("通知名單取 APP_PRIZE_CLAIM_NOTIFY_USER_IDS；私訊失敗不拋錯；非 draw 單不通知", async () => {
+  const { createPaidDrawFailureAlert } = require("../utils/appPaidDraws");
+  const sent = [];
+  const client = { users: { async fetch(id) { if (id === "222222222222222222") throw new Error("no dm"); return { async send(p) { sent.push(id); } }; } } };
+  const alert = createPaidDrawFailureAlert({ client, recipientIds: "111111111111111111,222222222222222222", log: () => {} });
+  assert.equal(await alert({ payment: { payment_kind: "topup", merchant_trade_no: "QN1", amount: 1 }, error: new Error("x") }), false);
+  assert.equal(await alert({ payment: { payment_kind: "draw", merchant_trade_no: "QD1", amount: 1, user_id: "<@evil>" }, error: new Error("【需人工核對】x") }), true);
+  assert.deepEqual(sent, ["111111111111111111"]);
+});
