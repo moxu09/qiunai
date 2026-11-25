@@ -8486,7 +8486,9 @@ client.once(Events.ClientReady, async () => {
   websiteOrderBridge=require('./utils/websiteOrderBridge').createWebsiteOrderBridge({db:supabase,client,token:process.env.TOKEN,
     createOrder:payload=>dispatchSystem.createWebsiteOrder(payload)});
   websiteOrderBridge.start();
-  appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN,ai:require('./utils/appOrderAssist').createAppOrderAssist()});
+  appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN,ai:require('./utils/appOrderAssist').createAppOrderAssist(),
+    tips:require('./utils/appTips').createAppTips({guildId:process.env.GUILD_ID,listActiveStaff,payTipAllocations:payTipAllocationsWithWalletAtomic,
+      countOrderVipSpentOnce,sendTipWorkReports:sendTipWorkReportsSafely,sendTipBroadcast:sendTipBroadcastSafely})});
   createServiceProxyQueue({ db: supabase, client, organization: "qiunai", guildId: "1206138511535898654",
     createTicket: payload => dispatchSystem.createServiceProxyTicket(payload) }).start();
   startReceiptRecovery({ supabase, guildId: process.env.GUILD_ID, sendOrderReceipt: sendOrderReceiptSafely, sendReceipt });

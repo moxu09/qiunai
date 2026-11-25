@@ -1,6 +1,7 @@
 // Signed /app/* endpoints for the customer APP (via app-api). Read-only: price table,
 // display-only estimates computed by the bot's own selfServicePricing, and AI form filling
-// (/app/ai/parse-order, see appOrderAssist). Never creates orders.
+// (/app/ai/parse-order, see appOrderAssist). Never creates orders. /app/tips/* (see appTips)
+// is the only path that charges: ASD-wallet 打賞 through the bot's existing tip RPC.
 const { authenticate } = require("./websiteOrderBridge");
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -9,6 +10,7 @@ const AI_PARSE_PATH = "/app/ai/parse-order";
 const MAX_AI_BODY_BYTES = 2.5 * 1024 * 1024;
 const AI_UNAVAILABLE = "AI 暫時無法使用，請手動填寫";
 const FALLBACK_REASON = "暫時無法自動試算，送出後由客服報價";
+const TIPS_UNAVAILABLE = "打賞暫時無法完成，請稍後再試";
 
 // APP game labels (mobile Order.tsx GAMES + /app/pricing labels) -> bridge game keys.
 const APP_GAME_ALIASES = [
@@ -181,7 +183,7 @@ function estimatePrice(P, body) {
   return { amount: result.total, unit: result.unit, unitPrice: result.unitPrice };
 }
 
-function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai } = {}) {
+function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai, tips } = {}) {
   async function handleHttpRequest(request, response) {
     if (!request.url?.startsWith("/app/")) return false;
     const reply = (status, data) => {
@@ -189,7 +191,8 @@ function createAppBridge({ token, pricing = require("../config/selfServicePricin
       response.end(JSON.stringify(data));
       return true;
     };
-    const path = new URL(request.url, "http://localhost").pathname;
+    const url = new URL(request.url, "http://localhost");
+    const path = url.pathname;
     const maxBytes = path === AI_PARSE_PATH ? MAX_AI_BODY_BYTES : MAX_BODY_BYTES;
     const chunks = [];
     let size = 0;
@@ -222,6 +225,28 @@ function createAppBridge({ token, pricing = require("../config/selfServicePricin
         return reply(result.status, result.body);
       } catch {
         return reply(503, { error: AI_UNAVAILABLE });
+      }
+    }
+    if (path === "/app/tips/catalog") {
+      if (request.method !== "GET") return reply(405, { error: "method_not_allowed" });
+      if (!tips) return reply(503, { error: TIPS_UNAVAILABLE });
+      try {
+        const result = await tips.catalog({ guildId: url.searchParams.get("guildId") || undefined });
+        return reply(result.status, result.body);
+      } catch {
+        return reply(503, { error: TIPS_UNAVAILABLE });
+      }
+    }
+    if (path === "/app/tips") {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      if (!tips) return reply(503, { error: TIPS_UNAVAILABLE });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { error: "請求格式錯誤" }); }
+      try {
+        const result = await tips.tip(value);
+        return reply(result.status, result.body);
+      } catch {
+        return reply(503, { error: TIPS_UNAVAILABLE });
       }
     }
     return reply(404, { error: "not_found" });
