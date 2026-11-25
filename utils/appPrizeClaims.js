@@ -14,15 +14,21 @@
 // At purge time the claim's chat (app_prize_claim_messages, customer and staff rows) is redacted too,
 // since it may repeat the address. A DM that could not be recorded, or whose delete keeps failing
 // (4 runs or 24 h), triggers one 小奈 alert to the recipients (claim short id + jump link only).
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ModalBuilder, Routes, TextInputBuilder, TextInputStyle, escapeMarkdown } = require("discord.js");
-
-// Customer-supplied text: escape markdown so e.g. a masked link can't be faked in the owner's DM.
-const safe = value => escapeMarkdown(String(value ?? "").trim(),
-  { maskedLink: true, heading: true, bulletedList: true, numberedList: true });
+// 「退回」 (owner-only button + reason modal): pending → rejected with rejected_at, a staff message
+// 「申請已退回：…」 for the customer, and every recorded DM copy shows 已退回 without buttons.
+// Rejected claims are purged 30 days after rejected_at (privacy text: 於退回後30天刪除收件資料);
+// a legacy rejected row without rejected_at falls back to created_at.
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ModalBuilder, Routes, TextInputBuilder, TextInputStyle } = require("discord.js");
+// Customer-supplied text: clipped, then markdown-escaped (no fake masked links), mentions neutralised.
+const { safeText } = require("./discordSafeText");
 
 const DEFAULT_RECIPIENT_ID = "847840193859682304";
 const BUTTON_PREFIX = "app_claim_reply_";
 const MODAL_PREFIX = "app_claim_reply_modal_";
+const REJECT_PREFIX = "app_claim_reject_";
+const REJECT_MODAL_PREFIX = "app_claim_reject_modal_";
+const MAX_REASON = 300;
+const REJECTED_LABEL = "🚫 已退回";
 const UUID_TEXT = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const UUID = new RegExp(`^${UUID_TEXT}$`, "i");
 const MAX_BODY = 1000;
@@ -50,16 +56,19 @@ const TOO_LONG = `回覆最多 ${MAX_BODY} 字`;
 const SAVE_FAILED = "回覆暫時無法送出，請稍後再試";
 const DM_FAILED = "通知暫時無法送出，請稍後再試";
 const LOAD_FAILED = "暫時無法讀取領獎申請，請稍後再試";
+const REJECT_NOT_ALLOWED = "你沒有權限退回這張申請";
+const REJECTED_OK = "已退回，客人會在 APP 看到原因";
+const ALREADY_HANDLED = "這張申請已經處理過了";
+const REDEEMED = "這張申請的獎品已兌換，不能退回";
+const REASON_BLANK = "退回原因不能是空白";
+const REASON_TOO_LONG = `退回原因最多 ${MAX_REASON} 字`;
+const REJECT_FAILED = "暫時無法退回，請稍後再試";
+const REJECT_NOTE_FAILED = "已退回，但退回原因暫時無法寫入，請用「回覆」補上";
 
 function parseRecipientIds(value) {
   const ids = [...new Set(String(value || "").match(/\d{17,20}/g) || [])];
   return ids.length ? ids : [DEFAULT_RECIPIENT_ID];
 }
-
-const clip = (value, max = 1024) => {
-  const text = String(value ?? "").trim();
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-};
 
 function contactObject(contact) {
   if (typeof contact === "string") {
@@ -78,8 +87,8 @@ function contactSummary(raw) {
     ["超商門市", contact.store],
     ["Email", contact.email],
   ].filter(([, value]) => value != null && String(value).trim())
-    .map(([label, value]) => `${label}：${safe(value)}`);
-  return clip(lines.join("\n") || "（未填）");
+    .map(([label, value]) => `${label}：${String(value).trim()}`);
+  return safeText(lines.join("\n")) || "（未填）";
 }
 
 function buildDm(claim, message) {
@@ -87,16 +96,20 @@ function buildDm(claim, message) {
     .setColor(0x7c4dff)
     .setTitle(message ? "💬 領獎申請新回覆" : "📦 APP 領獎申請")
     .addFields(
-      { name: "獎品", value: clip(safe(claim.prize_name)) || "（未命名）", inline: true },
+      { name: "獎品", value: safeText(claim.prize_name) || "（未命名）", inline: true },
       { name: "來源", value: SOURCE_LABELS[claim.source_type] || "其他", inline: true },
       { name: "申請人", value: `<@${claim.user_id}>`, inline: true },
       { name: "收件資料摘要", value: claim.contact == null ? PURGED_CONTACT : contactSummary(claim.contact) },
     )
     .setFooter({ text: `申請編號 ${claim.id}` });
-  if (message) embed.addFields({ name: "客人回覆", value: clip(safe(message.body)) || "（空白）" });
+  if (message) embed.addFields({ name: "客人回覆", value: safeText(message.body) || "（空白）" });
+  if (claim.status === "rejected") embed.addFields({ name: "狀態", value: REJECTED_LABEL });
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`${BUTTON_PREFIX}${claim.id}`).setLabel("回覆").setStyle(ButtonStyle.Primary),
   );
+  if (claim.status === "pending") {
+    row.addComponents(new ButtonBuilder().setCustomId(`${REJECT_PREFIX}${claim.id}`).setLabel("退回").setStyle(ButtonStyle.Danger));
+  }
   return { embeds: [embed], components: [row], allowedMentions: { parse: [] } };
 }
 
@@ -247,7 +260,7 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
 
   async function dueIn(rows, now) {
     const rejectedCutoff = now.getTime() - REJECTED_RETENTION_MS;
-    const due = rows.filter(c => c.status === "rejected" && Date.parse(c.created_at) < rejectedCutoff);
+    const due = rows.filter(c => c.status === "rejected" && Date.parse(c.rejected_at || c.created_at) < rejectedCutoff);
     const shippedCutoff = new Date(now.getTime() - SHIPPED_RETENTION_MS).toISOString();
     for (const [type, redemptionType] of Object.entries(REDEMPTION_TYPES)) {
       const claims = rows.filter(c => c.status !== "rejected" && c.source_type === type);
@@ -277,7 +290,7 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
     try {
       for (;;) {
         let query = db.from("app_prize_claims")
-          .select("id,guild_id,source_type,source_id,status,created_at,dm_refs,contact_purged_at")
+          .select("id,guild_id,source_type,source_id,status,created_at,rejected_at,dm_refs,contact_purged_at")
           .or("contact.not.is.null,dm_refs.neq.[]");
         if (cursor) query = query.gt("id", cursor);
         const { data, error } = await query.order("id", { ascending: true }).limit(PURGE_SCAN_PAGE);
@@ -343,10 +356,109 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
     return interaction.editReply({ content: SENT });
   }
 
+  async function handleRejectButton(interaction, claimId) {
+    if (!recipients.includes(String(interaction.user?.id))) return interaction.reply(ephemeral(REJECT_NOT_ALLOWED));
+    if (!UUID.test(claimId)) return interaction.reply(ephemeral(INVALID));
+    const modal = new ModalBuilder()
+      .setCustomId(`${REJECT_MODAL_PREFIX}${claimId}`)
+      .setTitle("退回領獎申請")
+      .addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId("reason").setLabel("退回原因")
+          .setStyle(TextInputStyle.Paragraph).setMaxLength(MAX_REASON).setRequired(true),
+      ));
+    return interaction.showModal(modal);
+  }
+
+  function rejectedCopy(message) {
+    const source = message?.embeds?.[0];
+    const embed = source ? EmbedBuilder.from(source) : new EmbedBuilder().setTitle("📦 APP 領獎申請");
+    const fields = (embed.data.fields || []).filter(field => field.name !== "狀態");
+    embed.setColor(0x95a5a6).setFields(...fields, { name: "狀態", value: REJECTED_LABEL });
+    return { embeds: [embed], components: [], allowedMentions: { parse: [] } };
+  }
+
+  // Best effort: the pressed DM plus every recorded copy (dm_refs) show 已退回 without buttons.
+  async function markCopiesRejected(claimId, refs, pressed) {
+    const done = new Set();
+    if (pressed?.id && typeof pressed.edit === "function") {
+      try { await pressed.edit(rejectedCopy(pressed)); done.add(String(pressed.id)); } catch (error) {
+        console.warn("[APP 領獎退回] 更新私訊失敗", { claimId, code: error?.code || "unknown" });
+      }
+    }
+    for (const ref of Array.isArray(refs) ? refs : []) {
+      const channelId = String(ref?.channelId);
+      const messageId = String(ref?.messageId);
+      if (!SNOWFLAKE.test(channelId) || !SNOWFLAKE.test(messageId) || done.has(messageId)) continue;
+      try {
+        const channel = await client.channels.fetch(channelId);
+        if (channel?.type !== ChannelType.DM) continue;
+        const message = await channel.messages.fetch(messageId);
+        await message.edit(rejectedCopy(message));
+        done.add(messageId);
+      } catch (error) {
+        console.warn("[APP 領獎退回] 更新私訊失敗", { claimId, code: error?.code || "unknown" });
+      }
+    }
+  }
+
+  async function handleRejectModal(interaction, claimId) {
+    if (!recipients.includes(String(interaction.user?.id))) return interaction.reply(ephemeral(REJECT_NOT_ALLOWED));
+    if (!UUID.test(claimId)) return interaction.reply(ephemeral(INVALID));
+    const reason = String(interaction.fields.getTextInputValue("reason") || "").trim();
+    if (!reason) return interaction.reply(ephemeral(REASON_BLANK));
+    if ([...reason].length > MAX_REASON) return interaction.reply(ephemeral(REASON_TOO_LONG));
+    await interaction.deferReply({ flags: 64 });
+    let claim;
+    try {
+      const { data, error } = await db.from("app_prize_claims")
+        .select("id,guild_id,source_type,source_id,status,dm_refs").eq("id", claimId).maybeSingle();
+      if (error) throw error;
+      if (!data) return interaction.editReply({ content: NOT_FOUND });
+      if (data.status !== "pending") return interaction.editReply({ content: ALREADY_HANDLED });
+      const { data: redeemed, error: redemptionError } = await db.from("bot_prize_redemptions")
+        .select("source_id").eq("guild_id", data.guild_id)
+        .eq("source_type", REDEMPTION_TYPES[data.source_type] || "").eq("source_id", String(data.source_id)).limit(1);
+      if (redemptionError) throw redemptionError;
+      if (redeemed?.length) return interaction.editReply({ content: REDEEMED });
+      const { data: updated, error: updateError } = await db.from("app_prize_claims")
+        .update({ status: "rejected", rejected_at: new Date().toISOString() })
+        .eq("id", claimId).eq("status", "pending").select("id");
+      if (updateError) throw updateError;
+      if (!updated?.length) return interaction.editReply({ content: ALREADY_HANDLED });
+      claim = data;
+    } catch (error) {
+      console.error("[APP 領獎退回] 寫入失敗", { claimId, code: error?.code || "unknown" });
+      return interaction.editReply({ content: REJECT_FAILED });
+    }
+    let noteFailed = false;
+    try {
+      const { error } = await db.from("app_prize_claim_messages")
+        .insert({ claim_id: claimId, sender: "staff", staff_id: interaction.user.id, body: `申請已退回：${reason}` });
+      if (error) throw error;
+    } catch (error) {
+      noteFailed = true;
+      console.error("[APP 領獎退回] 原因寫入失敗", { claimId, code: error?.code || "unknown" });
+    }
+    await markCopiesRejected(claimId, claim.dm_refs, interaction.message);
+    return interaction.editReply({ content: noteFailed ? REJECT_NOTE_FAILED : REJECTED_OK });
+  }
+
   // Only claims app_claim_reply_<id> buttons and app_claim_reply_modal_<id> modals; the id part
   // must be a single token so no other customId (all existing ones differ in prefix) matches.
   async function handleInteraction(interaction) {
     const customId = String(interaction?.customId || "");
+    if (interaction?.isModalSubmit?.() && customId.startsWith(REJECT_MODAL_PREFIX)) {
+      const claimId = customId.slice(REJECT_MODAL_PREFIX.length);
+      if (!/^[0-9a-z-]{1,64}$/i.test(claimId)) return false;
+      await handleRejectModal(interaction, claimId);
+      return true;
+    }
+    if (interaction?.isButton?.() && customId.startsWith(REJECT_PREFIX) && !customId.startsWith(REJECT_MODAL_PREFIX)) {
+      const claimId = customId.slice(REJECT_PREFIX.length);
+      if (!/^[0-9a-z-]{1,64}$/i.test(claimId)) return false;
+      await handleRejectButton(interaction, claimId);
+      return true;
+    }
     if (interaction?.isModalSubmit?.()) {
       if (!customId.startsWith(MODAL_PREFIX)) return false;
       const claimId = customId.slice(MODAL_PREFIX.length);
@@ -367,4 +479,4 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
   return { notify, handleInteraction, purgeExpired, recipients };
 }
 
-module.exports = { createAppPrizeClaims, parseRecipientIds, contactSummary, PURGED_CONTACT, DEFAULT_RECIPIENT_ID, BUTTON_PREFIX, MODAL_PREFIX };
+module.exports = { createAppPrizeClaims, parseRecipientIds, contactSummary, PURGED_CONTACT, REJECT_PREFIX, REJECT_MODAL_PREFIX, DEFAULT_RECIPIENT_ID, BUTTON_PREFIX, MODAL_PREFIX };

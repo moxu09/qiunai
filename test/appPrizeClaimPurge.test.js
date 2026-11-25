@@ -89,12 +89,23 @@ function fakeDb({ claims = [], redemptions = [], messages = [], failUpdate = fal
 
 function fakeClient({ deleteErrors = {}, channelTypes = {}, failSendIds = [] } = {}) {
   const deleted = [];
+  const edited = [];
   const sent = [];
   let next = 1;
   return {
-    deleted, sent,
+    deleted, sent, edited,
     channels: {
-      async fetch(id) { return { id, type: channelTypes[id] ?? 1 }; }, // 1 = ChannelType.DM
+      async fetch(id) { // 1 = ChannelType.DM
+        return {
+          id, type: channelTypes[id] ?? 1,
+          messages: {
+            async fetch(messageId) {
+              return { id: messageId, embeds: [{ title: "📦 APP 領獎申請", fields: [{ name: "獎品", value: "x" }] }],
+                async edit(payload) { edited.push({ channelId: id, messageId, payload }); } };
+            },
+          },
+        };
+      },
     },
     rest: {
       async delete(route) {
@@ -258,9 +269,9 @@ test("DMs recorded after the purge (customer reply) are deleted on the next run"
   assert.equal(row.contact_purged_at, ago(3));
 });
 
-test("rejected claims are purged at created_at + 30 days, not before", async () => {
-  const oldRejected = claim(50, { status: "rejected", created_at: ago(31), dm_refs: [ref(1)] });
-  const newRejected = claim(51, { status: "rejected", created_at: ago(29), dm_refs: [ref(2)] });
+test("rejected claims are purged 30 days after rejected_at (not created_at)", async () => {
+  const oldRejected = claim(50, { status: "rejected", created_at: ago(60), rejected_at: ago(31), dm_refs: [ref(1)] });
+  const newRejected = claim(51, { status: "rejected", created_at: ago(60), rejected_at: ago(29), dm_refs: [ref(2)] });
   const db = fakeDb({ claims: [oldRejected, newRejected] });
   const client = fakeClient();
   await createAppPrizeClaims({ db, client }).purgeExpired({ now: NOW });
@@ -436,4 +447,146 @@ test("refs that do not point at a DM channel are skipped and dropped, never dele
   assert.deepEqual(client.deleted, [route(dmRef)]);
   assert.deepEqual(row.dm_refs, []);
   assert.equal(row.contact, null);
+});
+
+// ---- 退回 (reject) ----
+const REJECT_TEXT = "已退回，客人會在 APP 看到原因";
+const ALREADY_TEXT = "這張申請已經處理過了";
+const componentsJson = payload => (payload.components || []).map(row => (typeof row.toJSON === "function" ? row.toJSON() : row));
+const embedJson = payload => { const e = payload.embeds[0]; return typeof e.toJSON === "function" ? e.toJSON() : e; };
+
+function interaction({ customId, kind, userId = OWNER, reason = "", message } = {}) {
+  const calls = { replies: [], modals: [], edits: [], deferred: null };
+  return {
+    calls, customId, user: { id: userId }, id: "999",
+    message,
+    isButton: () => kind === "button",
+    isModalSubmit: () => kind === "modal",
+    fields: { getTextInputValue: key => (key === "reason" ? reason : "") },
+    async reply(payload) { calls.replies.push(payload); },
+    async showModal(modal) { calls.modals.push(typeof modal.toJSON === "function" ? modal.toJSON() : modal); },
+    async deferReply(payload) { calls.deferred = payload; },
+    async editReply(payload) { calls.edits.push(payload); },
+  };
+}
+const pressedMessage = edits => ({
+  id: "700000000000000001",
+  embeds: [{ title: "📦 APP 領獎申請", fields: [{ name: "獎品", value: "S賞" }] }],
+  async edit(payload) { edits.push(payload); },
+});
+const replyText = calls => (calls.edits[0] || calls.replies[0])?.content ?? (calls.edits[0] || calls.replies[0]);
+
+test("claim DM has owner-only 回覆 and 退回 buttons; a rejected claim's DM shows 已退回 without 退回", async () => {
+  const pending = claim(200);
+  const rejected = claim(201, { status: "rejected", rejected_at: ago(1) });
+  const client = fakeClient();
+  const claims = createAppPrizeClaims({ db: fakeDb({ claims: [pending, rejected] }), client, recipientIds: OWNER });
+  await claims.notify({ claimId: pending.id });
+  await claims.notify({ claimId: rejected.id });
+  const [first, second] = client.sent.map(item => item.payload);
+  assert.deepEqual(componentsJson(first)[0].components.map(c => [c.custom_id, c.label]),
+    [[`app_claim_reply_${pending.id}`, "回覆"], [`app_claim_reject_${pending.id}`, "退回"]]);
+  assert.deepEqual(componentsJson(second)[0].components.map(c => c.custom_id), [`app_claim_reply_${rejected.id}`]);
+  assert.equal(embedJson(second).fields.find(f => f.name === "狀態").value, "🚫 已退回");
+});
+
+test("退回 button: non-recipient refused, recipient gets the 退回原因 modal (required, max 300)", async () => {
+  const row = claim(210);
+  const claims = createAppPrizeClaims({ db: fakeDb({ claims: [row] }), client: fakeClient(), recipientIds: OWNER });
+  const stranger = interaction({ customId: `app_claim_reject_${row.id}`, kind: "button", userId: OTHER });
+  assert.equal(await claims.handleInteraction(stranger), true);
+  assert.equal(stranger.calls.modals.length, 0);
+  assert.match(replyText(stranger.calls), /權限/);
+  const owner = interaction({ customId: `app_claim_reject_${row.id}`, kind: "button" });
+  assert.equal(await claims.handleInteraction(owner), true);
+  const modal = owner.calls.modals[0];
+  assert.equal(modal.custom_id, `app_claim_reject_modal_${row.id}`);
+  const input = modal.components[0].components[0];
+  assert.equal(input.custom_id, "reason");
+  assert.equal(input.label, "退回原因");
+  assert.equal(input.required, true);
+  assert.equal(input.max_length, 300);
+});
+
+test("退回 submit: pending → rejected with rejected_at, staff message, ephemeral reply, every DM copy updated", async () => {
+  const row = claim(220, { dm_refs: [ref(1), ref(2)] });
+  const messages = [];
+  const db = fakeDb({ claims: [row], messages });
+  const client = fakeClient();
+  const claims = createAppPrizeClaims({ db, client, recipientIds: OWNER });
+  const pressedEdits = [];
+  const submit = interaction({ customId: `app_claim_reject_modal_${row.id}`, kind: "modal", reason: "  已缺貨  ", message: pressedMessage(pressedEdits) });
+  assert.equal(await claims.handleInteraction(submit), true);
+  assert.equal(replyText(submit.calls), REJECT_TEXT);
+  assert.equal(submit.calls.deferred.flags, 64);
+  assert.equal(row.status, "rejected");
+  assert.ok(!Number.isNaN(Date.parse(row.rejected_at)));
+  assert.deepEqual(db.inserted.map(item => [item.table, item.row]), [["app_prize_claim_messages",
+    { claim_id: row.id, sender: "staff", staff_id: OWNER, body: "申請已退回：已缺貨" }]]);
+  const rejectUpdate = db.updates.find(u => u.patch.status === "rejected");
+  assert.ok(rejectUpdate && rejectUpdate.count === 1);
+  for (const payload of [pressedEdits[0], ...client.edited.map(e => e.payload)]) {
+    assert.deepEqual(payload.components, []);
+    assert.equal(embedJson(payload).fields.find(f => f.name === "狀態").value, "🚫 已退回");
+  }
+  assert.deepEqual(client.edited.map(e => e.messageId).sort(), [ref(1).messageId, ref(2).messageId].sort());
+});
+
+test("退回 is a conditional update: already handled answers 這張申請已經處理過了 and inserts nothing", async () => {
+  for (const status of ["rejected", "done"]) {
+    const row = claim(230, { status });
+    const db = fakeDb({ claims: [row] });
+    const claims = createAppPrizeClaims({ db, client: fakeClient(), recipientIds: OWNER });
+    const submit = interaction({ customId: `app_claim_reject_modal_${row.id}`, kind: "modal", reason: "重複" });
+    await claims.handleInteraction(submit);
+    assert.equal(replyText(submit.calls), ALREADY_TEXT);
+    assert.equal(row.status, status);
+    assert.equal(db.inserted.length, 0);
+  }
+});
+
+test("a redeemed claim cannot be rejected", async () => {
+  const row = claim(240);
+  const db = fakeDb({ claims: [row], redemptions: [redemption(row.source_id, 1)] });
+  const claims = createAppPrizeClaims({ db, client: fakeClient(), recipientIds: OWNER });
+  const submit = interaction({ customId: `app_claim_reject_modal_${row.id}`, kind: "modal", reason: "不寄了" });
+  await claims.handleInteraction(submit);
+  assert.match(replyText(submit.calls), /已兌換/);
+  assert.equal(row.status, "pending");
+  assert.equal(db.inserted.length, 0);
+});
+
+test("退回 reason: blank refused, 300 code points accepted, 301 refused; non-recipient refused", async () => {
+  const row = claim(250);
+  const db = fakeDb({ claims: [row] });
+  const claims = createAppPrizeClaims({ db, client: fakeClient(), recipientIds: OWNER });
+  const blank = interaction({ customId: `app_claim_reject_modal_${row.id}`, kind: "modal", reason: "   " });
+  await claims.handleInteraction(blank);
+  assert.match(replyText(blank.calls), /空白/);
+  const long = interaction({ customId: `app_claim_reject_modal_${row.id}`, kind: "modal", reason: "😀".repeat(301) });
+  await claims.handleInteraction(long);
+  assert.match(replyText(long.calls), /300/);
+  const stranger = interaction({ customId: `app_claim_reject_modal_${row.id}`, kind: "modal", reason: "x", userId: OTHER });
+  await claims.handleInteraction(stranger);
+  assert.match(replyText(stranger.calls), /權限/);
+  assert.equal(row.status, "pending");
+  const ok = interaction({ customId: `app_claim_reject_modal_${row.id}`, kind: "modal", reason: "😀".repeat(300) });
+  await claims.handleInteraction(ok);
+  assert.equal(replyText(ok.calls), REJECT_TEXT);
+  assert.equal(row.status, "rejected");
+});
+
+test("prize-claim DM: customer text clipped before escaping and mention syntax neutralised", async () => {
+  const row = claim(260, { prize_name: `<@${OTHER}> 公仔` });
+  const messages = [{ id: uuid(261), claim_id: row.id, sender: "customer", body: `<@&${OTHER}> <#${OTHER}> ${"*".repeat(2000)}`, created_at: ago(0) }];
+  const client = fakeClient();
+  const claims = createAppPrizeClaims({ db: fakeDb({ claims: [row], messages }), client, recipientIds: OWNER });
+  await claims.notify({ claimId: row.id, messageId: uuid(261) });
+  const embed = embedJson(client.sent[0].payload);
+  const replyField = embed.fields.find(f => f.name === "客人回覆").value;
+  assert.ok(replyField.length <= 1024);
+  assert.ok(replyField.endsWith("…") && !replyField.endsWith("\\…"), replyField.slice(-6));
+  assert.ok(replyField.length > 900, String(replyField.length));
+  assert.ok(!/<[@#]/.test(replyField));
+  assert.ok(!/<[@#]/.test(embed.fields.find(f => f.name === "獎品").value));
 });

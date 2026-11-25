@@ -256,3 +256,18 @@ test("bad uuid press is refused; update failure answers in Chinese; unrelated cu
   await quiet(() => failing.handleInteraction(interaction));
   assert.match(interaction.calls.followUps[0].content, /[一-鿿]/);
 });
+
+test("customer text is clipped before escaping (no dangling backslash) and mention syntax is neutralised", async () => {
+  const client = fakeClient();
+  const body = `<@${AUTHOR}> <@&${OTHER}> <#${STRANGER}> ${"*".repeat(2000)}`;
+  const wall = createAppWall({ db: fakeDb({ posts: [postRow({ body, display_name: `<@${OTHER}>` })] }), client });
+  assert.equal((await wall.notify({ postId: POST })).status, 200);
+  const embed = embedOf(client.sent[0].payload);
+  const text = field(embed, "留言");
+  assert.ok(text.length <= 1024);
+  assert.ok(text.endsWith("…") && !text.endsWith("\\…"), text.slice(-6));
+  assert.ok(text.length > 900, String(text.length));
+  assert.ok(!/<[@#]/.test(text));
+  assert.ok(text.startsWith(`<\u200b@${AUTHOR}> <\u200b@&${OTHER}> <\u200b#${STRANGER}>`));
+  assert.ok(!/<[@#]/.test(field(embed, "顯示")));
+});

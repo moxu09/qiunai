@@ -7,11 +7,11 @@
 // (refs kept in memory only: after a restart a stale copy is fixed when pressed).
 // The post is read here with the service-role client; customer text is markdown-escaped and
 // mentions are disabled. The body is never logged.
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, Routes, escapeMarkdown } = require("discord.js");
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, Routes } = require("discord.js");
 const { parseRecipientIds } = require("./appPrizeClaims");
 
-const safe = value => escapeMarkdown(String(value ?? "").trim(),
-  { maskedLink: true, heading: true, bulletedList: true, numberedList: true });
+// Clipped before markdown-escaping (no dangling backslash); <@id>/<@&id>/<#id> neutralised.
+const { safeText } = require("./discordSafeText");
 
 const APPROVE_PREFIX = "app_wall_approve_";
 const REJECT_PREFIX = "app_wall_reject_";
@@ -32,13 +32,9 @@ const LOAD_FAILED = "暫時無法讀取留言，請稍後再試";
 const DM_FAILED = "通知暫時無法送出，請稍後再試";
 const COLUMNS = "id,brand,user_id,display_name,anonymous,body,status,created_at,reviewed_by,reviewed_at";
 
-const clip = (value, max = 1024) => {
-  const text = String(value ?? "").trim();
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-};
 
 function buildEmbed(post) {
-  const display = post.anonymous ? ANONYMOUS : clip(safe(post.display_name), 256) || ANONYMOUS;
+  const display = post.anonymous ? ANONYMOUS : safeText(post.display_name, 256) || ANONYMOUS;
   const author = SNOWFLAKE.test(String(post.user_id)) ? `<@${post.user_id}>` : "（未知）";
   const done = RESULT_LABELS[post.status];
   const embed = new EmbedBuilder()
@@ -48,7 +44,7 @@ function buildEmbed(post) {
       { name: "店別", value: BRAND_LABELS[post.brand] || "其他", inline: true },
       { name: "顯示", value: display, inline: true },
       { name: "作者", value: author, inline: true },
-      { name: "留言", value: clip(safe(post.body)) || "（空白）" },
+      { name: "留言", value: safeText(post.body) || "（空白）" },
     )
     .setFooter({ text: `留言編號 ${post.id}` });
   if (done) {
