@@ -277,7 +277,11 @@ module.exports.createServiceTemplatePanel=function({client,supabase,organization
      return template?[actionButton(`svc:quick:${template.id}`,label)]:[];
     });
     if(canResendSigning)quick.push(actionButton('svc:signing-resend','重發簽約連結'));
-    const buttonsPerRow=canResendSigning?3:5;
+    if(organization==='qiunai')quick.push(
+     {...actionButton('open_manual_work_report_order','手動訂單報單'),style:3},
+     {...actionButton('open_manual_work_report_gift','手動打賞報單'),style:3},
+    );
+    const buttonsPerRow=5;
     for(let start=0;start<quick.length;start+=buttonsPerRow){
      components.push({type:1,components:quick.slice(start,start+buttonsPerRow)});
     }
@@ -291,6 +295,7 @@ module.exports.createServiceTemplatePanel=function({client,supabase,organization
     const data={embeds:[{
      title:`${store.name}｜客服操作面板`,
      description:'選擇本店打賞品項可直接帶入禮物名稱。也可點常用按鈕，或從同一則面板選擇播報、訂單協助與登記模板。\n產生的文字只會私下回覆給操作的客服。'+
+      (organization==='qiunai'?'\n手動報單會開啟訂單／打賞表單，確認後送交陪陪及薪資審核。':'')+
       (canResendSigning?'\n重發簽約連結會由小奈私訊給申請人。':''),
      color:organization==='qiunai'?0x7287df:0x68579c,footer:{text:friendlyFooter},
     }],components,allowedMentions:{parse:[]}};

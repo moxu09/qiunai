@@ -1,0 +1,287 @@
+// Signed /app/* endpoints for the customer APP (via app-api). Read-only: price table,
+// display-only estimates computed by the bot's own selfServicePricing, and AI form filling
+// (/app/ai/parse-order, see appOrderAssist). Never creates orders. /app/tips/* (see appTips)
+// is the only path that charges: ASD-wallet 打賞 through the bot's existing tip RPC.
+// /app/prize-claims/notify (see appPrizeClaims) DMs the allowlisted staff about an in-app prize claim.
+// /app/wall/notify (see appWall) DMs them a new 留言牆 post with 「通過／不通過」 buttons.
+const { authenticate } = require("./websiteOrderBridge");
+const { UNCERTAIN: TIPS_UNCERTAIN } = require("./appTips");
+
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
+// A legal 1.5 MB screenshot is ~2.0 MB as base64, plus text and option lists.
+const AI_PARSE_PATH = "/app/ai/parse-order";
+const MAX_AI_BODY_BYTES = 2.5 * 1024 * 1024;
+const AI_UNAVAILABLE = "AI 暫時無法使用，請手動填寫";
+const FALLBACK_REASON = "暫時無法自動試算，送出後由客服報價";
+const TIPS_UNAVAILABLE = "打賞暫時無法完成，請稍後再試";
+const PRIZE_CLAIMS_UNAVAILABLE = "領獎通知暫時無法送出，請稍後再試";
+const WALL_UNAVAILABLE = "留言審核通知暫時無法送出，請稍後再試";
+
+// APP game labels (mobile Order.tsx GAMES + /app/pricing labels) -> bridge game keys.
+const APP_GAME_ALIASES = [
+  ["valorant", ["特戰英豪", "特戰", "valorant"]],
+  ["delta", ["三角洲行動", "三角洲", "delta"]],
+  ["apex", ["Apex 英雄", "Apex", "Apex Legends"]],
+  ["lol", ["英雄聯盟", "召喚峽谷", "lol"]],
+  ["aram", ["ARAM", "咆哮深淵"]],
+  ["tft", ["聯盟戰棋", "戰棋", "tft"]],
+  ["steam", ["Steam 多人", "Steam"]],
+  ["voice_chat", ["語音聊天"]],
+];
+
+// APP rank labels that the bot's RANK_ALIASES / VALORANT_COMPANION_ALIASES do not know yet,
+// rewritten to a label the bot already resolves. Only unambiguous tiers are listed.
+const APP_RANK_LABELS = {
+  valorantTarget: { 黃金含以下: "黃金以下" },
+  valorantCompanion: { 鐵牌: "黃金以下", 銅牌: "黃金以下", 銀牌: "黃金以下", 黃金含以下: "黃金以下" },
+  apex: { 銅牌: "青銅", 銀牌: "白銀", 金牌: "黃金", 獵殺: "頂獵", 黃金含以下: "黃金以下" },
+  lol: { 鐵牌: "黑鐵", 銀牌: "白銀", 金牌: "黃金", 白金含以下: "白金以下" },
+};
+
+const VALORANT_TARGET_LABELS = { gold: "黃金含以下", platinum: "白金", diamond: "鑽石", ascendant: "超凡", immortal12: "神話 1至2", immortal3: "神話 3" };
+const APEX_RANK_LABELS = { general: "一般", gold: "黃金含以下", platinum: "白金", diamond: "鑽石", master: "大師", predator: "頂獵" };
+const LOL_RANK_LABELS = { general: "一般", platinum: "白金含以下", emerald: "翡翠", diamond: "鑽石", master: "大師", grandmaster: "宗師", challenger: "菁英" };
+const TYPE_LABELS = { entertain: "娛樂", skill: "技術", god: "大神" };
+
+function commonUnit(rows) {
+  const units = [...new Set(rows.map(row => row.unit))];
+  return units.length === 1 ? units[0] : "小時／局";
+}
+
+function service(key, label, rows, unit = commonUnit(rows)) {
+  return { key, label, unit, rows };
+}
+
+function tableByType(prices, rankLabels, typeKeys, unitFor) {
+  return Object.keys(typeKeys)
+    .map(type => {
+      const rows = Object.keys(rankLabels)
+        .filter(rank => prices?.[rank]?.[type])
+        .map(rank => ({ label: rankLabels[rank], price: prices[rank][type], unit: unitFor(rank, type) }));
+      return service(type, typeKeys[type], rows);
+    })
+    .filter(item => item.rows.length > 0);
+}
+
+function buildPricing(P) {
+  const catalog = P.getCompanyAiPricingCatalog();
+  const october = P.isOctoberValorantPricingActive();
+  const levelLabels = catalog.valorant.companionLevelKeys;
+  const valorant = Object.keys(VALORANT_TARGET_LABELS)
+    .filter(rank => catalog.valorant.prices[rank])
+    .map(rank => {
+      const prices = catalog.valorant.prices[rank];
+      const rows = Object.keys(levelLabels)
+        .filter(level => prices[level])
+        .map(level => ({ label: levelLabels[level], price: prices[level][0], unit: prices[level][1] }));
+      return service(rank, VALORANT_TARGET_LABELS[rank], rows);
+    });
+  const deltaRows = catalog.delta.services.map(item => ({ label: item.name, price: item.price, unit: item.unit, fixedPlayerCount: item.fixedPlayerCount }));
+  const voicePrice = typeof catalog.voiceChat.pricing === "number" ? catalog.voiceChat.pricing : null;
+  return {
+    effectiveFrom: catalog.valorant.effectiveVersion,
+    games: [
+      { key: "valorant", label: "特戰英豪", services: valorant },
+      {
+        key: "delta",
+        label: "三角洲行動",
+        services: [
+          service("hourly", "計時陪玩", deltaRows.filter(row => !row.label.includes("保底"))),
+          service("guaranteed", "保底單（固定 2 位陪陪）", deltaRows.filter(row => row.label.includes("保底"))),
+        ].filter(item => item.rows.length > 0),
+      },
+      { key: "apex", label: "Apex 英雄", services: tableByType(catalog.apex.prices, APEX_RANK_LABELS, catalog.apex.typeKeys, () => "小時") },
+      {
+        key: "lol",
+        label: "英雄聯盟",
+        services: tableByType(catalog.lol.summonRift.prices, LOL_RANK_LABELS, catalog.lol.summonRift.typeKeys,
+          (rank, type) => (october && rank === "general" && type === "entertain" ? "小時" : "局")),
+      },
+      {
+        key: "aram",
+        label: "ARAM",
+        services: [service("aram", "ARAM", Object.keys(TYPE_LABELS)
+          .filter(type => catalog.lol.aram.prices[type])
+          .map(type => ({ label: TYPE_LABELS[type], price: catalog.lol.aram.prices[type], unit: "小時" })))],
+      },
+      { key: "tft", label: "聯盟戰棋", services: tableByType(catalog.lol.tft.prices, LOL_RANK_LABELS, catalog.lol.tft.typeKeys, () => "局") },
+      { key: "steam", label: "Steam 多人", services: [service("standard", "陪玩", [{ label: "每位陪陪", price: catalog.steam.price, unit: "小時" }])] },
+      {
+        key: "voice_chat",
+        label: "語音聊天",
+        services: [service("standard", "聊天陪伴", [{ label: voicePrice === null ? "由客服正式報價" : "每位陪陪", price: voicePrice, unit: "小時" }], "小時")],
+      },
+    ],
+  };
+}
+
+function chineseReason(message) {
+  const text = String(message || "");
+  return /[一-鿿]/.test(text) ? text : FALLBACK_REASON;
+}
+
+function validEstimateBody(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (typeof value.game !== "string" || !value.game.trim() || value.game.length > 80) return false;
+  const optionalText = ["serviceType", "targetRank", "companionRank", "unit", "platform"]
+    .every(key => value[key] == null || (typeof value[key] === "string" && value[key].length <= 80));
+  const numberLike = ["amount", "companionCount"]
+    .every(key => typeof value[key] === "number" || (typeof value[key] === "string" && value[key].length <= 20));
+  return optionalText && numberLike;
+}
+
+// Integer 1–20 only: a number, or a plain digit string. No partial digit extraction.
+function strictCount(value) {
+  const number = typeof value === "number" ? value
+    : typeof value === "string" && /^\d{1,2}$/.test(value.trim()) ? Number(value.trim()) : NaN;
+  return Number.isInteger(number) && number >= 1 && number <= 20 ? number : null;
+}
+
+function estimatePrice(P, body) {
+  const fail = reason => ({ amount: null, reason: chineseReason(reason) });
+  const game = P.match(body.game, APP_GAME_ALIASES);
+  if (!game) return fail("不支援的遊戲");
+  const appRank = (table, label) => {
+    const text = String(label || "").trim();
+    return APP_RANK_LABELS[table][P.normalize(text)] || text;
+  };
+  const quantity = strictCount(body.amount);
+  if (!quantity) return fail("時數／局數請選擇 1 至 20 的整數");
+  const playerCount = strictCount(body.companionCount);
+  if (!playerCount) return fail("陪陪人數請選擇 1 至 20 的整數");
+  const base = { quantity, playerCount };
+  let input;
+  if (game === "valorant") {
+    const rawTarget = appRank("valorantTarget", body.targetRank);
+    const target = rawTarget === "不限" ? "" : rawTarget;
+    // The bot treats an unknown target rank as 黃金; an APP label it can't map must not be priced as 黃金.
+    if (target && !P.match(target, P.RANK_ALIASES.valorant)) return fail("段位不在目前自動報價範圍內");
+    // 娛樂 takes the bot's entertainment branch (as getValorantPriceLevel / NG orders do), whatever companionRank says.
+    const entertain = P.match(body.serviceType, P.TYPE_ALIASES) === "entertain";
+    const companion = appRank("valorantCompanion", body.companionRank);
+    if (!entertain && !target) return fail("請先選擇要打的段位");
+    const level = entertain ? "娛樂" : companion;
+    input = { ...base, game: "valorant", serviceType: target, rankOrMap: level, platformOrMode: "" };
+  } else if (game === "delta") {
+    // Platform does not change the delta price; the bot only requires 電腦 or 手機.
+    const platformOrMode = P.normalize(body.platform) === P.normalize("手機") ? "手機" : "電腦";
+    input = { ...base, game: "delta", platformOrMode, serviceType: body.serviceType };
+  } else if (game === "apex") {
+    input = { ...base, game: "apex", serviceType: body.serviceType, rankOrMap: appRank("apex", body.targetRank) };
+  } else if (game === "lol" || game === "tft") {
+    input = { ...base, game: "lol", platformOrMode: game === "lol" ? "召喚峽谷" : "tft", serviceType: body.serviceType, rankOrMap: appRank("lol", body.targetRank) };
+  } else if (game === "aram") {
+    input = { ...base, game: "lol", platformOrMode: "aram", serviceType: body.serviceType };
+  } else {
+    input = { ...base, game };
+  }
+  let result;
+  try {
+    result = P.calculateSelfServicePrice(input);
+  } catch (error) {
+    return fail(error?.message);
+  }
+  const units = ["小時", "局"];
+  if (units.includes(body.unit) && units.includes(result.unit) && body.unit !== result.unit) {
+    return fail(`此組合以「${result.unit}」計價，請改選「${result.unit}」後再試算`);
+  }
+  return { amount: result.total, unit: result.unit, unitPrice: result.unitPrice };
+}
+
+function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai, tips, prizeClaims, wall } = {}) {
+  async function handleHttpRequest(request, response) {
+    if (!request.url?.startsWith("/app/")) return false;
+    const reply = (status, data) => {
+      response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      response.end(JSON.stringify(data));
+      return true;
+    };
+    const url = new URL(request.url, "http://localhost");
+    const path = url.pathname;
+    const maxBytes = path === AI_PARSE_PATH ? MAX_AI_BODY_BYTES : MAX_BODY_BYTES;
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > maxBytes) return reply(413, { error: "payload_too_large" });
+      chunks.push(buffer);
+    }
+    const body = Buffer.concat(chunks).toString();
+    if (!authenticate(request, body, token)) return reply(401, { error: "unauthorized" });
+    if (path === "/app/pricing") {
+      if (request.method !== "GET") return reply(405, { error: "method_not_allowed" });
+      return reply(200, buildPricing(pricing));
+    }
+    if (path === "/app/pricing/estimate") {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { error: "invalid_json" }); }
+      if (!validEstimateBody(value)) return reply(400, { error: "invalid_request" });
+      return reply(200, estimatePrice(pricing, value));
+    }
+    if (path === AI_PARSE_PATH) {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      if (!ai) return reply(503, { error: AI_UNAVAILABLE });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { error: "請求格式錯誤" }); }
+      try {
+        const result = await ai.parseOrder(value);
+        return reply(result.status, result.body);
+      } catch {
+        return reply(503, { error: AI_UNAVAILABLE });
+      }
+    }
+    if (path === "/app/tips/catalog") {
+      if (request.method !== "GET") return reply(405, { error: "method_not_allowed" });
+      if (!tips) return reply(503, { error: TIPS_UNAVAILABLE });
+      try {
+        const result = await tips.catalog({ guildId: url.searchParams.get("guildId") || undefined });
+        return reply(result.status, result.body);
+      } catch {
+        return reply(503, { error: TIPS_UNAVAILABLE });
+      }
+    }
+    if (path === "/app/tips") {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      if (!tips) return reply(503, { error: TIPS_UNAVAILABLE });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { error: "請求格式錯誤" }); }
+      try {
+        const result = await tips.tip(value);
+        return reply(result.status, result.body);
+      } catch {
+        // tip() may have charged before throwing: never answer "nothing charged" here.
+        return reply(503, { error: TIPS_UNCERTAIN, uncertain: true });
+      }
+    }
+    if (path === "/app/prize-claims/notify") {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      if (!prizeClaims) return reply(503, { error: PRIZE_CLAIMS_UNAVAILABLE });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { error: "請求格式錯誤" }); }
+      try {
+        const result = await prizeClaims.notify(value);
+        return reply(result.status, result.body);
+      } catch {
+        return reply(503, { error: PRIZE_CLAIMS_UNAVAILABLE });
+      }
+    }
+    if (path === "/app/wall/notify") {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      if (!wall) return reply(503, { error: WALL_UNAVAILABLE });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { error: "請求格式錯誤" }); }
+      try {
+        const result = await wall.notify(value);
+        return reply(result.status, result.body);
+      } catch {
+        return reply(503, { error: WALL_UNAVAILABLE });
+      }
+    }
+    return reply(404, { error: "not_found" });
+  }
+  return { handleHttpRequest };
+}
+
+module.exports = { createAppBridge, buildPricing, estimatePrice, APP_GAME_ALIASES, APP_RANK_LABELS };

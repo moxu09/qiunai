@@ -310,13 +310,19 @@ const deviceAuditReviewerSync = createDeviceAuditReviewerSync({
 const redPacketExpiry = createRedPacketExpiry({supabase,client,guildId:process.env.GUILD_ID});
 const employmentSystem = createEmploymentSystem(client, employmentConfig, supabase);
 const complaintSystem = createComplaintSystem(client, complaintConfig, supabase);
+const appPrizeClaims = require("./utils/appPrizeClaims").createAppPrizeClaims({
+  db: supabase, client, recipientIds: process.env.APP_PRIZE_CLAIM_NOTIFY_USER_IDS,
+});
+const appWall = require("./utils/appWall").createAppWall({ db: supabase, client, recipientIds: process.env.APP_PRIZE_CLAIM_NOTIFY_USER_IDS });
 const runtimeHealth = createHealthState("rainbot-qiunai");
 let jkopayService;
 let websiteOrderBridge;
+let appBridge;
 const runtimeServer = createHealthServer(runtimeHealth, {
   requestHandler: async (request, response) => {
     if (await serviceGiftCatalog.handleHttpRequest(request, response)) return true;
     if(websiteOrderBridge&&await websiteOrderBridge.handleHttpRequest(request,response))return true;
+    if(appBridge&&await appBridge.handleHttpRequest(request,response))return true;
     return await jkopayService?.handleHttpRequest(request,response)||false;
   },
 });
@@ -3663,6 +3669,10 @@ async function payTipAllocationsWithWalletAtomic({
   tipperId,
   allocations,
   channelId,
+  // Optional hooks (APP tips only; other callers omit them): beforeGroup runs before each
+  // group's RPC and may throw to stop; afterGroup runs after a group's RPC succeeded.
+  beforeGroup,
+  afterGroup,
 }) {
   if (hasSelfTip(tipperId, allocations.map((allocation) => allocation.staffId))) {
     throw new Error("不能打賞自己");
@@ -3695,6 +3705,7 @@ async function payTipAllocationsWithWalletAtomic({
   let balance = null;
   let index = 0;
   for (const group of groups.values()) {
+    if (beforeGroup) await beforeGroup({ index, operationKey: `${operationKey}:${index}`, ...group });
     const payment = await payTipWithWalletAtomic({
       operationKey: `${operationKey}:${index}`,
       notificationGroupId: `tip:wallet:${operationKey}`,
@@ -3707,6 +3718,7 @@ async function payTipAllocationsWithWalletAtomic({
     });
     orders.push(...(payment?.orders || []));
     balance = payment?.balance ?? balance;
+    if (afterGroup) await afterGroup({ index, operationKey: `${operationKey}:${index}`, ...group, payment });
     index += 1;
   }
   return { balance, orders };
@@ -8484,6 +8496,10 @@ client.once(Events.ClientReady, async () => {
   websiteOrderBridge=require('./utils/websiteOrderBridge').createWebsiteOrderBridge({db:supabase,client,token:process.env.TOKEN,
     createOrder:payload=>dispatchSystem.createWebsiteOrder(payload)});
   websiteOrderBridge.start();
+  appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN,prizeClaims:appPrizeClaims,wall:appWall,ai:require('./utils/appOrderAssist').createAppOrderAssist(),
+    tips:require('./utils/appTips').createAppTips({guildId:process.env.GUILD_ID,listActiveStaff,payTipAllocations:payTipAllocationsWithWalletAtomic,
+      countOrderVipSpentOnce,sendTipWorkReports:sendTipWorkReportsSafely,sendTipBroadcast:sendTipBroadcastSafely,
+      lookupTipOperation:async key=>{const {data,error}=await supabase.from('tip_payment_operations').select('user_id,result').eq('operation_key',key).maybeSingle();if(error)throw error;return data;}})});
   createServiceProxyQueue({ db: supabase, client, organization: "qiunai", guildId: "1206138511535898654",
     createTicket: payload => dispatchSystem.createServiceProxyTicket(payload) }).start();
   startReceiptRecovery({ supabase, guildId: process.env.GUILD_ID, sendOrderReceipt: sendOrderReceiptSafely, sendReceipt });
@@ -8618,6 +8634,10 @@ client.once(Events.ClientReady, async () => {
     5 * 60 * 1000,
   );
   signedEmploymentChannelTimer.unref?.();
+  // 領獎寄送資料保存至寄出後一週: delete prize-claim contact + 小奈 DMs (startup + every 6 h).
+  const prizeClaimPurgeTask = createNonOverlappingTask("領獎寄送資料清除", () => appPrizeClaims.purgeExpired());
+  prizeClaimPurgeTask();
+  setInterval(prizeClaimPurgeTask, 6 * 60 * 60 * 1000).unref?.();
   if (heartGiftConfig.ENABLED) {
     const deliveryTimer = setInterval(createNonOverlappingTask("心動值播報與身分組", heartGifts.deliver), 15000);
     deliveryTimer.unref?.();
@@ -9028,6 +9048,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    if (await appPrizeClaims.handleInteraction(interaction)) return;
+    if (await appWall.handleInteraction(interaction)) return;
     if (await complaintSystem.handleInteraction(interaction)) return;
     if (await customerServiceTickets.handle(interaction)) return;
     if (await qiunaiReferrals.handle(interaction)) return;

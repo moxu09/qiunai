@@ -8,8 +8,10 @@ const actorId = '123456789012345678';
 const staffRoleId = '1513203868895412305';
 const targetId = '987654321098765432';
 
-function fixture(initialRole = 'store_manager', extraBroadcast = 0) {
-  const state = { role: initialRole, sent: [], resends: [], replies: [] };
+function fixture(initialRole = 'store_manager', extraBroadcast = 0, organization = 'qiunai') {
+  const fixtureGuildId = organization === 'qiunai' ? guildId : '1501836172199202856';
+  const fixtureChannelId = organization === 'qiunai' ? channelId : '1566890399765762208';
+  const state = { role: initialRole, sent: [], edited: [], resends: [], replies: [] };
   const templates = [
     ['guide-bot', '操作', '請老闆開單'],
     ['ask-accept', '操作', '詢問能否接單'],
@@ -18,16 +20,16 @@ function fixture(initialRole = 'store_manager', extraBroadcast = 0) {
     ['clock-in-out', '操作', '上下班打卡'],
     ['gift-broadcast', '播報', '禮物播報'],
   ].map(([slug, category, title]) => ({
-    id: slug, slug, category, title, organization_code: 'qiunai',
+    id: slug, slug, category, title, organization_code: organization,
     is_active: true, version: 1, body: title, fields: [],
   }));
   for (let index = 0; index < extraBroadcast; index++) templates.push({
     id: `broadcast-${index}`, slug: `broadcast-${index}`, category: '播報',
-    title: `播報模板 ${index}`, organization_code: 'qiunai',
+    title: `播報模板 ${index}`, organization_code: organization,
     is_active: true, version: 1, body: `播報模板 ${index}`, fields: [],
   });
   const supabase = {
-    rpc: async () => ({ data: { guild_id: guildId, channel_id: channelId, message_id: null }, error: null }),
+    rpc: async () => ({ data: { guild_id: fixtureGuildId, channel_id: fixtureChannelId, message_id: null }, error: null }),
     from(table) {
       if (table === 'service_templates') return {
         select() { return this; }, eq() { return this; },
@@ -49,21 +51,22 @@ function fixture(initialRole = 'store_manager', extraBroadcast = 0) {
       throw Error(`Unexpected table: ${table}`);
     },
   };
-  const message = { author: { id: '222222222222222222' },
-    embeds: [{ footer: { text: '秋奈電競客服工具・確認內容後再貼上' } }],
+  const message = { id: '555555555555555555', author: { id: '222222222222222222' },
+    embeds: [{ footer: { text: organization === 'qiunai' ? '秋奈電競客服工具・確認內容後再貼上' : '深夜不關燈客服工具・確認內容後再貼上' } }],
+    async edit(payload) { state.edited.push(payload); return this; },
   };
-  const channel = { guildId, isTextBased: () => true,
+  const channel = { guildId: fixtureGuildId, isTextBased: () => true,
     messages: { fetch: async () => new Map() },
     async send(payload) { state.sent.push(payload); return { id: '555555555555555555' }; },
   };
   const client = { user: { id: message.author.id }, channels: { fetch: async () => channel } };
-  const panel = createServiceTemplatePanel({ client, supabase, organization: 'qiunai',
+  const panel = createServiceTemplatePanel({ client, supabase, organization,
     tipGifts: [{ key: 'gift', name: '小禮物', price: 100 }],
     resendSigning: async (...args) => { state.resends.push(args); return 'sent'; },
   });
   function interaction(customId, overrides = {}) {
     return {
-      customId, guildId, channelId, message,
+      customId, guildId: fixtureGuildId, channelId: fixtureChannelId, message,
       user: { id: actorId }, member: { roles: [staffRoleId] },
       memberPermissions: { has: () => false },
       isButton: () => customId === 'svc:signing-resend',
@@ -76,7 +79,7 @@ function fixture(initialRole = 'store_manager', extraBroadcast = 0) {
       ...overrides,
     };
   }
-  return { panel, state, interaction };
+  return { panel, state, interaction, channel, message };
 }
 
 test('秋奈客服面板保留模板並顯示重發按鈕，符合 Discord 五列限制', async () => {
@@ -88,6 +91,66 @@ test('秋奈客服面板保留模板並顯示重發按鈕，符合 Discord 五�
   assert.ok(rows.flatMap(row => row.components).some(component =>
     component.custom_id === 'svc:signing-resend' && component.label === '重發簽約連結'));
   assert.ok(rows.flatMap(row => row.components).some(component => component.custom_id === 'svc:gift'));
+  for (const [id, label] of [
+    ['open_manual_work_report_order', '手動訂單報單'],
+    ['open_manual_work_report_gift', '手動打賞報單'],
+  ]) {
+    assert.equal(rows.flatMap(row => row.components).filter(component => component.custom_id === id && component.label === label).length, 1);
+  }
+});
+
+test('秋奈主面板的手動報單入口交給現有處理器並開啟正確表單', async () => {
+  const { createWorkReportSystem } = require('../events/workReportSystem');
+  const workReports = createWorkReportSystem({
+    supabase: { from() { throw Error('Opening a modal must not write payroll'); } },
+    client: {}, appKey: 'qiunai', guildId, manualChannelId: channelId,
+    staffTable: 'qiunai_staff', staffRoleId, customerServiceRoleId: staffRoleId,
+    salaryTable: 'qiunai_salary_orders',
+  });
+  const f = fixture();
+  for (const kind of ['order', 'gift']) {
+    f.state.modal = null;
+    const i = f.interaction(`open_manual_work_report_${kind}`, {
+      isButton: () => true, isModalSubmit: () => false,
+      async deferReply() { throw Error('Opening a modal must not be deferred'); },
+    });
+    assert.equal(await f.panel.handleInteraction(i), false);
+    assert.equal(await workReports.handleInteraction(i), true);
+    const modal = f.state.modal.toJSON();
+    assert.equal(modal.custom_id, `submit_manual_work_report_${kind}`);
+    assert.equal(modal.title, kind === 'order' ? '訂單報單' : '打賞報單');
+    const fields = modal.components.flatMap(row => row.components.map(field => field.custom_id));
+    assert.equal(fields.includes('manual_duration'), kind === 'order');
+    assert.ok(fields.includes('manual_staff'));
+  }
+  f.state.modal = null;
+  await workReports.handleInteraction(f.interaction('open_manual_work_report_order', {
+    member: { roles: [] }, isButton: () => true, isModalSubmit: () => false,
+  }));
+  assert.equal(f.state.modal, null);
+  assert.match(f.state.replies.at(-1).content, /只有客服或管理員/);
+});
+
+test('深夜面板不加入秋奈的手動報單或重發簽約入口', async () => {
+  const f = fixture('store_manager', 0, 'deepnight');
+  await f.panel.ensurePanel();
+  const rows = f.state.sent[0].components;
+  assert.equal(rows.length, 4);
+  assert.ok(rows.every(row => row.components.length <= 5));
+  const controls = rows.flatMap(row => row.components);
+  assert.equal(controls.filter(control => control.custom_id.startsWith('open_manual_work_report')).length, 0);
+  assert.equal(controls.filter(control => control.custom_id === 'svc:signing-resend').length, 0);
+  assert.equal(controls.filter(control => control.custom_id.startsWith('svc:quick:')).length, 5);
+});
+
+test('重建客服面板會更新既有訊息而不重複新增', async () => {
+  const f = fixture();
+  f.channel.messages.fetch = async () => new Map([[f.message.id, f.message]]);
+  assert.equal(await f.panel.ensurePanel(), f.message.id);
+  assert.equal(f.state.sent.length, 0);
+  assert.equal(f.state.edited.length, 1);
+  assert.ok(f.state.edited[0].components.flatMap(row => row.components)
+    .some(control => control.custom_id === 'open_manual_work_report_order'));
 });
 
 test('主管可輸入 ID 重發，一般員工不能使用或偽造提交', async () => {
