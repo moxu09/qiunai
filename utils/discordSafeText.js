@@ -1,4 +1,4 @@
-// Customer-supplied text shown in 小奈 DMs: neutralise mention syntax (<@id>, <@&id>, <#id> would
+// Customer-supplied text shown in 小奈 DMs: neutralise mention syntax (<@id>, <@&id>, <#id>, </cmd:id> would
 // render as chips even with allowedMentions off) with a zero-width space after '<', clip the RAW text
 // first, then markdown-escape — so a cut never leaves a dangling backslash — and shrink until the
 // escaped result fits `max` (Discord embed field limit 1024).
@@ -7,7 +7,7 @@ const { escapeMarkdown } = require("discord.js");
 const OPTIONS = { maskedLink: true, heading: true, bulletedList: true, numberedList: true };
 const ZWSP = "​";
 
-const neutraliseMentions = text => text.replace(/<(?=[@#])/g, `<${ZWSP}`);
+const neutraliseMentions = text => text.replace(/<(?=[@#/])/g, `<${ZWSP}`);
 
 function safeText(value, max = 1024) {
   const chars = [...neutraliseMentions(String(value ?? "").trim())];

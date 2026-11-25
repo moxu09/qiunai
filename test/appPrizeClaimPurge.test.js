@@ -26,10 +26,26 @@ const redemption = (sourceId, days, extra = {}) => ({
 
 // Minimal PostgREST-like fake: eq (jsonb compared by JSON text), in, lt, the purge's or-filter,
 // order/limit, maybeSingle, update(...).filters.select(), and awaiting the builder.
-function fakeDb({ claims = [], redemptions = [], messages = [], failUpdate = false, beforeUpdate } = {}) {
+function fakeDb({ claims = [], redemptions = [], messages = [], failUpdate = false, beforeUpdate, missingColumns = [] } = {}) {
   const tables = { app_prize_claims: claims, bot_prize_redemptions: redemptions, app_prize_claim_messages: messages };
+  const redemptionType = { ichiban: "ichiban_draw", gacha: "gacha_item" };
   const db = {
-    tables, updates: [], selects: [], inserted: [],
+    tables, updates: [], selects: [], inserted: [], rpcs: [],
+    // Emulates the app migration's app_reject_prize_claim (one transaction, row locked).
+    async rpc(name, args) {
+      db.rpcs.push({ name, args });
+      assert.equal(name, "app_reject_prize_claim");
+      const row = claims.find(c => c.id === args.p_claim_id);
+      if (!row) return { data: "not_found", error: null };
+      if (row.status !== "pending") return { data: "already", error: null };
+      if (redemptions.some(r => r.guild_id === row.guild_id && r.source_type === redemptionType[row.source_type] && String(r.source_id) === String(row.source_id))) {
+        return { data: "redeemed", error: null };
+      }
+      row.status = "rejected";
+      row.rejected_at = new Date().toISOString();
+      messages.push({ id: `m-${messages.length}`, claim_id: row.id, sender: "staff", staff_id: args.p_staff_id, body: `申請已退回：${args.p_reason}` });
+      return { data: "rejected", error: null };
+    },
     from(table) {
       const filters = [];
       let patch = null;
@@ -38,6 +54,8 @@ function fakeDb({ claims = [], redemptions = [], messages = [], failUpdate = fal
       let limitN = Infinity;
       const match = row => filters.every(fn => fn(row));
       const run = () => {
+        const missing = missingColumns.find(col => String(selected).split(",").includes(col));
+        if (missing) return { data: null, error: { code: "42703", message: `column ${missing} does not exist` } };
         let rows = tables[table].filter(match);
         if (orderKey) rows = [...rows].sort((a, b) => String(a[orderKey]).localeCompare(String(b[orderKey])));
         rows = rows.slice(0, limitN);
@@ -486,7 +504,7 @@ test("claim DM has owner-only 回覆 and 退回 buttons; a rejected claim's DM s
   const [first, second] = client.sent.map(item => item.payload);
   assert.deepEqual(componentsJson(first)[0].components.map(c => [c.custom_id, c.label]),
     [[`app_claim_reply_${pending.id}`, "回覆"], [`app_claim_reject_${pending.id}`, "退回"]]);
-  assert.deepEqual(componentsJson(second)[0].components.map(c => c.custom_id), [`app_claim_reply_${rejected.id}`]);
+  assert.deepEqual(componentsJson(second), []);
   assert.equal(embedJson(second).fields.find(f => f.name === "狀態").value, "🚫 已退回");
 });
 
@@ -521,10 +539,9 @@ test("退回 submit: pending → rejected with rejected_at, staff message, ephem
   assert.equal(submit.calls.deferred.flags, 64);
   assert.equal(row.status, "rejected");
   assert.ok(!Number.isNaN(Date.parse(row.rejected_at)));
-  assert.deepEqual(db.inserted.map(item => [item.table, item.row]), [["app_prize_claim_messages",
-    { claim_id: row.id, sender: "staff", staff_id: OWNER, body: "申請已退回：已缺貨" }]]);
-  const rejectUpdate = db.updates.find(u => u.patch.status === "rejected");
-  assert.ok(rejectUpdate && rejectUpdate.count === 1);
+  assert.deepEqual(db.rpcs, [{ name: "app_reject_prize_claim", args: { p_claim_id: row.id, p_staff_id: OWNER, p_reason: "已缺貨" } }]);
+  assert.deepEqual(messages.map(m => [m.sender, m.staff_id, m.body]), [["staff", OWNER, "申請已退回：已缺貨"]]);
+  assert.equal(db.inserted.length, 0);
   for (const payload of [pressedEdits[0], ...client.edited.map(e => e.payload)]) {
     assert.deepEqual(payload.components, []);
     assert.equal(embedJson(payload).fields.find(f => f.name === "狀態").value, "🚫 已退回");
@@ -541,7 +558,7 @@ test("退回 is a conditional update: already handled answers 這張申請已經
     await claims.handleInteraction(submit);
     assert.equal(replyText(submit.calls), ALREADY_TEXT);
     assert.equal(row.status, status);
-    assert.equal(db.inserted.length, 0);
+    assert.equal(db.tables.app_prize_claim_messages.length, 0);
   }
 });
 
@@ -551,9 +568,9 @@ test("a redeemed claim cannot be rejected", async () => {
   const claims = createAppPrizeClaims({ db, client: fakeClient(), recipientIds: OWNER });
   const submit = interaction({ customId: `app_claim_reject_modal_${row.id}`, kind: "modal", reason: "不寄了" });
   await claims.handleInteraction(submit);
-  assert.match(replyText(submit.calls), /已兌換/);
+  assert.equal(replyText(submit.calls), "這個獎品已核銷，不能退回");
   assert.equal(row.status, "pending");
-  assert.equal(db.inserted.length, 0);
+  assert.equal(db.tables.app_prize_claim_messages.length, 0);
 });
 
 test("退回 reason: blank refused, 300 code points accepted, 301 refused; non-recipient refused", async () => {
@@ -589,4 +606,58 @@ test("prize-claim DM: customer text clipped before escaping and mention syntax n
   assert.ok(replyField.length > 900, String(replyField.length));
   assert.ok(!/<[@#]/.test(replyField));
   assert.ok(!/<[@#]/.test(embed.fields.find(f => f.name === "獎品").value));
+});
+
+test("退回 maps not_found and RPC errors to the Chinese replies", async () => {
+  const claims = createAppPrizeClaims({ db: fakeDb(), client: fakeClient(), recipientIds: OWNER });
+  const missing = interaction({ customId: `app_claim_reject_modal_${uuid(270)}`, kind: "modal", reason: "x" });
+  await claims.handleInteraction(missing);
+  assert.equal(replyText(missing.calls), "找不到這張申請");
+  const db = fakeDb({ claims: [claim(271)] });
+  db.rpc = async () => ({ data: null, error: { code: "42883", message: "no function" } });
+  const failing = interaction({ customId: `app_claim_reject_modal_${uuid(271)}`, kind: "modal", reason: "x" });
+  const { lines } = await captureConsole(() => createAppPrizeClaims({ db, client: fakeClient(), recipientIds: OWNER }).handleInteraction(failing));
+  assert.equal(replyText(failing.calls), "暫時無法退回，請稍後再試");
+  assert.ok(lines.some(line => line.includes("42883")));
+});
+
+test("回覆 is blocked on rejected or redeemed claims with 這張申請已經處理完成", async () => {
+  const rejected = claim(280, { status: "rejected", rejected_at: ago(1) });
+  const redeemed = claim(281);
+  const db = fakeDb({ claims: [rejected, redeemed], redemptions: [redemption(redeemed.source_id, 1)] });
+  const claims = createAppPrizeClaims({ db, client: fakeClient(), recipientIds: OWNER });
+  for (const row of [rejected, redeemed]) {
+    const submit = {
+      customId: `app_claim_reply_modal_${row.id}`, user: { id: OWNER }, isModalSubmit: () => true, isButton: () => false,
+      fields: { getTextInputValue: () => "還在嗎" }, calls: { edits: [], replies: [] },
+      async reply(payload) { this.calls.replies.push(payload); }, async deferReply() {},
+      async editReply(payload) { this.calls.edits.push(payload); },
+    };
+    await claims.handleInteraction(submit);
+    assert.equal(replyText(submit.calls), "這張申請已經處理完成");
+  }
+  assert.equal(db.inserted.length, 0);
+});
+
+test("purge still runs the shipped purge when rejected_at is missing (logged once)", async () => {
+  const shipped = claim(290, { dm_refs: [ref(1)] });
+  const rejected = claim(291, { status: "rejected", created_at: ago(90), dm_refs: [ref(2)] });
+  const db = fakeDb({ claims: [shipped, rejected], redemptions: [redemption(shipped.source_id, 10)], missingColumns: ["rejected_at"] });
+  const client = fakeClient();
+  const claims = createAppPrizeClaims({ db, client });
+  const { lines } = await captureConsole(async () => {
+    await claims.purgeExpired({ now: NOW });
+    await claims.purgeExpired({ now: NOW });
+  });
+  assert.equal(shipped.contact, null);
+  assert.deepEqual(rejected.contact, CONTACT);
+  assert.deepEqual(client.deleted, [route(ref(1))]);
+  assert.equal(lines.filter(line => line.includes("rejected_at")).length, 1);
+});
+
+test("safeText neutralises slash-command mentions too", () => {
+  const { safeText } = require("../utils/discordSafeText");
+  const out = safeText(`</領獎:${OTHER}> <@${OTHER}>`);
+  assert.ok(!/<[@#/]/.test(out), out);
+  assert.ok(out.startsWith("<​/領獎"));
 });

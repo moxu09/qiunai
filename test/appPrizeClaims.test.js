@@ -51,6 +51,7 @@ function fakeDb({ claims = [], messages = [], insertError = null } = {}) {
         select() { return query; },
         eq(key, value) { filters.push([key, value]); return query; },
         async maybeSingle() { return { data: rows()[0] || null, error: null }; },
+        async limit() { return { data: table === "bot_prize_redemptions" ? [] : rows(), error: null }; }, // no redemptions
         async insert(row) {
           if (insertError) return { error: insertError };
           inserted.push({ table, row });

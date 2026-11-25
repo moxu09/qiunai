@@ -14,8 +14,8 @@
 // At purge time the claim's chat (app_prize_claim_messages, customer and staff rows) is redacted too,
 // since it may repeat the address. A DM that could not be recorded, or whose delete keeps failing
 // (4 runs or 24 h), triggers one 小奈 alert to the recipients (claim short id + jump link only).
-// 「退回」 (owner-only button + reason modal): pending → rejected with rejected_at, a staff message
-// 「申請已退回：…」 for the customer, and every recorded DM copy shows 已退回 without buttons.
+// 「退回」 (owner-only button + reason modal) calls the RPC app_reject_prize_claim (app migration):
+// pending → rejected with rejected_at and a staff message 「申請已退回：…」 for the customer, and every recorded DM copy shows 已退回 without buttons.
 // Rejected claims are purged 30 days after rejected_at (privacy text: 於退回後30天刪除收件資料);
 // a legacy rejected row without rejected_at falls back to created_at.
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, EmbedBuilder, ModalBuilder, Routes, TextInputBuilder, TextInputStyle } = require("discord.js");
@@ -59,11 +59,11 @@ const LOAD_FAILED = "暫時無法讀取領獎申請，請稍後再試";
 const REJECT_NOT_ALLOWED = "你沒有權限退回這張申請";
 const REJECTED_OK = "已退回，客人會在 APP 看到原因";
 const ALREADY_HANDLED = "這張申請已經處理過了";
-const REDEEMED = "這張申請的獎品已兌換，不能退回";
+const REDEEMED = "這個獎品已核銷，不能退回";
+const HANDLED = "這張申請已經處理完成";
 const REASON_BLANK = "退回原因不能是空白";
 const REASON_TOO_LONG = `退回原因最多 ${MAX_REASON} 字`;
 const REJECT_FAILED = "暫時無法退回，請稍後再試";
-const REJECT_NOTE_FAILED = "已退回，但退回原因暫時無法寫入，請用「回覆」補上";
 
 function parseRecipientIds(value) {
   const ids = [...new Set(String(value || "").match(/\d{17,20}/g) || [])];
@@ -104,18 +104,18 @@ function buildDm(claim, message) {
     .setFooter({ text: `申請編號 ${claim.id}` });
   if (message) embed.addFields({ name: "客人回覆", value: safeText(message.body) || "（空白）" });
   if (claim.status === "rejected") embed.addFields({ name: "狀態", value: REJECTED_LABEL });
-  const row = new ActionRowBuilder().addComponents(
+  // Buttons only while pending (a handled claim can no longer be replied to or rejected).
+  const components = claim.status === "rejected" || claim.status === "done" ? [] : [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`${BUTTON_PREFIX}${claim.id}`).setLabel("回覆").setStyle(ButtonStyle.Primary),
-  );
-  if (claim.status === "pending") {
-    row.addComponents(new ButtonBuilder().setCustomId(`${REJECT_PREFIX}${claim.id}`).setLabel("退回").setStyle(ButtonStyle.Danger));
-  }
-  return { embeds: [embed], components: [row], allowedMentions: { parse: [] } };
+    new ButtonBuilder().setCustomId(`${REJECT_PREFIX}${claim.id}`).setLabel("退回").setStyle(ButtonStyle.Danger),
+  )];
+  return { embeds: [embed], components, allowedMentions: { parse: [] } };
 }
 
 function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE_CLAIM_NOTIFY_USER_IDS } = {}) {
   const recipients = parseRecipientIds(recipientIds);
   const appendAlerted = new Set();
+  let rejectedAtMissingLogged = false;
 
   async function loadClaim(claimId) {
     const { data, error } = await db.from("app_prize_claims")
@@ -287,18 +287,30 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
     const fresh = [];
     const leftovers = [];
     let cursor = null;
+    let withRejectedAt = true; // retried every run, so the migration takes effect without a restart
+    const scanPage = async () => {
+      const columns = `id,guild_id,source_type,source_id,status,created_at,${withRejectedAt ? "rejected_at," : ""}dm_refs,contact_purged_at`;
+      let query = db.from("app_prize_claims").select(columns).or("contact.not.is.null,dm_refs.neq.[]");
+      if (cursor) query = query.gt("id", cursor);
+      return query.order("id", { ascending: true }).limit(PURGE_SCAN_PAGE);
+    };
     try {
       for (;;) {
-        let query = db.from("app_prize_claims")
-          .select("id,guild_id,source_type,source_id,status,created_at,rejected_at,dm_refs,contact_purged_at")
-          .or("contact.not.is.null,dm_refs.neq.[]");
-        if (cursor) query = query.gt("id", cursor);
-        const { data, error } = await query.order("id", { ascending: true }).limit(PURGE_SCAN_PAGE);
+        let { data, error } = await scanPage();
+        if (error && withRejectedAt && (error.code === "42703" || /rejected_at/.test(String(error.message)))) {
+          // Column not migrated yet: skip rejected claims, still run the 7-day shipped purge.
+          if (!rejectedAtMissingLogged) {
+            rejectedAtMissingLogged = true;
+            console.error("[APP 領獎資料清除] 缺少 rejected_at 欄位，本輪略過退回申請", { code: error.code || "unknown" });
+          }
+          withRejectedAt = false;
+          ({ data, error } = await scanPage());
+        }
         if (error) throw error;
-        const page = data || [];
+        const page = (data || []).filter(claim => withRejectedAt || claim.status !== "rejected");
         for (const claim of await dueIn(page, now)) (claim.contact_purged_at ? leftovers : fresh).push(claim);
-        if (fresh.length >= PURGE_BATCH || page.length < PURGE_SCAN_PAGE) break;
-        cursor = page[page.length - 1].id;
+        if (fresh.length >= PURGE_BATCH || (data || []).length < PURGE_SCAN_PAGE) break;
+        cursor = data[data.length - 1].id;
       }
     } catch (error) {
       console.error("[APP 領獎資料清除] 讀取失敗", { code: error?.code || "unknown" });
@@ -346,6 +358,7 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
     try {
       const claim = await loadClaim(claimId);
       if (!claim) return interaction.editReply({ content: NOT_FOUND });
+      if (claim.status !== "pending" || await isRedeemed(claim)) return interaction.editReply({ content: HANDLED });
       const { error } = await db.from("app_prize_claim_messages")
         .insert({ claim_id: claimId, sender: "staff", staff_id: interaction.user.id, body });
       if (error) throw error;
@@ -354,6 +367,14 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
       return interaction.editReply({ content: SAVE_FAILED });
     }
     return interaction.editReply({ content: SENT });
+  }
+
+  async function isRedeemed(claim) {
+    const { data, error } = await db.from("bot_prize_redemptions")
+      .select("source_id").eq("guild_id", claim.guild_id)
+      .eq("source_type", REDEMPTION_TYPES[claim.source_type] || "").eq("source_id", String(claim.source_id)).limit(1);
+    if (error) throw error;
+    return Boolean(data?.length);
   }
 
   async function handleRejectButton(interaction, claimId) {
@@ -408,39 +429,31 @@ function createAppPrizeClaims({ db, client, recipientIds = process.env.APP_PRIZE
     if (!reason) return interaction.reply(ephemeral(REASON_BLANK));
     if ([...reason].length > MAX_REASON) return interaction.reply(ephemeral(REASON_TOO_LONG));
     await interaction.deferReply({ flags: 64 });
-    let claim;
+    // One transaction in the DB (row lock, redemption check, status + rejected_at, staff message),
+    // so a concurrent /兌換獎品 can't slip between the check and the update.
+    let result;
     try {
-      const { data, error } = await db.from("app_prize_claims")
-        .select("id,guild_id,source_type,source_id,status,dm_refs").eq("id", claimId).maybeSingle();
+      const { data, error } = await db.rpc("app_reject_prize_claim",
+        { p_claim_id: claimId, p_staff_id: String(interaction.user.id), p_reason: reason });
       if (error) throw error;
-      if (!data) return interaction.editReply({ content: NOT_FOUND });
-      if (data.status !== "pending") return interaction.editReply({ content: ALREADY_HANDLED });
-      const { data: redeemed, error: redemptionError } = await db.from("bot_prize_redemptions")
-        .select("source_id").eq("guild_id", data.guild_id)
-        .eq("source_type", REDEMPTION_TYPES[data.source_type] || "").eq("source_id", String(data.source_id)).limit(1);
-      if (redemptionError) throw redemptionError;
-      if (redeemed?.length) return interaction.editReply({ content: REDEEMED });
-      const { data: updated, error: updateError } = await db.from("app_prize_claims")
-        .update({ status: "rejected", rejected_at: new Date().toISOString() })
-        .eq("id", claimId).eq("status", "pending").select("id");
-      if (updateError) throw updateError;
-      if (!updated?.length) return interaction.editReply({ content: ALREADY_HANDLED });
-      claim = data;
+      result = String(data);
     } catch (error) {
       console.error("[APP 領獎退回] 寫入失敗", { claimId, code: error?.code || "unknown" });
       return interaction.editReply({ content: REJECT_FAILED });
     }
-    let noteFailed = false;
-    try {
-      const { error } = await db.from("app_prize_claim_messages")
-        .insert({ claim_id: claimId, sender: "staff", staff_id: interaction.user.id, body: `申請已退回：${reason}` });
-      if (error) throw error;
-    } catch (error) {
-      noteFailed = true;
-      console.error("[APP 領獎退回] 原因寫入失敗", { claimId, code: error?.code || "unknown" });
+    if (result !== "rejected") {
+      const replies = { already: ALREADY_HANDLED, redeemed: REDEEMED, not_found: NOT_FOUND };
+      return interaction.editReply({ content: replies[result] || REJECT_FAILED });
     }
-    await markCopiesRejected(claimId, claim.dm_refs, interaction.message);
-    return interaction.editReply({ content: noteFailed ? REJECT_NOTE_FAILED : REJECTED_OK });
+    let refs = [];
+    try {
+      const { data } = await db.from("app_prize_claims").select("dm_refs").eq("id", claimId).maybeSingle();
+      refs = data?.dm_refs || [];
+    } catch (error) {
+      console.warn("[APP 領獎退回] 讀取私訊紀錄失敗", { claimId, code: error?.code || "unknown" });
+    }
+    await markCopiesRejected(claimId, refs, interaction.message);
+    return interaction.editReply({ content: REJECTED_OK });
   }
 
   // Only claims app_claim_reply_<id> buttons and app_claim_reply_modal_<id> modals; the id part
