@@ -62,6 +62,7 @@ const {
 const { createAllianceMembership } = require("./utils/allianceMembership");
 const { createJkopayService } = require("./utils/jkopay");
 const { createEcpayService } = require("./utils/ecpay");
+const { createAppPaidDrawFulfiller } = require("./utils/appPaidDraws");
 const { createIchiban } = require("./utils/ichiban");
 const {
   buildTipReceiptData,
@@ -335,6 +336,7 @@ jkopayService = createJkopayService({
   onServiceRefunded: handleJkopayServiceRefunded,
 });
 const ecpayService = createEcpayService({ supabase, onServicePaid: handleJkopayServicePaid });
+const fulfilAppPaidDraw = createAppPaidDrawFulfiller({ supabase, client });
 const ECPAY_FULFILLMENT_POLL_MS = 10_000;
 
 async function startEcpayFulfillmentRecoveryScheduler() {
@@ -4671,6 +4673,11 @@ async function handleJkopayServicePaid({ payment, transaction }) {
   const paymentLabel = ecpay ? "綠界" : "街口";
   const providerKey = ecpay ? "ecpay" : "jkopay";
   const paymentSourceTable = ecpay ? "ecpay_service_payments" : "jkopay_service_payments";
+  if (payment.payment_kind === "draw") {
+    // 綠界付款抽（APP 建立的付款單）：資料庫程序抽獎或轉 ASD，S／A 公開播報；APP 單沒有客人頻道，不另發訊息。
+    await fulfilAppPaidDraw(payment);
+    return;
+  }
   if (payment.payment_kind === "topup") {
     if (!ecpay) throw new Error("此付款單不是綠界儲值單");
     const { data: topup, error: topupError } = await supabase.rpc("qiunai_fulfill_ecpay_topup", {
