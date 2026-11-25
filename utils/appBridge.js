@@ -3,6 +3,7 @@
 // (/app/ai/parse-order, see appOrderAssist). Never creates orders. /app/tips/* (see appTips)
 // is the only path that charges: ASD-wallet 打賞 through the bot's existing tip RPC.
 const { authenticate } = require("./websiteOrderBridge");
+const { UNCERTAIN: TIPS_UNCERTAIN } = require("./appTips");
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 // A legal 1.5 MB screenshot is ~2.0 MB as base64, plus text and option lists.
@@ -246,7 +247,8 @@ function createAppBridge({ token, pricing = require("../config/selfServicePricin
         const result = await tips.tip(value);
         return reply(result.status, result.body);
       } catch {
-        return reply(503, { error: TIPS_UNAVAILABLE });
+        // tip() may have charged before throwing: never answer "nothing charged" here.
+        return reply(503, { error: TIPS_UNCERTAIN, uncertain: true });
       }
     }
     return reply(404, { error: "not_found" });

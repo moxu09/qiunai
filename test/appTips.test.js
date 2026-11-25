@@ -527,3 +527,112 @@ test("completed map is bounded", async () => {
   }
   assert.ok(tips.size() <= 3);
 });
+
+// ---- final review fixes (I1, M1) ----
+const UNCERTAIN_BODY = { error: "打賞結果確認中，請到錢包確認後用同一筆重試（不會重複扣款）", uncertain: true };
+
+test("final I1a: an unexpected throw from tips.tip is answered by the bridge as uncertain, not 'nothing charged'", async () => {
+  const bridge = createAppBridge({
+    token: TOKEN,
+    tips: { catalog: async () => ({ status: 200, body: {} }), tip: async () => { throw new TypeError("Cannot read properties of null (reading 'id')"); } },
+  });
+  const response = await call(bridge, "POST", "/app/tips", goodBody());
+  assert.equal(response.status, 503);
+  assert.deepEqual(response.json, UNCERTAIN_BODY);
+});
+
+test("final I1b: an unexpected throw after the charge resolves as uncertain, notifies once, and the retry is not stuck on 409", async () => {
+  const db = fakeDb();
+  const calls = { pay: [] };
+  const pay = fakePay(db, calls);
+  let breakReply = true;
+  const ctx = setup({
+    payTipAllocations: async (args) => {
+      const result = await pay(args);
+      if (!breakReply) return result;
+      breakReply = false;
+      return { balance: result.balance, get orders() { throw new TypeError("boom after charge"); } };
+    },
+  }, db);
+  const first = await post(ctx);
+  assert.equal(first.status, 503);
+  assert.deepEqual(first.json, UNCERTAIN_BODY);
+  assert.equal(db.charged, 166);
+  assert.equal(ctx.calls.vip.length, 2, "the charged groups are still notified");
+  assert.equal(ctx.calls.reports.length, 1);
+  const retry = await post(ctx);
+  assert.equal(retry.status, 200, "same requestId retry is not stuck on 409");
+  assert.equal(db.charged, 166, "no double charge");
+  assert.equal(ctx.calls.vip.length, 2, "no duplicate notifications");
+});
+
+test("final I1b: a null order in the payment result does not throw; the answer is 200 and replays", async () => {
+  const db = fakeDb();
+  const calls = { pay: [] };
+  const pay = fakePay(db, calls);
+  const ctx = setup({
+    payTipAllocations: async (args) => {
+      const result = await pay(args);
+      return { balance: result.balance, orders: [null, ...result.orders] };
+    },
+  }, db);
+  const first = await post(ctx);
+  assert.equal(first.status, 200);
+  assert.equal(first.json.orders.length, 2);
+  const again = await post(ctx);
+  assert.equal(again.status, 200);
+  assert.equal(db.charged, 166);
+});
+
+test("final I1c: a pending request older than 2 minutes expires so the same requestId can run again", async () => {
+  let clock = 1_000_000;
+  let hang = true;
+  const db = fakeDb();
+  const ctx = setup({
+    now: () => clock,
+    lookupTipOperation: async (key) => {
+      if (hang) { hang = false; return new Promise(() => {}); }
+      return db.operations.get(key) || null;
+    },
+  }, db);
+  call(ctx.bridge, "POST", "/app/tips", goodBody()); // hangs forever
+  await new Promise(resolve => setImmediate(resolve));
+  clock += 60 * 1000;
+  const early = await call(ctx.bridge, "POST", "/app/tips", goodBody());
+  assert.equal(early.status, 409);
+  assert.equal(early.json.error, "這筆打賞正在處理中");
+  clock += 61 * 1000;
+  const late = await post(ctx);
+  assert.equal(late.status, 200);
+  assert.equal(db.charged, 166);
+  const changed = await call(ctx.bridge, "POST", "/app/tips", goodBody({ broadcast: { enabled: false, anonymous: false }, allocations: [{ staffId: STAFF_A, lines: [{ key: "tip_33_bear_cookie", quantity: 1 }] }] }));
+  assert.equal(changed.status, 409, "fingerprint is kept");
+});
+
+test("final M1: an empty staff list (DB read error) is 503 unavailable, not a definite 400; catalog too", async () => {
+  const ctx = setup({ listActiveStaff: async () => [] });
+  const response = await post(ctx);
+  assert.equal(response.status, 503);
+  assert.deepEqual(response.json, { error: "打賞暫時無法完成，請稍後再試" });
+  assert.equal(ctx.calls.pay.length, 0);
+  const catalog = await call(ctx.bridge, "GET", `/app/tips/catalog?guildId=${GUILD}`);
+  assert.equal(catalog.status, 503);
+  assert.match(catalog.json.error, /打賞暫時無法完成/);
+});
+
+test("final M1: a staff-list failure on a retry after a possible charge is uncertain, not 'nothing charged'", async () => {
+  for (const broken of [async () => [], async () => { throw new Error("db down"); }]) {
+    const db = fakeDb();
+    db.commitThenThrow = new Error("socket hang up");
+    let list = null;
+    const staffCtx = setup({ listActiveStaff: async () => (list ? list() : [{ discord_id: STAFF_A, display_name: "小A" }, { discord_id: STAFF_B, display_name: "小B" }]) }, db);
+    const first = await post(staffCtx);
+    assert.equal(first.status, 503);
+    assert.equal(first.json.uncertain, true);
+    list = broken;
+    const retry = await post(staffCtx);
+    assert.equal(retry.status, 503);
+    assert.deepEqual(retry.json, UNCERTAIN_BODY);
+    assert.equal(db.charged, 66);
+  }
+});

@@ -30,6 +30,9 @@ const CJK = /[一-鿿]/;
 const MAX_STAFF = 25;
 const MAX_LINES = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
+// A request still "pending" after this long (hung RPC, lost promise) is treated as failed so the
+// same requestId can run again; safe because every group RPC key replays its stored result.
+const PENDING_TIMEOUT_MS = 2 * 60 * 1000;
 
 const isPlainObject = value => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -77,6 +80,7 @@ function createAppTips({
   channelId = TIP_ORDER_PANEL_CHANNEL_ID,
   maxEntries = 1000,
   ttlMs = DAY_MS,
+  pendingTimeoutMs = PENDING_TIMEOUT_MS,
   now = Date.now,
   logger = console,
 } = {}) {
@@ -88,6 +92,11 @@ function createAppTips({
 
   function prune() {
     const cutoff = now() - ttlMs;
+    const staleCutoff = now() - pendingTimeoutMs;
+    for (const entry of requests.values()) {
+      // Keep fingerprint, attempted and uncertainKeys; the retry goes through the durable lookup.
+      if (entry.state === "pending" && entry.at < staleCutoff) entry.state = "failed";
+    }
     for (const [key, entry] of requests) {
       if (entry.state !== "pending" && entry.at < cutoff) requests.delete(key);
     }
@@ -105,6 +114,9 @@ function createAppTips({
       if (!id || staff.is_active === false || !publicName(staff) || seen.has(id)) continue;
       seen.set(id, staff);
     }
+    // index.js listActiveStaff answers [] on a database error, and the guild always has staff:
+    // an empty list is an outage, never a definite "this companion cannot be tipped".
+    if (!seen.size) throw new Error("staff list empty");
     return seen;
   }
 
@@ -270,90 +282,110 @@ function createAppTips({
       return result;
     };
 
-    let staff;
-    try {
-      staff = await activeStaff();
-    } catch (error) {
-      logger.error("[APP 打賞] 讀取陪陪清單失敗", error?.message || error);
-      return settle("failed", { status: 503, body: { error: UNAVAILABLE } });
-    }
-    if (checked.allocations.some(allocation => !staff.has(allocation.staffId))) {
-      return settle("failed", { status: 400, body: { error: "選擇的陪陪目前無法接受打賞" } });
-    }
-    const allocations = buildTipAllocations({ allocations: checked.allocations });
-    const total = allocations.reduce((sum, allocation) => sum + allocation.amount, 0);
-    if (allocations.length !== checked.allocations.length || !(total > 0)) {
-      return settle("failed", { status: 400, body: { error: "打賞金額必須大於 0" } });
-    }
-
     const paidGroups = []; // { index, operationKey, item, amount, staffIds, payment, fresh }
     const preExisting = new Set();
     let currentKey = null;
-    let payment;
-    try {
-      payment = await payTipAllocations({
-        operationKey,
-        heartFlowId: null,
-        guildId,
-        tipperId,
-        allocations,
-        channelId,
-        beforeGroup: async group => {
-          let row;
-          try {
-            row = await lookupTipOperation(group.operationKey);
-          } catch (error) {
-            throw new StopError("lookup", error);
-          }
-          if (row) {
-            if (!storedMatchesGroup(row, tipperId, group)) throw new StopError("changed");
-            // Paid earlier. Still notify if this process saw that earlier attempt end uncertain.
-            if (!entry.uncertainKeys.has(group.operationKey)) preExisting.add(group.operationKey);
-          }
-          currentKey = group.operationKey;
-          entry.attempted = true;
-        },
-        afterGroup: async group => {
-          paidGroups.push({ ...group, fresh: !preExisting.has(group.operationKey) });
-          entry.uncertainKeys.delete(group.operationKey);
-          currentKey = null;
-        },
-      });
-    } catch (error) {
-      const fresh = paidGroups.filter(group => group.fresh);
-      startNotifications({ groups: fresh, allocations, tipperId, broadcast: checked.broadcast, operationKey });
-      if (!isDefinite(error)) {
-        if (currentKey) entry.uncertainKeys.add(currentKey);
-        logger.error("[APP 打賞] 錢包扣款結果不明", error?.message || error);
-        return settle("failed", { status: 503, body: { error: UNCERTAIN, uncertain: true } });
-      }
-      if (paidGroups.length) {
-        if (!(error instanceof StopError)) logger.error("[APP 打賞] 部分打賞失敗", error?.message || error);
-        const partial = { error: PARTIAL, partial: true, paidStaffIds: [...new Set(paidGroups.flatMap(group => group.staffIds.map(String)))] };
-        if (String(error?.message || "").includes("餘額不足")) Object.assign(partial, parseBalanceError(error.message));
-        return settle("failed", { status: 502, body: partial });
-      }
-      return settle("failed", nothingChargedError(error));
-    }
-
-    const fresh = paidGroups.filter(group => group.fresh);
-    const result = {
-      status: 200,
-      body: {
-        ok: true,
-        total,
-        balance: payment?.balance == null ? null : Number(payment.balance),
-        orders: (payment?.orders || []).map(order => ({
-          id: order.id,
-          staffId: String(order.assigned_player || order.discord_id || ""),
-          amount: Number(order.final_price ?? order.price ?? 0),
-        })),
-      },
+    let allocations = [];
+    let notified = false;
+    // Notifications for the groups this request newly paid; at most once per request.
+    const notifyFresh = () => {
+      if (notified) return;
+      notified = true;
+      startNotifications({ groups: paidGroups.filter(group => group.fresh), allocations, tipperId, broadcast: checked.broadcast, operationKey });
     };
-    settle("done", result);
-    // Every group already existed before this request: a replay, so no notifications.
-    startNotifications({ groups: fresh, allocations, tipperId, broadcast: checked.broadcast, operationKey });
-    return result;
+    // Once a group RPC may have run for this request, a failure is never "nothing charged".
+    const unavailable = () => (entry.attempted
+      ? { status: 503, body: { error: UNCERTAIN, uncertain: true } }
+      : { status: 503, body: { error: UNAVAILABLE } });
+
+    // Everything after the claim: any unexpected throw resolves the entry (never left pending).
+    try {
+      let staff;
+      try {
+        staff = await activeStaff();
+      } catch (error) {
+        logger.error("[APP 打賞] 讀取陪陪清單失敗", error?.message || error);
+        return settle("failed", unavailable());
+      }
+      if (checked.allocations.some(allocation => !staff.has(allocation.staffId))) {
+        return settle("failed", { status: 400, body: { error: "選擇的陪陪目前無法接受打賞" } });
+      }
+      allocations = buildTipAllocations({ allocations: checked.allocations });
+      const total = allocations.reduce((sum, allocation) => sum + allocation.amount, 0);
+      if (allocations.length !== checked.allocations.length || !(total > 0)) {
+        return settle("failed", { status: 400, body: { error: "打賞金額必須大於 0" } });
+      }
+
+      let payment;
+      try {
+        payment = await payTipAllocations({
+          operationKey,
+          heartFlowId: null,
+          guildId,
+          tipperId,
+          allocations,
+          channelId,
+          beforeGroup: async group => {
+            let row;
+            try {
+              row = await lookupTipOperation(group.operationKey);
+            } catch (error) {
+              throw new StopError("lookup", error);
+            }
+            if (row) {
+              if (!storedMatchesGroup(row, tipperId, group)) throw new StopError("changed");
+              // Paid earlier. Still notify if this process saw that earlier attempt end uncertain.
+              if (!entry.uncertainKeys.has(group.operationKey)) preExisting.add(group.operationKey);
+            }
+            currentKey = group.operationKey;
+            entry.attempted = true;
+          },
+          afterGroup: async group => {
+            paidGroups.push({ ...group, fresh: !preExisting.has(group.operationKey) });
+            entry.uncertainKeys.delete(group.operationKey);
+            currentKey = null;
+          },
+        });
+      } catch (error) {
+        notifyFresh();
+        if (!isDefinite(error)) {
+          if (currentKey) entry.uncertainKeys.add(currentKey);
+          logger.error("[APP 打賞] 錢包扣款結果不明", error?.message || error);
+          return settle("failed", { status: 503, body: { error: UNCERTAIN, uncertain: true } });
+        }
+        if (paidGroups.length) {
+          if (!(error instanceof StopError)) logger.error("[APP 打賞] 部分打賞失敗", error?.message || error);
+          const partial = { error: PARTIAL, partial: true, paidStaffIds: [...new Set(paidGroups.flatMap(group => group.staffIds.map(String)))] };
+          if (String(error?.message || "").includes("餘額不足")) Object.assign(partial, parseBalanceError(error.message));
+          return settle("failed", { status: 502, body: partial });
+        }
+        return settle("failed", nothingChargedError(error));
+      }
+
+      const result = {
+        status: 200,
+        body: {
+          ok: true,
+          total,
+          balance: payment?.balance == null ? null : Number(payment.balance),
+          orders: (Array.isArray(payment?.orders) ? payment.orders : []).filter(Boolean).map(order => ({
+            id: order.id,
+            staffId: String(order.assigned_player || order.discord_id || ""),
+            amount: Number(order.final_price ?? order.price ?? 0),
+          })),
+        },
+      };
+      settle("done", result);
+      // Every group already existed before this request: a replay, so no notifications.
+      notifyFresh();
+      return result;
+    } catch (error) {
+      // Unexpected (a bug or a malformed payment result), possibly after a charge.
+      logger.error("[APP 打賞] 打賞處理發生未預期錯誤", error?.stack || error?.message || error);
+      try { notifyFresh(); } catch (notifyError) { logger.error("[APP 打賞] 付款後通知失敗", notifyError?.message || notifyError); }
+      if (currentKey) entry.uncertainKeys.add(currentKey);
+      return settle("failed", { status: 503, body: { error: UNCERTAIN, uncertain: true } });
+    }
   }
 
   return {
@@ -364,4 +396,4 @@ function createAppTips({
   };
 }
 
-module.exports = { createAppTips, TIP_ORDER_PANEL_CHANNEL_ID, parseBalanceError };
+module.exports = { createAppTips, TIP_ORDER_PANEL_CHANNEL_ID, parseBalanceError, UNCERTAIN };
