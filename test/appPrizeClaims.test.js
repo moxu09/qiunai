@@ -286,7 +286,8 @@ test("modal submit DB failure answers in Chinese without claiming success", asyn
 
 test("index.js routes prize-claim interactions first and passes prizeClaims to the app bridge", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
-  const dispatch = source.indexOf("client.on(Events.InteractionCreate");
+  const dispatch = source.indexOf("async function handleInteractionEvent(interaction)");
+  assert.ok(source.includes("client.on(Events.InteractionCreate, handleInteractionEvent);"));
   const routed = source.indexOf("if (await appPrizeClaims.handleInteraction(interaction)) return;", dispatch);
   const complaint = source.indexOf("if (await complaintSystem.handleInteraction(interaction)) return;", dispatch);
   assert.ok(routed > dispatch && routed < complaint);

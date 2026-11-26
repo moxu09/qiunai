@@ -8510,7 +8510,8 @@ client.once(Events.ClientReady, async () => {
     createOrder:payload=>dispatchSystem.createWebsiteOrder(payload)});
   websiteOrderBridge.start();
   appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN,prizeClaims:appPrizeClaims,wall:appWall,
-    dispatch:require('./utils/appDispatchExtend').createAppDispatchExtend({extend:payload=>dispatchSystem.extendDispatchForApp(payload),errors:dispatchSystem.DISPATCH_EXTEND_ERRORS}),ai:require('./utils/appOrderAssist').createAppOrderAssist(),
+    dispatch:require('./utils/appDispatchExtend').createAppDispatchExtend({extend:payload=>dispatchSystem.extendDispatchForApp(payload),errors:dispatchSystem.DISPATCH_EXTEND_ERRORS}),
+    interactions:require('./utils/appInteractions').createAppInteractions({getClient:()=>client,db:supabase,guildId:process.env.GUILD_ID,route:handleInteractionEvent}),ai:require('./utils/appOrderAssist').createAppOrderAssist(),
     tips:require('./utils/appTips').createAppTips({guildId:process.env.GUILD_ID,listActiveStaff,payTipAllocations:payTipAllocationsWithWalletAtomic,
       countOrderVipSpentOnce,sendTipWorkReports:sendTipWorkReportsSafely,sendTipBroadcast:sendTipBroadcastSafely,
       lookupTipOperation:async key=>{const {data,error}=await supabase.from('tip_payment_operations').select('user_id,result').eq('operation_key',key).maybeSingle();if(error)throw error;return data;}})});
@@ -9045,7 +9046,8 @@ async function getAvailablePlayerOptions(
     }));
 }
 // ===== Interaction Handler =====
-client.on(Events.InteractionCreate, async (interaction) => {
+// The one interaction router: Discord events and APP presses (/app/interactions, utils/appInteractions) both run it.
+async function handleInteractionEvent(interaction) {
   if (!handledInteractionIds.add(interaction.id)) {
     console.warn(`[INTERACTION] 已略過重複事件 ${interaction.id}`);
     return;
@@ -10008,7 +10010,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       })
       .catch(() => {});
   }
-});
+}
+client.on(Events.InteractionCreate, handleInteractionEvent);
 async function replySuccess(interaction, message) {
   if (interaction.replied || interaction.deferred) {
     return interaction

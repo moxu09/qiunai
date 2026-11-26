@@ -5,6 +5,8 @@
 // /app/prize-claims/notify (see appPrizeClaims) DMs the allowlisted staff about an in-app prize claim.
 // /app/wall/notify (see appWall) DMs them a new 留言牆 post with 「通過／不通過」 buttons.
 // /app/orders/extend-dispatch (see appDispatchExtend) is the customer-owned 「延長 5 分鐘（限一次）」 of 選人時間.
+// /app/interactions (see appInteractions) presses a customer-allowlisted button／select／modal that 小奈 really showed
+// in the customer's own order channel, through the same router as Discord; GET /app/interactions/allowlist lists them.
 const { authenticate } = require("./websiteOrderBridge");
 const { UNCERTAIN: TIPS_UNCERTAIN } = require("./appTips");
 
@@ -190,7 +192,9 @@ function estimatePrice(P, body) {
   return { amount: result.total, unit: result.unit, unitPrice: result.unitPrice };
 }
 
-function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai, tips, prizeClaims, wall, dispatch } = {}) {
+const INTERACTIONS_UNAVAILABLE = "暫時無法完成這個操作，請稍後再試或到 Discord 操作";
+
+function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai, tips, prizeClaims, wall, dispatch, interactions } = {}) {
   async function handleHttpRequest(request, response) {
     if (!request.url?.startsWith("/app/")) return false;
     const reply = (status, data) => {
@@ -291,6 +295,24 @@ function createAppBridge({ token, pricing = require("../config/selfServicePricin
         return reply(result.status, result.body);
       } catch {
         return reply(503, { ok: false, code: "unavailable", error: EXTEND_UNAVAILABLE });
+      }
+    }
+    if (path === "/app/interactions/allowlist") {
+      if (request.method !== "GET") return reply(405, { error: "method_not_allowed" });
+      if (!interactions) return reply(503, { ok: false, code: "unavailable", error: INTERACTIONS_UNAVAILABLE });
+      return reply(200, interactions.allowlist());
+    }
+    if (path === "/app/interactions") {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      if (!interactions) return reply(503, { ok: false, code: "unavailable", error: INTERACTIONS_UNAVAILABLE });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { ok: false, code: "invalid_request", error: "請求格式錯誤" }); }
+      try {
+        const result = await interactions.handle(value);
+        return reply(result.status, result.body);
+      } catch {
+        // A handler may already have acted (e.g. charged the wallet): never claim nothing happened.
+        return reply(503, { ok: false, code: "unavailable", uncertain: true, error: INTERACTIONS_UNAVAILABLE });
       }
     }
     return reply(404, { error: "not_found" });
