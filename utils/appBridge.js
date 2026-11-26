@@ -5,6 +5,7 @@
 // /app/prize-claims/notify (see appPrizeClaims) DMs the allowlisted staff about an in-app prize claim.
 // /app/wall/notify (see appWall) DMs them a new 留言牆 post with 「通過／不通過」 buttons.
 // /app/orders/extend-dispatch (see appDispatchExtend) is the customer-owned 「延長 5 分鐘（限一次）」 of 選人時間.
+// /app/orders/delete (see appOrderDelete) is the customer-owned 「按錯了，刪除這張單」 of an unpaid 官網／APP 需求單.
 // /app/interactions (see appInteractions) presses a customer-allowlisted button／select／modal that 小奈 really showed
 // in the customer's own order channel, through the same router as Discord; GET /app/interactions/allowlist lists them.
 const { authenticate } = require("./websiteOrderBridge");
@@ -20,6 +21,7 @@ const TIPS_UNAVAILABLE = "打賞暫時無法完成，請稍後再試";
 const PRIZE_CLAIMS_UNAVAILABLE = "領獎通知暫時無法送出，請稍後再試";
 const WALL_UNAVAILABLE = "留言審核通知暫時無法送出，請稍後再試";
 const { UNAVAILABLE: EXTEND_UNAVAILABLE } = require("./appDispatchExtend");
+const { UNAVAILABLE: DELETE_UNAVAILABLE } = require("./appOrderDelete");
 
 // APP game labels (mobile Order.tsx GAMES + /app/pricing labels) -> bridge game keys.
 const APP_GAME_ALIASES = [
@@ -194,7 +196,7 @@ function estimatePrice(P, body) {
 
 const INTERACTIONS_UNAVAILABLE = "暫時無法完成這個操作，請稍後再試或到 Discord 操作";
 
-function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai, tips, prizeClaims, wall, dispatch, interactions } = {}) {
+function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai, tips, prizeClaims, wall, dispatch, orderDelete, interactions } = {}) {
   async function handleHttpRequest(request, response) {
     if (!request.url?.startsWith("/app/")) return false;
     const reply = (status, data) => {
@@ -295,6 +297,18 @@ function createAppBridge({ token, pricing = require("../config/selfServicePricin
         return reply(result.status, result.body);
       } catch {
         return reply(503, { ok: false, code: "unavailable", error: EXTEND_UNAVAILABLE });
+      }
+    }
+    if (path === "/app/orders/delete") {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      if (!orderDelete) return reply(503, { ok: false, code: "unavailable", error: DELETE_UNAVAILABLE });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { ok: false, code: "invalid_request", error: "請求格式錯誤" }); }
+      try {
+        const result = await orderDelete.deleteOrder(value);
+        return reply(result.status, result.body);
+      } catch {
+        return reply(503, { ok: false, code: "unavailable", error: DELETE_UNAVAILABLE });
       }
     }
     if (path === "/app/interactions/allowlist") {

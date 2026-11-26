@@ -29,6 +29,8 @@ const CUSTOMER_INTERACTIONS = Object.freeze([
   ["prefix", "manual_quote_dispatch_", ["button"], "確認報價並正式派單", "下單者確認自己的報價；處理函式檢查下單者、未付款、quote_status=quoted"],
   ["prefix", "manual_quote_cancel_", ["button"], "取消人工報價訂單", "下單者取消自己尚未付款的報價單"],
   ["prefix", "quote_confirm_price_", ["button"], "確認報價金額", "下單者確認自己的報價（quoted→price_confirmed）"],
+  ["prefix", "website_order_delete_confirm_", ["button"], "確定刪除官網／APP 需求單與頻道", "與 /app/orders/delete 同一核心：下單者本人、未付款、沒有付款單、尚未選付款方式"],
+  ["prefix", "website_order_delete_", ["button"], "按錯了，刪除頻道（只回覆確認畫面）", "只回覆「確定刪除？」私人確認，不改資料"],
   // ---- 自助下單：報價、選人、延長、取消 ----
   ["prefix", "self_service_quote_yes_", ["button"], "確認自助報價並開始派單", "下單者確認自己的報價"],
   ["prefix", "self_service_quote_no_", ["button"], "報價頁按錯了取消訂單", "只取消未付款、仍在 quoted 的自己的單"],

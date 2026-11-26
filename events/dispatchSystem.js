@@ -8092,6 +8092,278 @@ async function cancelManualQuotedOrder(interaction) {
   return interaction.editReply({ content: "✅ 已取消尚未派出的訂單。" });
 }
 
+// ===== 官網／APP 需求單：付款前「按錯了，刪除頻道」（Discord 按鈕與 APP 共用同一個核心） =====
+// 只限 service_flow_key website:… 的需求單；未付款、沒有任何可能被繳費的付款單、尚未選付款方式才可刪除。
+const WEBSITE_DELETE_PREFIX = "website_order_delete_";
+const WEBSITE_DELETE_CONFIRM_PREFIX = "website_order_delete_confirm_";
+const CUSTOMER_DELETE_QUOTE_STATUSES = Object.freeze([
+  "waiting_quote", "quoted",
+  "manual_dispatching", "manual_choosing_open", "manual_choosing_players", "manual_confirming_players",
+  "price_confirmed", "waiting_payment",
+]);
+const CUSTOMER_DELETE_STATUSES = Object.freeze(["waiting_quote", "quoted", "pending", "waiting_payment"]);
+const CUSTOMER_DELETED_STATUSES = Object.freeze(["cancelled", "canceled", "abandoned"]);
+// 付款單只有這些狀態才確定不會再被繳費；其餘（pending／processing／paid／refunding…）一律擋下。
+const SETTLED_UNPAID_SLIP_STATUSES = Object.freeze(["failed", "expired", "cancelled", "canceled"]);
+const PAID_SLIP_STATUSES = Object.freeze(["paid", "completed", "refunding", "refunded"]);
+const UNSELECTED_PAYMENT_METHODS = Object.freeze(["", "未選擇"]);
+const customerDeletedOrders = new Set();
+
+const CUSTOMER_DELETE_ERRORS = Object.freeze({
+  not_found: { status: 404, message: "找不到這張需求單，可能已經刪除" },
+  not_owner: { status: 403, message: "只有下單者本人可以刪除這張需求單" },
+  paid: { status: 409, message: "這張訂單已經付款，不能直接刪除；如需取消請聯絡客服" },
+  has_payment: { status: 409, message: "這張訂單已經開了付款單，請先到付款畫面取消那筆付款，或聯絡客服" },
+  not_deletable: { status: 409, message: "這張訂單已進入下一階段，不能直接刪除；如需取消請聯絡客服" },
+  unavailable: { status: 503, message: "暫時無法刪除，請稍後再試或聯絡客服" },
+});
+
+function isWebsiteRequestOrder(order) {
+  return String(order?.service_flow_key || "").startsWith("website:");
+}
+
+function buildWebsiteOrderDeleteRow(orderId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`${WEBSITE_DELETE_PREFIX}${orderId}`)
+      .setLabel("按錯了，刪除頻道")
+      .setStyle(ButtonStyle.Danger),
+  );
+}
+
+async function findOrderPaymentSlips(orderId) {
+  const slips = [];
+  for (const table of ["ecpay_service_payments", "jkopay_service_payments"]) {
+    for (const byMetadata of [false, true]) {
+      let query = supabase.from(table).select("id,status")
+        .eq("organization_code", "qiunai").eq("payment_kind", "order");
+      // 一般付款單 entity_key = 訂單 id；合併付款單則記在 metadata.orderIds。
+      query = byMetadata
+        ? query.contains("metadata", { orderIds: [String(orderId)] })
+        : query.eq("entity_key", String(orderId));
+      const { data, error } = await query.limit(20);
+      if (error) throw error;
+      for (const row of data || []) slips.push({ table, ...row });
+    }
+  }
+  return slips;
+}
+
+function getSlipBlockCode(slips) {
+  const open = (slips || []).filter((slip) =>
+    !SETTLED_UNPAID_SLIP_STATUSES.includes(String(slip.status || "").toLowerCase()));
+  if (!open.length) return null;
+  return open.some((slip) => PAID_SLIP_STATUSES.includes(String(slip.status || "").toLowerCase()))
+    ? "paid"
+    : "has_payment";
+}
+
+function isCustomerDeletedOrder(order) {
+  return !order?.paid && (order?.is_deleted === true || CUSTOMER_DELETED_STATUSES.includes(order?.status));
+}
+
+// 只讀檢查（Discord 第一顆按鈕先用這個提示，真正刪除時核心會再檢查一次並用條件更新）。
+async function evaluateCustomerDelete(order, actorAllowed) {
+  if (!order || !isWebsiteRequestOrder(order)) return { ok: false, code: "not_found" };
+  if (!actorAllowed) return { ok: false, code: "not_owner" };
+  if (order.paid || order.paid_at) return { ok: false, code: "paid" };
+  const slipCode = getSlipBlockCode(await findOrderPaymentSlips(order.id));
+  if (slipCode) return { ok: false, code: slipCode };
+  if (isCustomerDeletedOrder(order)) return { ok: true, alreadyDeleted: true };
+  if (!UNSELECTED_PAYMENT_METHODS.includes(String(order.payment_method ?? "").trim())) {
+    // 已選匯款／刷卡／扣薪等方式：客人可能已在外部付款，交給客服核帳。
+    return { ok: false, code: "has_payment" };
+  }
+  if (!CUSTOMER_DELETE_QUOTE_STATUSES.includes(order.quote_status) || !CUSTOMER_DELETE_STATUSES.includes(order.status)) {
+    return { ok: false, code: "not_deletable" };
+  }
+  return { ok: true };
+}
+
+async function closeDispatchThreadForCustomerDelete(order) {
+  const claimMessage = await findSelfServiceClaimMessage(order.id, order).catch((error) => {
+    console.error("[客人刪除需求單] 查詢派單討論串失敗", error);
+    return null;
+  });
+  await claimMessage?.edit({ components: [] }).catch(() => null);
+  const thread = claimMessage?.channel?.isThread?.() ? claimMessage.channel : null;
+  pendingSelfServiceOrders.delete(`claimMessage:${order.id}`);
+  if (!thread) return null;
+  const companionIds = [...new Set(String(order.preferred_player || "")
+    .split(",").map((id) => id.trim()).filter((id) => /^\d{16,22}$/.test(id)))];
+  await thread.send({
+    content: `${companionIds.map((id) => `<@${id}>`).join(" ")} 客人已取消訂單 ${order.order_no || order.id}（付款前刪除需求單），這張單不用再接了，謝謝。`.trim(),
+    allowedMentions: { users: companionIds, parse: [] },
+  }).catch((error) => console.error("[客人刪除需求單] 討論串通知失敗", error));
+  const renamed = await renameClaimThread(thread, getDispatchResultThreadName(order, false), "客人付款前取消訂單", order.id);
+  await (renamed || thread).setArchived?.(true, "客人已取消訂單").catch(() => null);
+  return renamed || thread;
+}
+
+async function deleteCustomerOrderChannel(order) {
+  const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
+  if (!orderChannel) return false;
+  // 只刪官網／APP 建立的專屬需求頻道（topic 含 website_request:），避免誤刪其他頻道。
+  if (!String(orderChannel.topic || "").includes("website_request:")) {
+    await orderChannel.send?.({ content: "客人已取消這張需求單。", allowedMentions: { parse: [] } }).catch(() => null);
+    return false;
+  }
+  await orderChannel.send?.({
+    content: "客人已刪除這張需求單，頻道將於 10 秒後刪除。",
+    allowedMentions: { parse: [] },
+  }).catch(() => null);
+  scheduleChannelDeletion({ channelId: order.channel_id, channel: orderChannel, client }, 10_000, {
+    reason: `客人付款前刪除需求單 ${order.order_no || order.id}`,
+  });
+  return true;
+}
+
+// 單一來源：Discord「按錯了，刪除頻道」與 APP /app/orders/delete 都走這裡。
+async function customerDeleteUnpaidOrder(orderId, actorId, { actorIsStaff = false } = {}) {
+  const { data: order, error } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+  if (error) throw error;
+  const actorAllowed = Boolean(order) && (actorIsStaff || String(order.customer_id || "") === String(actorId || ""));
+  const check = await evaluateCustomerDelete(order, actorAllowed);
+  if (!check.ok) return check;
+  const key = String(order.id);
+  if (check.alreadyDeleted) {
+    if (!customerDeletedOrders.has(key)) {
+      customerDeletedOrders.add(key);
+      await deleteCustomerOrderChannel(order).catch((channelError) =>
+        console.error("[客人刪除需求單] 刪除頻道失敗", channelError));
+    }
+    return { ok: true, alreadyDeleted: true };
+  }
+
+  const { data: cancelled, error: cancelError } = await supabase
+    .from("play_orders")
+    .update({ status: "cancelled", quote_status: "cancelled", updated_at: new Date().toISOString() })
+    .eq("id", order.id)
+    .eq("paid", false)
+    .eq("quote_status", order.quote_status)
+    .eq("status", order.status)
+    .select()
+    .maybeSingle();
+  if (cancelError) throw cancelError;
+  if (!cancelled) {
+    const { data: latest } = await supabase.from("play_orders").select("*").eq("id", order.id).maybeSingle();
+    if (latest && isCustomerDeletedOrder(latest)) return { ok: true, alreadyDeleted: true };
+    if (latest?.paid) return { ok: false, code: "paid" };
+    return { ok: false, code: "not_deletable" };
+  }
+
+  // 條件更新後再查一次付款單：若同時有人建立付款單，立刻還原，不能讓仍可繳費的單被取消。
+  const lateSlipCode = getSlipBlockCode(await findOrderPaymentSlips(order.id).catch(() => [{ status: "unknown" }]));
+  if (lateSlipCode) {
+    await supabase.from("play_orders")
+      .update({ status: order.status, quote_status: order.quote_status, updated_at: new Date().toISOString() })
+      .eq("id", order.id).eq("paid", false).eq("quote_status", "cancelled");
+    console.error(`[客人刪除需求單] 訂單 ${order.order_no || order.id} 刪除時同時出現付款單，已還原狀態`);
+    const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
+    const staffRole = /^\d{16,22}$/.test(String(process.env.STAFF_ROLE || "")) ? `<@&${process.env.STAFF_ROLE}> ` : "";
+    await orderChannel?.send?.({
+      content: `${staffRole}訂單 ${order.order_no || order.id} 刪除時同時建立了付款單，系統已保留訂單，請客服核對付款狀態。`,
+      allowedMentions: { roles: staffRole ? [process.env.STAFF_ROLE] : [] },
+    }).catch(() => null);
+    return { ok: false, code: lateSlipCode };
+  }
+
+  customerDeletedOrders.add(key);
+  const timer = selfServiceDispatchTimers.get(key);
+  if (timer) clearTimeout(timer);
+  selfServiceDispatchTimers.delete(key);
+  pendingSelfServiceOrders.delete(`candidatePrompt:${order.id}`);
+  pendingSelfServiceOrders.delete(`selection:${order.id}`);
+  console.log(`[客人刪除需求單] 訂單 ${order.order_no || order.id}（${order.quote_status}）由 ${actorIsStaff ? "客服" : "下單者"} ${actorId} 於付款前刪除`);
+
+  if (!["waiting_quote", "quoted"].includes(order.quote_status)) {
+    await closeDispatchThreadForCustomerDelete(order).catch((threadError) =>
+      console.error("[客人刪除需求單] 關閉派單討論串失敗", threadError));
+  }
+  await deleteCustomerOrderChannel(order).catch((channelError) =>
+    console.error("[客人刪除需求單] 刪除頻道失敗", channelError));
+  return { ok: true };
+}
+
+// APP（經 app-api 簽章呼叫）：只有 customer_id 本人可刪；與 Discord 按鈕共用同一個訂單鎖。
+async function deleteWebsiteOrderForApp({ userId, orderId, orderNo } = {}) {
+  let query = supabase.from("play_orders").select("*");
+  query = orderId ? query.eq("id", orderId) : query.eq("order_no", orderNo);
+  const { data: order, error } = await query.maybeSingle();
+  if (error) throw error;
+  if (!order || !isWebsiteRequestOrder(order)) return { ok: false, code: "not_found" };
+  if (String(order.customer_id || "") !== String(userId || "")) return { ok: false, code: "not_owner" };
+  return guardOrderOperation(String(order.id),
+    () => customerDeleteUnpaidOrder(order.id, userId),
+    async () => ({ ok: false, code: "unavailable" }));
+}
+
+// 付款開始後移除需求單上的刪除按鈕（按了也會被核心擋下，這裡只是讓畫面不再顯示）。
+async function retireWebsiteOrderDeleteButton(order) {
+  if (!isWebsiteRequestOrder(order)) return;
+  const channel = await client.channels.fetch(order.channel_id).catch(() => null);
+  if (!channel?.isTextBased?.()) return;
+  const customId = `${WEBSITE_DELETE_PREFIX}${order.id}`;
+  const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
+  for (const message of messages?.values?.() || []) {
+    if (message.author?.id && client.user?.id && message.author.id !== client.user.id) continue;
+    if (!message.components?.some((row) => row.components?.some((c) => c.customId === customId))) continue;
+    const rows = message.components
+      .filter((row) => !row.components?.some((c) => c.customId === customId))
+      .map((row) => ActionRowBuilder.from(row));
+    await message.edit({ components: rows }).catch(() => null);
+  }
+}
+
+function customerDeleteReply(code) {
+  return `❌ ${(CUSTOMER_DELETE_ERRORS[code] || CUSTOMER_DELETE_ERRORS.unavailable).message}。`;
+}
+
+async function promptWebsiteOrderDelete(interaction) {
+  await deferReplyOnce(interaction);
+  const orderId = interaction.customId.slice(WEBSITE_DELETE_PREFIX.length);
+  const { data: order } = await supabase.from("play_orders").select("*").eq("id", orderId).maybeSingle();
+  let check;
+  try {
+    check = await evaluateCustomerDelete(order, Boolean(order) && canCustomerOrStaffSubmit(interaction, order.customer_id));
+  } catch (error) {
+    console.error("[客人刪除需求單] 檢查失敗", error);
+    return interaction.editReply({ content: customerDeleteReply("unavailable") });
+  }
+  if (!check.ok) {
+    if (order && ["paid", "has_payment", "not_deletable"].includes(check.code)) {
+      await retireWebsiteOrderDeleteButton(order).catch(() => null);
+    }
+    return interaction.editReply({ content: customerDeleteReply(check.code) });
+  }
+  return interaction.editReply({
+    content: "確定刪除？刪除後頻道會一起刪掉，無法復原。",
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${WEBSITE_DELETE_CONFIRM_PREFIX}${order.id}`)
+        .setLabel("確定刪除")
+        .setStyle(ButtonStyle.Danger),
+    )],
+  });
+}
+
+async function confirmWebsiteOrderDelete(interaction) {
+  await deferReplyOnce(interaction);
+  const orderId = interaction.customId.slice(WEBSITE_DELETE_CONFIRM_PREFIX.length);
+  const { data: order } = await supabase.from("play_orders").select("customer_id").eq("id", orderId).maybeSingle();
+  const actorIsStaff = Boolean(order) && interaction.user.id !== String(order.customer_id || "") &&
+    canCustomerOrStaffSubmit(interaction, order.customer_id);
+  let result;
+  try {
+    result = await customerDeleteUnpaidOrder(orderId, interaction.user.id, { actorIsStaff });
+  } catch (error) {
+    console.error("[客人刪除需求單] 刪除失敗", error);
+    return interaction.editReply({ content: customerDeleteReply("unavailable"), components: [] });
+  }
+  if (!result.ok) return interaction.editReply({ content: customerDeleteReply(result.code), components: [] });
+  return interaction.editReply({ content: "✅ 已刪除這張需求單，頻道將於 10 秒後刪除。", components: [] });
+}
+
 async function createWaitingQuoteOrder(interaction, flowId, pending) {
   const orderNo = await getNextPlayOrderNumber();
   const guildId = pending.guildId || interaction.guildId || interaction.guild?.id || process.env.GUILD_ID;
@@ -8347,6 +8619,7 @@ async function createWebsiteOrder(payload) {
   const hasRequirement=messages.some(m=>m.author.id===client.user.id&&m.embeds?.some(e=>e.footer?.text===marker));
   if(!hasRequirement)await channel.send({content:`<@${payload.userId}> ${sourceLabel}已帶入，請在此與客服確認報價。`,allowedMentions:{users:[payload.userId],parse:[]},
     nonce:require('node:crypto').createHash('sha256').update(marker).digest('hex').slice(0,24),enforceNonce:true,
+    components:order.paid?[]:[buildWebsiteOrderDeleteRow(order.id)],
     embeds:[new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle(fromApp?'📱 APP 需求單':'🌐 官網需求單').setFooter({text:marker})
       .setDescription(`需求編號：${payload.requestId}\n稱呼：${r.customerName}\n遊戲：${r.game}\n需求：${r.serviceType}\n平台／模式：${r.platform||'未填'}\n要打段位／地圖：${r.targetRank||'未填'}\n陪陪段位：${r.companionRank||'不指定'}\n時數／局數：${r.quantity}\n陪陪人數：${r.companionCount}\n備註：${r.notes||'無'}\n\n尚未報價、尚未付款，確認後才會進入後續流程。`)]});
   const hasQuote=messages.some(m=>m.author.id===client.user.id&&m.components?.some(row=>row.components.some(c=>c.customId===`staff_quote_price_${order.id}`)));
@@ -9041,6 +9314,9 @@ async function handleQuotePaymentMethodSelect(interaction) {
         `目前付款方式：${formatWalletPaymentName(order.payment_method || "已付款")}`,
     });
   }
+  if (CUSTOMER_DELETED_STATUSES.includes(order.status) || order.quote_status === "cancelled") {
+    return interaction.editReply({ content: "❌ 這張訂單已取消，不能付款。" });
+  }
   if (paymentMethod === "綠界支付" && selection?.requestedMethod &&
       !isGeneralEcpayAmountAllowed(selection.requestedMethod, Number(order.final_price || order.price || 0))) {
     return interaction.editReply({ content: "❌ 此訂單金額不適用所選的綠界付款方式，請改選其他方式。" });
@@ -9109,6 +9385,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
         .eq("id", order.id)
         .eq("paid", false);
       if (updateError) throw updateError;
+      await retireWebsiteOrderDeleteButton(order).catch(() => null);
       if (ecpay && selection?.requestedMethod) {
         payment.onlyMethod = selection.requestedMethod;
         if (selection.requestedMethod !== "CARD") payment.preferredMethod = selection.requestedMethod;
@@ -9192,6 +9469,7 @@ async function handleQuotePaymentMethodSelect(interaction) {
       content: "❌ 更新付款方式失敗",
     });
   }
+  await retireWebsiteOrderDeleteButton(updatedOrder).catch(() => null);
 
   if (isCardPayment(paymentMethod)) {
     await sendCardPaymentInfo(interaction.channel);
@@ -15578,6 +15856,14 @@ async function handleDispatchInteractionInner(interaction) {
       await cancelManualQuotedOrder(interaction);
       return true;
     }
+    if (interaction.customId.startsWith(WEBSITE_DELETE_CONFIRM_PREFIX)) {
+      await confirmWebsiteOrderDelete(interaction);
+      return true;
+    }
+    if (interaction.customId.startsWith(WEBSITE_DELETE_PREFIX)) {
+      await promptWebsiteOrderDelete(interaction);
+      return true;
+    }
     if (interaction.customId.startsWith("self_selection_extend_")) {
       await extendSelfServiceSelectionTime(interaction);
       return true;
@@ -16435,6 +16721,11 @@ module.exports = {
   extendSelfServiceSelectionDeadline,
   extendDispatchForApp,
   DISPATCH_EXTEND_ERRORS,
+  customerDeleteUnpaidOrder,
+  deleteWebsiteOrderForApp,
+  retireWebsiteOrderDeleteButton,
+  CUSTOMER_DELETE_ERRORS,
+  CUSTOMER_DELETE_QUOTE_STATUSES,
   getSelfServiceThreadName,
   getDispatchResultThreadName,
   getPendingClaimThreadOrderId,
