@@ -168,6 +168,11 @@ const MANUAL_DISPATCH_CHANNEL_IDS = Object.freeze({
   voice: "1548954895133053018",
   other: "1546519988901257246",
 });
+const manualDispatchChannels = require("../utils/manualDispatchChannels").createManualDispatchChannels({
+  defaults: MANUAL_DISPATCH_CHANNEL_IDS,
+  guildId: process.env.GUILD_ID || "1206138511535898654",
+  getClient: () => client,
+});
 const JKOPAY_TOPUP_CHANNEL_ID =
   process.env.JKOPAY_TOPUP_CHANNEL_ID || "1546726352240115712";
 const SELF_SERVICE_DISPATCH_TIMEOUT_MS = 15 * 60 * 1000;
@@ -1802,15 +1807,15 @@ function isClaimDispatchOrder(order) {
 function getManualDispatchChannelId(order) {
   const game = String(order?.game || "").toLowerCase();
   const text = `${game} ${order?.service || ""} ${order?.order_item || ""}`;
-  if (game === "valorant" || text.includes("特戰")) return MANUAL_DISPATCH_CHANNEL_IDS.valorant;
-  if (game === "delta" || text.includes("三角洲")) return MANUAL_DISPATCH_CHANNEL_IDS.delta;
+  if (game === "valorant" || text.includes("特戰")) return manualDispatchChannels.ids.valorant;
+  if (game === "delta" || text.includes("三角洲")) return manualDispatchChannels.ids.delta;
   if (game === "lol" || game === "tft" || text.includes("英雄聯盟") || text.includes("ARAM") || text.includes("聯盟戰棋")) {
-    return MANUAL_DISPATCH_CHANNEL_IDS.lol;
+    return manualDispatchChannels.ids.lol;
   }
-  if (/apex/i.test(text)) return MANUAL_DISPATCH_CHANNEL_IDS.apex;
-  if (text.includes("傳說對決")) return MANUAL_DISPATCH_CHANNEL_IDS.arena;
-  if (game === "voice_chat" || text.includes("語音聊天") || text.includes("陪聊")) return MANUAL_DISPATCH_CHANNEL_IDS.voice;
-  return MANUAL_DISPATCH_CHANNEL_IDS.other;
+  if (/apex/i.test(text)) return manualDispatchChannels.ids.apex;
+  if (text.includes("傳說對決")) return manualDispatchChannels.ids.arena;
+  if (game === "voice_chat" || text.includes("語音聊天") || text.includes("陪聊")) return manualDispatchChannels.ids.voice;
+  return manualDispatchChannels.ids.other;
 }
 
 function getClaimDispatchChannelId(order) {
@@ -1853,9 +1858,15 @@ function getSelfServiceRankFieldLabel(order) {
 
 async function sendSelfServiceDispatch(order) {
   if (isInChannelOrder(order)) throw new Error("原頻道加單不可送到外部派單區。");
-  const dispatchChannel = await client.channels
+  if (isManualDispatchOrder(order)) await manualDispatchChannels.ensure();
+  let dispatchChannel = await client.channels
     .fetch(getClaimDispatchChannelId(order))
     .catch(() => null);
+  if (!dispatchChannel?.isTextBased() && isManualDispatchOrder(order)) {
+    // 頻道可能被重建過：依名稱重新找一次再送。
+    await manualDispatchChannels.ensure({ force: true });
+    dispatchChannel = await client.channels.fetch(getClaimDispatchChannelId(order)).catch(() => null);
+  }
   if (!dispatchChannel?.isTextBased()) {
     throw new Error(`找不到${isManualDispatchOrder(order) ? "遊戲對應" : "自助"}派單頻道，請聯繫管理員。`);
   }
@@ -4154,6 +4165,8 @@ function setup(supabaseInstance, clientInstance, helpers = {}) {
   pendingPanelOrders = createServiceFlowStore(supabase, { organization: "qiunai_order_panels" });
   client = clientInstance;
   paymentHelpers = helpers;
+  if (client?.isReady?.()) void manualDispatchChannels.ensure();
+  else client?.once?.("ready", () => void manualDispatchChannels.ensure());
   workReportSystem = createWorkReportSystem({
     supabase,
     client,
@@ -8237,6 +8250,8 @@ async function createWebsiteOrder(payload) {
   catch(error){if(Number(error.code)===10007)return null;throw error;}
   if(member.pending)return null;
   const marker=`website_request:${payload.requestId}`;
+  const fromApp=payload.source==='app';
+  const sourceLabel=fromApp?'APP 需求':'官網需求';
   const channels=await guild.channels.fetch();
   let channel=channels.find(c=>c?.type===ChannelType.GuildText&&c.topic===`owner:${payload.userId};${marker}`);
   if(!channel){
@@ -8245,7 +8260,7 @@ async function createWebsiteOrder(payload) {
     const staffIds=[process.env.STAFF_ROLE,process.env.STAFF_ROLE_ID,process.env.CUSTOMER_SERVICE_ROLE_ID,
       '1210642900355125288',...parseRoleIds(process.env.STAFF_ROLE_IDS),...parseRoleIds(process.env.CUSTOMER_SERVICE_ROLE_IDS)].filter(id=>id&&guild.roles.cache.has(id));
     if(!staffIds.length)throw Error('未設定有效客服身分組，暫不建立官網私人頻道');
-    channel=await guild.channels.create({name:`官網需求-${payload.requestId.slice(-8).toLowerCase()}`,type:ChannelType.GuildText,parent,
+    channel=await guild.channels.create({name:`${String(payload.requirements.game||sourceLabel).replace(/\s+/g,'')}-${member.user.username}`.slice(0,90),type:ChannelType.GuildText,parent,
       topic:`owner:${payload.userId};${marker}`,
       permissionOverwrites:[{id:guild.id,deny:['ViewChannel']},
         {id:client.user.id,allow:['ViewChannel','SendMessages','ReadMessageHistory','ManageChannels']},
@@ -8253,7 +8268,7 @@ async function createWebsiteOrder(payload) {
         ...[...new Set(staffIds)].map(id=>({id,allow:['ViewChannel','SendMessages','ReadMessageHistory','AttachFiles']}))]});
   }
   const r=payload.requirements;
-  const note=`官網需求 ${payload.requestId}\n平台／模式：${r.platform||'未填'}\n要打段位／地圖：${r.targetRank||'未填'}\n陪陪段位：${r.companionRank||'不指定'}\n備註：${r.notes||'無'} [MANUAL_DISPATCH]`;
+  const note=`${sourceLabel} ${payload.requestId}\n平台／模式：${r.platform||'未填'}\n要打段位／地圖：${r.targetRank||'未填'}\n陪陪段位：${r.companionRank||'不指定'}\n備註：${r.notes||'無'} [MANUAL_DISPATCH]`;
   const key=`website:${payload.requestId}`;
   const existing=await supabase.from('play_orders').select('*').eq('guild_id',guild.id).eq('service_flow_key',key).maybeSingle();
   if(existing.error)throw existing.error;
@@ -8270,9 +8285,9 @@ async function createWebsiteOrder(payload) {
   if(order.customer_id!==payload.userId||order.channel_id!==channel.id)throw Error('官網需求對應的訂單或頻道不一致');
   const messages=await channel.messages.fetch({limit:100});
   const hasRequirement=messages.some(m=>m.author.id===client.user.id&&m.embeds?.some(e=>e.footer?.text===marker));
-  if(!hasRequirement)await channel.send({content:`<@${payload.userId}> 官網需求已帶入，請在此與客服確認報價。`,allowedMentions:{users:[payload.userId],parse:[]},
+  if(!hasRequirement)await channel.send({content:`<@${payload.userId}> ${sourceLabel}已帶入，請在此與客服確認報價。`,allowedMentions:{users:[payload.userId],parse:[]},
     nonce:require('node:crypto').createHash('sha256').update(marker).digest('hex').slice(0,24),enforceNonce:true,
-    embeds:[new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle('🌐 官網需求單').setFooter({text:marker})
+    embeds:[new EmbedBuilder().setColor(QIUNAI_WATER_BLUE).setTitle(fromApp?'📱 APP 需求單':'🌐 官網需求單').setFooter({text:marker})
       .setDescription(`需求編號：${payload.requestId}\n稱呼：${r.customerName}\n遊戲：${r.game}\n需求：${r.serviceType}\n平台／模式：${r.platform||'未填'}\n要打段位／地圖：${r.targetRank||'未填'}\n陪陪段位：${r.companionRank||'不指定'}\n時數／局數：${r.quantity}\n陪陪人數：${r.companionCount}\n備註：${r.notes||'無'}\n\n尚未報價、尚未付款，確認後才會進入後續流程。`)]});
   const hasQuote=messages.some(m=>m.author.id===client.user.id&&m.components?.some(row=>row.components.some(c=>c.customId===`staff_quote_price_${order.id}`)));
   if(!hasQuote&&order.status==='waiting_quote')await sendStaffQuotePanel(order,{nonce:require('node:crypto').createHash('sha256').update(marker+':quote').digest('hex').slice(0,24)});

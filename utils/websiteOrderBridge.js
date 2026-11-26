@@ -1,7 +1,8 @@
 const {createHmac,timingSafeEqual}=require('node:crypto');
 const ORG='qiunai:website-orders',GUILD='1206138511535898654';
 function validPayload(value){
-  if(!value||!/^WEB-[0-9A-F]{8}-[0-9A-F]{4}-4[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/.test(value.requestId)||!/^\d{17,20}$/.test(value.userId))return false;
+  if(!value||(value.source!==undefined&&value.source!=='app'&&value.source!=='website'))return false;
+  if(!/^WEB-[0-9A-F]{8}-[0-9A-F]{4}-4[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/.test(value.requestId)||!/^\d{17,20}$/.test(value.userId))return false;
   const r=value.requirements;
   return r&&['customerName','game','serviceType','quantity'].every(k=>typeof r[k]==='string'&&r[k].trim()&&r[k].length<=80)&&
     ['platform','targetRank','companionRank'].every(k=>typeof r[k]==='string'&&r[k].length<=80)&&
