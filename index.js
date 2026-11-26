@@ -8509,7 +8509,8 @@ client.once(Events.ClientReady, async () => {
   websiteOrderBridge=require('./utils/websiteOrderBridge').createWebsiteOrderBridge({db:supabase,client,token:process.env.TOKEN,
     createOrder:payload=>dispatchSystem.createWebsiteOrder(payload)});
   websiteOrderBridge.start();
-  appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN,prizeClaims:appPrizeClaims,wall:appWall,ai:require('./utils/appOrderAssist').createAppOrderAssist(),
+  appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN,prizeClaims:appPrizeClaims,wall:appWall,
+    dispatch:require('./utils/appDispatchExtend').createAppDispatchExtend({extend:payload=>dispatchSystem.extendDispatchForApp(payload),errors:dispatchSystem.DISPATCH_EXTEND_ERRORS}),ai:require('./utils/appOrderAssist').createAppOrderAssist(),
     tips:require('./utils/appTips').createAppTips({guildId:process.env.GUILD_ID,listActiveStaff,payTipAllocations:payTipAllocationsWithWalletAtomic,
       countOrderVipSpentOnce,sendTipWorkReports:sendTipWorkReportsSafely,sendTipBroadcast:sendTipBroadcastSafely,
       lookupTipOperation:async key=>{const {data,error}=await supabase.from('tip_payment_operations').select('user_id,result').eq('operation_key',key).maybeSingle();if(error)throw error;return data;}})});

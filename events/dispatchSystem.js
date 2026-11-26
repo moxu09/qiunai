@@ -2593,34 +2593,53 @@ async function showSelfServiceCandidatePrompt(order, playerIds, messageId = null
   if (message) pendingSelfServiceOrders.set(promptKey, { messageId: message.id });
 }
 
-async function extendSelfServiceSelectionTime(interaction) {
-  await deferReplyOnce(interaction);
-  const order = await getSelfServiceOrder(interaction, "self_selection_extend_");
-  if (!order) {
-    return interaction.editReply({ content: "❌ 找不到這張自助訂單。" });
+// 延長選人時間的共用核心：Discord 按鈕與 APP（/app/orders/extend-dispatch）都走這裡，檢查與副作用完全一致。
+// 回傳 { ok: true, deadlineAt, order } 或 { ok: false, code }；code 為穩定錯誤碼（見 DISPATCH_EXTEND_ERRORS）。
+const DISPATCH_EXTEND_ERRORS = {
+  not_found: { status: 404, message: "找不到這張訂單" },
+  no_deadline: { status: 409, message: "這張人工訂單沒有選人期限，不需要延長時間" },
+  not_owner: { status: 403, message: "只有原下單者可以延長選人時間" },
+  not_dispatching: { status: 409, message: "這張訂單目前不在派單或選人階段" },
+  already_extended: { status: 409, message: "每筆訂單最多只能延長一次 5 分鐘" },
+  in_progress: { status: 409, message: "正在延長選人時間，請勿重複操作" },
+  expired: { status: 409, message: "選人時間已結束，這張訂單已自動棄單" },
+  stale: { status: 409, message: "訂單狀態已更新，請重新整理後再試" },
+};
+
+async function disableDispatchExtendButtons(order, skipMessageId = null) {
+  const customId = `self_selection_extend_${order.id}`;
+  const orderChannel = await client.channels.fetch(order.channel_id).catch(() => null);
+  if (!orderChannel?.isTextBased?.()) return;
+  const messages = await orderChannel.messages.fetch({ limit: 50 }).catch(() => null);
+  for (const message of messages?.values?.() || []) {
+    if (skipMessageId && message.id === skipMessageId) continue;
+    const hasButton = message.components?.some((row) =>
+      row.components?.some((component) => component.customId === customId && !component.disabled));
+    if (!hasButton) continue;
+    const components = message.components.map((row) => ActionRowBuilder.from(row));
+    for (const row of components) {
+      for (const component of row.components) {
+        if (component.data?.custom_id === customId) component.setDisabled(true);
+      }
+    }
+    await message.edit({ components }).catch(() => null);
   }
-  if (isUntimedManualDispatchOrder(order)) {
-    return interaction.editReply({ content: "這張人工訂單沒有選人期限，不需要延長時間；請直接在原訂單選人。" });
-  }
-  if (!canCustomerOrStaffSubmit(interaction, order.customer_id)) {
-    return interaction.editReply({ content: "❌ 只有原下單者可以延長選人時間。" });
-  }
-  if (!getClaimDispatchStatuses(order).includes(order.quote_status)) {
-    return interaction.editReply({ content: "❌ 這張訂單目前不在派單或選人階段。" });
-  }
-  if (hasExtendedDispatchTime(order)) {
-    return interaction.editReply({ content: "❌ 每筆訂單最多只能延長一次 5 分鐘。" });
-  }
-  if (processingSelfServiceSelectionExtensions.has(order.id)) {
-    return interaction.editReply({ content: "⚠️ 正在延長選人時間，請勿重複點擊。" });
-  }
+}
+
+async function extendClaimDispatchSelection(order, { actorAllowed, triggerMessage = null } = {}) {
+  if (!order || !isClaimDispatchOrder(order)) return { ok: false, code: "not_found" };
+  if (isUntimedManualDispatchOrder(order)) return { ok: false, code: "no_deadline" };
+  if (!actorAllowed) return { ok: false, code: "not_owner" };
+  if (!getClaimDispatchStatuses(order).includes(order.quote_status)) return { ok: false, code: "not_dispatching" };
+  if (hasExtendedDispatchTime(order)) return { ok: false, code: "already_extended" };
+  if (processingSelfServiceSelectionExtensions.has(order.id)) return { ok: false, code: "in_progress" };
 
   processingSelfServiceSelectionExtensions.add(order.id);
   try {
     if (Date.now() >= getSelfServiceSelectionDeadline(order)) {
       const dispatchMessage = await findSelfServiceClaimMessage(order.id);
       await failSelfServiceDispatch(order.id, dispatchMessage?.id);
-      return interaction.editReply({ content: "❌ 選人時間已結束，這張訂單已自動棄單。" });
+      return { ok: false, code: "expired" };
     }
 
     const extension = extendSelfServiceSelectionDeadline(order);
@@ -2636,11 +2655,7 @@ async function extendSelfServiceSelectionTime(interaction) {
       .eq("updated_at", order.updated_at)
       .select()
       .maybeSingle();
-    if (error || !updatedOrder) {
-      return interaction.editReply({
-        content: "⚠️ 訂單狀態已更新，請重新查看最新的選人訊息。",
-      });
-    }
+    if (error || !updatedOrder) return { ok: false, code: "stale" };
 
     const dispatchMessage = await findSelfServiceClaimMessage(order.id);
     scheduleSelfServiceDispatchTimeout(updatedOrder, dispatchMessage?.id);
@@ -2651,17 +2666,21 @@ async function extendSelfServiceSelectionTime(interaction) {
     if (playerIds.length >= Number(updatedOrder.player_count || 1)) {
       await showSelfServiceCandidatePrompt(updatedOrder, playerIds);
     }
-    if (interaction.message?.components?.length) {
-      const components = interaction.message.components.map((row) =>
+    if (triggerMessage?.components?.length) {
+      const triggerCustomId = `self_selection_extend_${order.id}`;
+      const components = triggerMessage.components.map((row) =>
         ActionRowBuilder.from(row),
       );
       for (const row of components) {
         for (const component of row.components) {
-          if (component.data?.custom_id === interaction.customId) component.setDisabled(true);
+          if (component.data?.custom_id === triggerCustomId) component.setDisabled(true);
         }
       }
-      await interaction.message.edit({ components }).catch(() => null);
+      await triggerMessage.edit({ components }).catch(() => null);
     }
+    await disableDispatchExtendButtons(updatedOrder, triggerMessage?.id).catch((disableError) =>
+      console.error("[自助派單延長選人] 停用延長按鈕失敗", disableError),
+    );
 
     const deadlineUnix = Math.floor(extension.deadlineAt / 1000);
     const notifyChannel = dispatchMessage?.channel?.isThread?.()
@@ -2675,12 +2694,50 @@ async function extendSelfServiceSelectionTime(interaction) {
     }).catch((notifyError) =>
       console.error("[自助派單延長選人] 派單區通知失敗", notifyError),
     );
-    return interaction.editReply({
-      content: `✅ 已延長 5 分鐘；新的選人截止時間為 <t:${deadlineUnix}:F>（<t:${deadlineUnix}:R>）。`,
-    });
+    return { ok: true, deadlineAt: extension.deadlineAt, order: updatedOrder };
   } finally {
     processingSelfServiceSelectionExtensions.delete(order.id);
   }
+}
+
+const DISCORD_EXTEND_REPLIES = {
+  not_found: "❌ 找不到這張自助訂單。",
+  no_deadline: "這張人工訂單沒有選人期限，不需要延長時間；請直接在原訂單選人。",
+  not_owner: "❌ 只有原下單者可以延長選人時間。",
+  not_dispatching: "❌ 這張訂單目前不在派單或選人階段。",
+  already_extended: "❌ 每筆訂單最多只能延長一次 5 分鐘。",
+  in_progress: "⚠️ 正在延長選人時間，請勿重複點擊。",
+  expired: "❌ 選人時間已結束，這張訂單已自動棄單。",
+  stale: "⚠️ 訂單狀態已更新，請重新查看最新的選人訊息。",
+};
+
+async function extendSelfServiceSelectionTime(interaction) {
+  await deferReplyOnce(interaction);
+  const order = await getSelfServiceOrder(interaction, "self_selection_extend_");
+  const result = await extendClaimDispatchSelection(order, {
+    actorAllowed: Boolean(order) && canCustomerOrStaffSubmit(interaction, order.customer_id),
+    triggerMessage: interaction.message,
+  });
+  if (!result.ok) {
+    return interaction.editReply({ content: DISCORD_EXTEND_REPLIES[result.code] || "❌ 延長選人時間失敗。" });
+  }
+  const deadlineUnix = Math.floor(result.deadlineAt / 1000);
+  return interaction.editReply({
+    content: `✅ 已延長 5 分鐘；新的選人截止時間為 <t:${deadlineUnix}:F>（<t:${deadlineUnix}:R>）。`,
+  });
+}
+
+// APP（經 app-api 簽章呼叫）：只有訂單的 customer_id 本人可延長；staff 不走這條。
+async function extendDispatchForApp({ userId, orderId, orderNo } = {}) {
+  let query = supabase.from("play_orders").select("*");
+  query = orderId ? query.eq("id", orderId) : query.eq("order_no", orderNo);
+  const { data: order, error } = await query.maybeSingle();
+  if (error) throw error;
+  if (!order || !isClaimDispatchOrder(order) || order.is_deleted === true) return { ok: false, code: "not_found" };
+  const result = await extendClaimDispatchSelection(order, {
+    actorAllowed: String(order.customer_id || "") === String(userId || ""),
+  });
+  return result.ok ? { ok: true, deadlineAt: result.deadlineAt } : result;
 }
 
 async function closeSelfServiceClaimButton(orderId) {
@@ -16375,6 +16432,8 @@ module.exports = {
   getSelfServiceSelectionDeadline,
   isClaimSelectionExpired,
   extendSelfServiceSelectionDeadline,
+  extendDispatchForApp,
+  DISPATCH_EXTEND_ERRORS,
   getSelfServiceThreadName,
   getDispatchResultThreadName,
   getPendingClaimThreadOrderId,
