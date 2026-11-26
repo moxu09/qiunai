@@ -8841,16 +8841,17 @@ async function handleQuoteUseCoupon(interaction) {
     });
   }
 
+  // 原價與目前金額不一致（例如已改價）時不能再套券，請客服重新報價。
+  if (order.original_price != null && Number(order.price) !== Number(order.original_price)) {
+    return interaction.editReply({ content: "❌ 訂單原價與目前金額不一致，請客服重新報價後使用優惠券。", components: [] });
+  }
+
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`quote_select_coupon_${order.id}`)
     .setPlaceholder("請選擇要使用的優惠券")
     .addOptions(
       coupons.slice(0, 25).map((coupon) => {
-        if (order.original_price != null && Number(order.price) !== originalPrice) {
-    return interaction.editReply({ content: "❌ 訂單原價與目前金額不一致，請客服重新報價後使用優惠券。" });
-  }
-
-  const discount = getCouponDiscount(coupon.item_name);
+        const discount = getCouponDiscount(coupon.item_name);
 
         return {
           label: String(coupon.item_name).slice(0, 100),
