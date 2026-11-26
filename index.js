@@ -8510,6 +8510,7 @@ client.once(Events.ClientReady, async () => {
     createOrder:payload=>dispatchSystem.createWebsiteOrder(payload)});
   websiteOrderBridge.start();
   appBridge=require('./utils/appBridge').createAppBridge({token:process.env.TOKEN,prizeClaims:appPrizeClaims,wall:appWall,
+    directIssue:require('./utils/appDirectIssue').createAppDirectIssue({db:supabase}),
     dispatch:require('./utils/appDispatchExtend').createAppDispatchExtend({extend:payload=>dispatchSystem.extendDispatchForApp(payload),errors:dispatchSystem.DISPATCH_EXTEND_ERRORS}),
     orderDelete:require('./utils/appOrderDelete').createAppOrderDelete({remove:payload=>dispatchSystem.deleteWebsiteOrderForApp(payload),errors:dispatchSystem.CUSTOMER_DELETE_ERRORS}),
     interactions:require('./utils/appInteractions').createAppInteractions({getClient:()=>client,db:supabase,guildId:process.env.GUILD_ID,route:handleInteractionEvent}),ai:require('./utils/appOrderAssist').createAppOrderAssist(),

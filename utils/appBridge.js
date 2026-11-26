@@ -196,7 +196,7 @@ function estimatePrice(P, body) {
 
 const INTERACTIONS_UNAVAILABLE = "暫時無法完成這個操作，請稍後再試或到 Discord 操作";
 
-function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai, tips, prizeClaims, wall, dispatch, orderDelete, interactions } = {}) {
+function createAppBridge({ token, pricing = require("../config/selfServicePricing"), ai, tips, prizeClaims, wall, dispatch, orderDelete, interactions, directIssue } = {}) {
   async function handleHttpRequest(request, response) {
     if (!request.url?.startsWith("/app/")) return false;
     const reply = (status, data) => {
@@ -309,6 +309,18 @@ function createAppBridge({ token, pricing = require("../config/selfServicePricin
         return reply(result.status, result.body);
       } catch {
         return reply(503, { ok: false, code: "unavailable", error: DELETE_UNAVAILABLE });
+      }
+    }
+    if (path === "/app/ecpay/direct-issue") {
+      if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
+      if (!directIssue) return reply(503, { error: "付款服務尚未完成設定" });
+      let value;
+      try { value = JSON.parse(body); } catch { return reply(400, { error: "缺少付款資料" }); }
+      try {
+        const result = await directIssue.issue(value);
+        return reply(result.status, result.body);
+      } catch {
+        return reply(503, { error: "付款服務暫時無法使用" });
       }
     }
     if (path === "/app/interactions/allowlist") {
