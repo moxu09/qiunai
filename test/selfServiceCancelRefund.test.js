@@ -73,14 +73,17 @@ test("指令建立的人工派單逾時不論是否湊足陪陪都保留老闆�
   assert.match(source, /channel_id: pending\.channelId \|\| interaction\.channel\.id/);
 });
 
-test("新增訂單的派單與選人不受 15 分鐘限制，原單可直接繼續", () => {
+test("新增訂單的派單與選人不受 15 分鐘限制；官網／APP 需求有 15 分鐘期限", () => {
   const past = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   assert.equal(isClaimSelectionExpired({ note: `[MANUAL_DISPATCH] [DISPATCH_AT:${past}]` }), false);
   assert.equal(isClaimSelectionExpired({ note: `[SELF_SERVICE] [DISPATCH_AT:${past}]` }), true);
   const source = fs.readFileSync(path.join(__dirname, "..", "events", "dispatchSystem.js"), "utf8");
-  assert.match(source, /if \(isManualDispatchOrder\(sourceOrder\)\) return;/);
-  assert.match(source, /if \(isManualDispatchOrder\(order\)\) return;\s*const remaining =/);
-  assert.match(source, /const timedOrders = \(orders \|\| \[\]\)\.filter\(\(order\) => !isManualDispatchOrder\(order\)\);/);
+  // 官網／APP 需求（website:…）跟自助派單一樣有 15 分鐘期限；客服 /新增訂單 仍不設時限。
+  assert.equal(isClaimSelectionExpired({ note: `[MANUAL_DISPATCH] [DISPATCH_AT:${past}]`, service_flow_key: "website:WEB-X" }), true);
+  assert.equal(isClaimSelectionExpired({ note: `[MANUAL_DISPATCH] [DISPATCH_AT:${new Date().toISOString()}]`, service_flow_key: "website:WEB-X" }), false);
+  assert.match(source, /if \(isUntimedManualDispatchOrder\(sourceOrder\)\) return;/);
+  assert.match(source, /if \(isUntimedManualDispatchOrder\(order\)\) return;\s*const remaining =/);
+  assert.match(source, /const timedOrders = \(orders \|\| \[\]\)\.filter\(\(order\) => !isUntimedManualDispatchOrder\(order\)\);/);
   for (const handler of ["claimSelfServiceOrder", "selectSelfServicePlayerNumbers", "confirmSelfServicePlayers", "reselectSelfServicePlayers"]) {
     const body = source.split(`async function ${handler}(`)[1].split("\nasync function ")[0];
     assert.match(body, /isClaimSelectionExpired\(order\)/, `${handler} 必須只限制自助單`);
