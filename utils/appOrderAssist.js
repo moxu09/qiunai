@@ -14,6 +14,9 @@ const MAX_OPTION_CHARS = 40;
 const MAX_NOTES_CHARS = 200;
 const MAX_PREFERRED_CHARS = 60;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const MAX_TIP_ASD = 100_000;
+const MAX_TIP_MESSAGE_CHARS = 100;
+const INTENTS = ["order", "tip", "both"];
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 // Order.tsx platform select; used when the APP does not send options.platforms.
 const DEFAULT_PLATFORMS = ["PC", "手機", "主機", "不限"];
@@ -31,8 +34,15 @@ const nullableInteger = { type: ["integer", "null"] };
 const RESPONSE_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["fields", "confidence"],
+  required: ["intent", "fields", "confidence", "tip"],
   properties: {
+    intent: { type: "string", enum: INTENTS },
+    tip: {
+      type: "object",
+      additionalProperties: false,
+      required: ["companion", "amount", "message", "confidence"],
+      properties: { companion: nullableString, amount: nullableInteger, message: nullableString, confidence: { type: "number" } },
+    },
     fields: {
       type: "object",
       additionalProperties: false,
@@ -61,6 +71,9 @@ const INSTRUCTIONS = [
   "amount 是時數或局數，companionCount 是陪陪人數，都必須是 1 到 20 的整數，看不出來就填 null。",
   "preferred 是客人指定的陪陪名稱（若有 options.companions 就只能從中選），notes 是其他補充需求，200 字以內，繁體中文；都沒有就填 null。",
   "confidence 為每個欄位 0 到 1 的把握程度；填 null 的欄位給 0。",
+  "intent：客人只想下單填 order；只想打賞（送禮、斗內、贊助、打賞、請陪陪喝飲料等）填 tip；同一句同時要下單又要打賞填 both。",
+  "tip 只描述打賞：companion 是要打賞的陪陪（若有 options.companions 就只能從中原樣選一個，叫暱稱、少打字或錯字時選最像的那位；有多位或不確定就填 null）；amount 是客人說的打賞 ASD 數量（國字數字也要換成阿拉伯數字，例如「五百」→500、「兩千」→2000，1 到 100000 的整數，沒說就填 null）；message 是客人想對陪陪說的話，100 字以內，沒有就填 null；confidence 是整個 tip 的把握程度 0 到 1。",
+  "intent 為 order 時 tip 全部填 null、confidence 給 0；intent 為 tip 時 fields 全部填 null（traits 空陣列）。打賞的陪陪不要同時填進 preferred，除非客人也指定他陪玩。",
 ].join("\n");
 
 class RequestError extends Error {}
@@ -159,7 +172,24 @@ function sanitize(result, options) {
   const confidence = {};
   for (const field of FIELD_NAMES) confidence[field] = isEmpty(fields[field]) ? 0 : clampConfidence(rawConfidence[field]);
   const ordered = Object.fromEntries(FIELD_NAMES.map(name => [name, fields[name]]));
-  return { fields: ordered, confidence };
+  return { intent: sanitizeIntent(result), fields: ordered, confidence, tip: sanitizeTip(result, options) };
+}
+
+function sanitizeIntent(result) {
+  return INTENTS.includes(result?.intent) ? result.intent : "order";
+}
+
+// Tip suggestion only: the APP still asks the customer to pick gifts and confirm; nothing is charged here.
+function sanitizeTip(result, options) {
+  const none = { companion: "", amount: null, message: "", confidence: 0 };
+  if (sanitizeIntent(result) === "order") return none;
+  const raw = isPlainObject(result?.tip) ? result.tip : {};
+  const name = typeof raw.companion === "string" ? singleLine(raw.companion, MAX_PREFERRED_CHARS) : "";
+  const companion = options.companions.length && !options.companions.includes(name) ? "" : name;
+  const amount = typeof raw.amount === "number" && Number.isInteger(raw.amount) && raw.amount >= 1 && raw.amount <= MAX_TIP_ASD ? raw.amount : null;
+  const message = typeof raw.message === "string" ? singleLine(raw.message, MAX_TIP_MESSAGE_CHARS) : "";
+  if (!companion && amount === null && !message) return none;
+  return { companion, amount, message, confidence: clampConfidence(raw.confidence) };
 }
 
 function getOutputText(payload) {
@@ -246,7 +276,7 @@ function createAppOrderAssist({
     }
     const parsed = sanitize(result, input.options);
     const filled = FIELD_NAMES.filter(name => !isEmpty(parsed.fields[name]));
-    logger.info("[APP AI] parse-order ok", { filled, image: Boolean(input.image) });
+    logger.info("[APP AI] parse-order ok", { intent: parsed.intent, filled, image: Boolean(input.image) });
     return { status: 200, body: parsed };
   }
 
