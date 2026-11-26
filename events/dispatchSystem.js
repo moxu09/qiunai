@@ -167,7 +167,9 @@ const MANUAL_DISPATCH_CHANNEL_IDS = Object.freeze({
   arena: "1548732212491587634",
   voice: "1548954895133053018",
   other: "1546519988901257246",
+  mixed: "1546519988901257246",
 });
+const { dispatchKeyForOrder } = require("../utils/manualDispatchChannels");
 const manualDispatchChannels = require("../utils/manualDispatchChannels").createManualDispatchChannels({
   defaults: MANUAL_DISPATCH_CHANNEL_IDS,
   guildId: process.env.GUILD_ID || "1206138511535898654",
@@ -1191,7 +1193,7 @@ function getSelfServiceDispatchRoleIds(order) {
   } else if (service.includes("Steam")) {
     serviceRoleIds = [...parseRoleIds(process.env.STEAM_ROLE_ID)];
   } else if (service.includes("三角洲")) {
-    const mobile = service.includes("手機");
+    const mobile = service.includes("手機") || /平台／模式：手機/.test(String(order.note || ""));
     if (service.includes("娛樂")) serviceRoleIds = [mobile ? "1536365672429518848" : "1212483869593567292"];
     else if (service.includes("保底") || service.includes("猛攻")) serviceRoleIds = [mobile ? "1536365686912458752" : "1253665064477786174"];
     else serviceRoleIds = [mobile ? "1536365687511978154" : "1229372574950100992"];
@@ -1805,17 +1807,8 @@ function isClaimDispatchOrder(order) {
 }
 
 function getManualDispatchChannelId(order) {
-  const game = String(order?.game || "").toLowerCase();
-  const text = `${game} ${order?.service || ""} ${order?.order_item || ""}`;
-  if (game === "valorant" || text.includes("特戰")) return manualDispatchChannels.ids.valorant;
-  if (game === "delta" || text.includes("三角洲")) return manualDispatchChannels.ids.delta;
-  if (game === "lol" || game === "tft" || text.includes("英雄聯盟") || text.includes("ARAM") || text.includes("聯盟戰棋")) {
-    return manualDispatchChannels.ids.lol;
-  }
-  if (/apex/i.test(text)) return manualDispatchChannels.ids.apex;
-  if (text.includes("傳說對決")) return manualDispatchChannels.ids.arena;
-  if (game === "voice_chat" || text.includes("語音聊天") || text.includes("陪聊")) return manualDispatchChannels.ids.voice;
-  return manualDispatchChannels.ids.other;
+  const ids = manualDispatchChannels.ids;
+  return ids[dispatchKeyForOrder(order)] || ids.other;
 }
 
 function getClaimDispatchChannelId(order) {

@@ -53,3 +53,19 @@ test("website bridge accepts optional source app/website only", () => {
   assert.equal(validPayload({ ...base, source: "app" }), true);
   assert.equal(validPayload({ ...base, source: "evil" }), false);
 });
+
+test("every APP order game goes to its dispatch channel", () => {
+  const { dispatchKeyForOrder } = require("../utils/manualDispatchChannels");
+  const expected = {
+    "特戰英豪": "valorant", "三角洲行動": "delta", "Apex 英雄": "apex", "英雄聯盟": "lol", "ARAM": "lol",
+    "聯盟戰棋": "lol", "傳說對決": "arena", "Steam 多人": "mixed", "PUBG M": "mixed", "第五人格": "mixed",
+    "王者榮耀": "mixed", "Minecraft": "mixed", "語音聊天": "voice", "追劇陪伴": "other", "其他項目": "other",
+  };
+  for (const [game, key] of Object.entries(expected)) {
+    assert.equal(dispatchKeyForOrder({ game, service: `${game}｜娛樂`, order_item: "娛樂" }), key, game);
+  }
+  // lol / arena have no channel of their own → 派單｜綜合遊戲
+  const ids = resolveDispatchChannelsByName(channels);
+  assert.equal(ids.lol, "m");
+  assert.equal(ids.arena, "m");
+});

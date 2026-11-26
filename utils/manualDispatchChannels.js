@@ -14,6 +14,24 @@ const KEYWORDS = Object.freeze({
 const FALLBACK_TO_MIXED = new Set(["lol", "arena"]);
 const TEXT_TYPES = new Set([0, 5, "GUILD_TEXT", "GUILD_NEWS"]);
 
+// 有專屬派單頻道以外的「遊戲」都送綜合遊戲；非遊戲（追劇陪伴、其他項目、自填）送其他類。
+const MIXED_GAME_WORDS = ["steam", "pubg", "第五人格", "王者榮耀", "minecraft", "麥塊", "原神", "爐石", "valorant"];
+
+/** Which dispatch channel key an order goes to. */
+function dispatchKeyForOrder(order) {
+  const game = String(order?.game || "").toLowerCase();
+  const text = `${game} ${order?.service || ""} ${order?.order_item || ""}`;
+  const lower = text.toLowerCase();
+  if (game === "valorant" || text.includes("特戰")) return "valorant";
+  if (game === "delta" || text.includes("三角洲")) return "delta";
+  if (game === "lol" || game === "tft" || text.includes("英雄聯盟") || text.includes("ARAM") || text.includes("聯盟戰棋")) return "lol";
+  if (/apex/i.test(text)) return "apex";
+  if (text.includes("傳說對決")) return "arena";
+  if (game === "voice_chat" || text.includes("語音聊天") || text.includes("陪聊")) return "voice";
+  if (MIXED_GAME_WORDS.some((w) => lower.includes(w))) return "mixed";
+  return "other";
+}
+
 function isDispatchChannel(channel) {
   return Boolean(channel) && TEXT_TYPES.has(channel.type) && String(channel.name || "").includes("派單");
 }
@@ -65,4 +83,4 @@ function createManualDispatchChannels({ defaults, guildId, getClient, refreshMs 
   return { ids: current, ensure };
 }
 
-module.exports = { resolveDispatchChannelsByName, createManualDispatchChannels, KEYWORDS };
+module.exports = { resolveDispatchChannelsByName, createManualDispatchChannels, dispatchKeyForOrder, KEYWORDS };
