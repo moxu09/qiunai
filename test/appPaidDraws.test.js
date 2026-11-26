@@ -233,7 +233,9 @@ function tableDb(tables) {
         if (op.startsWith("not.like.")) return r[col] != null && !String(r[col]).startsWith(op.slice(9).replace(/\*$/, ""));
         throw new Error(`unsupported or ${part}`);
       });
-      const rows = () => (tables[table] || []).filter((r) => filters.every(([k, v]) => (Array.isArray(v) ? v.includes(r[k]) : r[k] === v))
+      // PostgREST "col->>key" (JSON text field) is resolved like the database does.
+      const field = (r, k) => (k.includes("->>") ? ((v) => (v == null ? undefined : String(v)))(r[k.split("->>")[0]]?.[k.split("->>")[1]]) : r[k]);
+      const rows = () => (tables[table] || []).filter((r) => filters.every(([k, v]) => (Array.isArray(v) ? v.includes(field(r, k)) : field(r, k) === v))
         && ors.every((expr) => orMatch(r, expr)))
         .sort((a, b) => (orderBy ? String(a[orderBy] ?? "").localeCompare(String(b[orderBy] ?? "")) : 0));
       const q = {
@@ -313,13 +315,19 @@ test("查單選擇：draw 單含超商條碼與深夜 draw 單；其他單維持
     } });
     if (!result.checked) break;
   }
-  // Round 4: 官網查單 route 只接受 draw（其他類型回 409），排程只選 draw 單；儲值等其他單不再排入。
+  // 官網查單 route 只接受 draw 與 APP 直接取號儲值（其他類型回 409）；這裡的儲值單都不是 APP 直接取號單，不排入。
   assert.deepEqual(called.sort(), ["D_DRAW_BAR", "D_DRAW_CVS", "Q_DRAW_BAR", "Q_DRAW_DIRECT"]);
   const paymentQueries = db.queries.filter((q) => q.table === "ecpay_service_payments");
   assert.ok(paymentQueries.length > 0);
   for (const q of paymentQueries) {
-    assert.ok(q.filters.some(([k, v]) => k === "payment_kind" && v === "draw"), "每個排程查詢都限定 draw");
-    assert.deepEqual(q.filters.find(([k]) => k === "organization_code")[1], ["qiunai", "deepnight"]);
+    const kind = q.filters.find(([k]) => k === "payment_kind")[1];
+    if (kind === "draw") assert.deepEqual(q.filters.find(([k]) => k === "organization_code")[1], ["qiunai", "deepnight"]);
+    else {
+      assert.equal(kind, "topup", "排程查詢只有 draw 與 APP 直接取號儲值兩種");
+      assert.equal(q.filters.find(([k]) => k === "organization_code")[1], "qiunai");
+      assert.equal(q.filters.find(([k]) => k === "metadata->>flow")[1], "app");
+      assert.equal(q.filters.find(([k]) => k === "metadata->>issue")[1], "direct");
+    }
   }
 });
 

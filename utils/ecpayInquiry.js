@@ -40,17 +40,46 @@ async function handleEcpayInquiry(interaction, supabase, baseUrl) {
   } catch (error) { await interaction.editReply({ content: `❌ ${error.message}` }); }
   return true;
 }
-// 官網查單 route 只接受 APP 付款抽（payment_kind 'draw'，其他類型回 409），因此排程只選秋奈與深夜的 draw 待繳單
-// （ATM／超商代碼／超商條碼）。手動「我已付款，重新查詢」按鈕（handleEcpayInquiry）不變。
+// 官網查單 route 只接受 APP 付款抽（payment_kind 'draw'）與 APP 超商條碼／超商代碼／ATM 儲值（app-api topupOffline.ts
+// 建立的 topup 直接取號單，見 isAppDirectTopup），其他類型回 409。因此排程只選這兩種待繳單；Discord 儲值、APP 信用卡
+// 儲值、深夜儲值與訂單不排入。手動「我已付款，重新查詢」按鈕（handleEcpayInquiry）不變。
+const APP_TOPUP_TRADE_NO = /^QN[0-9A-F]{18}$/;
+const APP_TOPUP_METHODS = { barcode: 'BARCODE', cvs: 'CVS', atm: 'ATM' };
+// 綠界繳費期限（ExpireDate，台北時間；條碼只有日期＝當日結束）過後再查這麼久即停止排程查單：涵蓋期限前一刻繳費、
+// 通知遺失的情況；之後已付款的單仍可由官網／後台查單補入帳。
+const APP_TOPUP_EXPIRY_GRACE_MS = 24 * 3600000;
+function isAppDirectTopup(p) {
+  const m = p?.metadata;
+  return p?.payment_kind === 'topup' && p.organization_code === 'qiunai' && APP_TOPUP_TRADE_NO.test(String(p.merchant_trade_no || ''))
+    && !!m && typeof m === 'object' && m.flow === 'app' && m.issue === 'direct'
+    && Object.hasOwn(APP_TOPUP_METHODS, m.method) && typeof m.requestId === 'string' && m.requestId.length > 0;
+}
+function expireAtMs(expireDate) {
+  const m = /^(\d{4})\/(\d{2})\/(\d{2})(?: (\d{2}):(\d{2}):(\d{2}))?$/.exec(String(expireDate || ''));
+  if (!m) return NaN;
+  const [, y, mo, d, h = '23', mi = '59', se = '59'] = m;
+  return Date.UTC(+y, +mo - 1, +d, +h - 8, +mi, +se);
+}
+function appTopupExpired(p, now) {
+  const at = expireAtMs(p.raw_result?.ExpireDate);
+  return Number.isFinite(at) && now > at + APP_TOPUP_EXPIRY_GRACE_MS;
+}
 const terminalInquirySkips = new Set();
 async function recoverPendingEcpayPayments(supabase, baseUrl, { now = Date.now(), request = requestEcpayInquiry, terminalSkips = terminalInquirySkips } = {}) {
-  const { data: payments, error } = await supabase.from('ecpay_service_payments')
-    .select('merchant_trade_no,raw_result,metadata,created_at').in('organization_code',['qiunai','deepnight']).eq('payment_kind','draw').eq('status','pending')
-    .gte('created_at', new Date(now - 7 * 86400000).toISOString()).lte('created_at',new Date(now - 60000).toISOString())
-    .order('created_at').limit(500);
-  if (error) throw new Error('無法讀取待付款查單清單');
+  const pendingQuery = () => supabase.from('ecpay_service_payments')
+    .select('merchant_trade_no,organization_code,payment_kind,raw_result,metadata,created_at').eq('status','pending')
+    .gte('created_at', new Date(now - 7 * 86400000).toISOString()).lte('created_at',new Date(now - 60000).toISOString());
+  const [draws, topups] = await Promise.all([
+    pendingQuery().in('organization_code',['qiunai','deepnight']).eq('payment_kind','draw').order('created_at').limit(500),
+    pendingQuery().eq('organization_code','qiunai').eq('payment_kind','topup').eq('metadata->>flow','app').eq('metadata->>issue','direct')
+      .order('created_at').limit(500),
+  ]);
+  if (draws.error || topups.error) throw new Error('無法讀取待付款查單清單');
   const method = p => String(p.raw_result?.PaymentType || p.metadata?.ecpay_direct_method || '').split('_')[0];
-  const candidates = (payments || []).filter(p => !terminalSkips.has(p.merchant_trade_no) && ['ATM','CVS','BARCODE'].includes(method(p)));
+  // 儲值單：只收 APP 直接取號單，且付款方式須與 APP 選的一致；繳費期限過後（含寬限）停止排程。
+  const appTopups = (topups.data || []).filter(p => isAppDirectTopup(p) && method(p) === APP_TOPUP_METHODS[p.metadata.method] && !appTopupExpired(p, now));
+  const candidates = [...(draws.data || []), ...appTopups]
+    .filter(p => !terminalSkips.has(p.merchant_trade_no) && ['ATM','CVS','BARCODE'].includes(method(p)));
   if (!candidates.length) return { checked: 0 };
   const { data: checks, error: checksError } = await supabase.from('ecpay_service_inquiries')
     .select('merchant_trade_no,next_check_at,last_checked_at,review_required,lease_until').in('merchant_trade_no',candidates.map(p=>p.merchant_trade_no));
@@ -68,4 +97,4 @@ async function recoverPendingEcpayPayments(supabase, baseUrl, { now = Date.now()
     return { checked: 1, status: 'unsupported' };
   }
 }
-module.exports = { buildEcpayInquiryRow, requestEcpayInquiry, handleEcpayInquiry, recoverPendingEcpayPayments };
+module.exports = { buildEcpayInquiryRow, requestEcpayInquiry, handleEcpayInquiry, recoverPendingEcpayPayments, isAppDirectTopup, APP_TOPUP_EXPIRY_GRACE_MS };
