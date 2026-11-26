@@ -15,6 +15,12 @@ function authenticate(request,body,token,now=Date.now()){
   const expected=createHmac('sha256',token).update(`qiunai-website-v1\n${timestamp}\n${request.method}\n${request.url}\n${body}`).digest();
   return timingSafeEqual(expected,Buffer.from(signature,'hex'));
 }
+// jsonb 會重排物件鍵的順序，讀回來的 requirements 不能直接跟請求字串比，要用排序後的鍵比較。
+function canonical(value){
+  if(Array.isArray(value))return `[${value.map(canonical).join(',')}]`;
+  if(value&&typeof value==='object')return `{${Object.keys(value).sort().map(k=>`${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
 function createWebsiteOrderBridge({db,client,token,createOrder,logger=console}){
   const table=()=>db.from('bot_service_order_flows');
   const scoped=(q,id)=>q.eq('organization_code',ORG).eq('flow_id',id);
@@ -37,7 +43,7 @@ function createWebsiteOrderBridge({db,client,token,createOrder,logger=console}){
         if(inserted.error&&inserted.error.code!=='23505')throw inserted.error;
         row=await read(value.requestId);
       }
-      if(!row||row.payload.userId!==value.userId||JSON.stringify(row.payload.requirements)!==JSON.stringify(value.requirements))return reply(409,{error:'request_conflict'});
+      if(!row||row.payload.userId!==value.userId||canonical(row.payload.requirements)!==canonical(value.requirements))return reply(409,{error:'request_conflict'});
       return reply(200,responseData(row));
     }
     if(request.method==='GET'){
@@ -81,4 +87,4 @@ function createWebsiteOrderBridge({db,client,token,createOrder,logger=console}){
   }
   return {handleHttpRequest,start,recover};
 }
-module.exports={createWebsiteOrderBridge,authenticate,validPayload};
+module.exports={createWebsiteOrderBridge,authenticate,validPayload,canonical};

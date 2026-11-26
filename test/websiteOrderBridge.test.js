@@ -42,3 +42,11 @@ test('未加入時保留需求，加入後可重試；完成後不重開',async(
  // Production query excludes opened rows; processRow also guards against reopening.
  await bridge.recover();assert.equal(calls,2);
 });
+test('資料庫 jsonb 重排鍵順序時，第一次送出與重試都回 200，不誤判為衝突',async()=>{
+ const db=dbMock();const reorder=o=>Object.fromEntries(Object.entries(o).sort(([a],[b])=>a.length-b.length||a.localeCompare(b)));
+ const from=db.from.bind(db);db.from=()=>{const q=from();const then=q.then.bind(q);q.then=(res,rej)=>then(r=>{for(const row of r.data||[])if(row.payload?.requirements)row.payload.requirements=reorder(row.payload.requirements);return res(r);},rej);return q;};
+ const bridge=createWebsiteOrderBridge({db,client:{},token:'test-key',createOrder:async()=>null});
+ async function post(data){let status;await bridge.handleHttpRequest(request(JSON.stringify(data)),{writeHead(s){status=s;},end(){}});return status;}
+ assert.equal(await post({...value,source:'app'}),200);assert.equal(await post({...value,source:'app'}),200);assert.equal(db.rows.length,1);
+ assert.equal(await post({...value,requirements:{...value.requirements,quantity:'3小時'}}),409);
+});
